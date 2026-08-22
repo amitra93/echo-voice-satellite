@@ -177,3 +177,9 @@ class StreamingEQ:
         samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float32)
         filtered, self._zi = sosfilt(self._sos, samples, zi=self._zi)
         return np.clip(filtered, -32768, 32767).astype(np.int16).tobytes()
+
+    def reset(self) -> None:
+        if self._sos is not None:
+            self._zi = np.zeros((self._sos.shape[0], 2), dtype=np.float64)
+
+    apply = process

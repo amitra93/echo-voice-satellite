@@ -572,6 +572,7 @@ class SendspinDeviceSession:
             on_disconnect=self.on_disconnect,
         )
         self.client_id: str | None = None
+        self._eq: Any | None = None
         self._queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=256)
         self._writer_task: asyncio.Task | None = None
         self.connection_task: asyncio.Task | None = None
@@ -621,6 +622,15 @@ class SendspinDeviceSession:
         # The task is deliberately detached from the SDK callback so the
         # Sendspin reader is never blocked by the legacy player teardown.
         asyncio.create_task(self._stop_legacy_player())
+        try:
+            import em_eq
+            self._eq = em_eq.StreamingEQ(
+                PCM_SAMPLE_RATE,
+                bands=getattr(self.device, "eq_bands", [0.0] * 8),
+                loudness=bool(getattr(self.device, "eq_loudness", False)),
+            )
+        except Exception:
+            self._eq = None
         self._generation = (self._generation + 1) & 0xFFFFFFFF
         if self._generation == 0:
             self._generation = 1
@@ -638,6 +648,8 @@ class SendspinDeviceSession:
     def on_stream_clear(self, roles: list[str] | None) -> None:
         if roles is not None and "player" not in roles:
             return
+        if self._eq is not None:
+            self._eq.reset()
         if self._generation:
             self._sequence = 0
             self._discard_queued()
@@ -646,10 +658,12 @@ class SendspinDeviceSession:
     def on_stream_end(self, roles: list[str] | None) -> None:
         if roles is not None and "player" not in roles:
             return
+        self._eq = None
         if self._generation:
             self._enqueue(self._encode_end(self._generation))
 
     def on_disconnect(self) -> None:
+        self._eq = None
         self._discard_queued()
         self.disconnected.set()
 
@@ -658,6 +672,8 @@ class SendspinDeviceSession:
             self.rejected_frames += 1
             return
         try:
+            if self._eq is not None:
+                data = self._eq.process(data)
             target_us = self.clock_sync.controller_to_device(
                 self.player.compute_play_time(timestamp_us)
             )

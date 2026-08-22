@@ -215,8 +215,8 @@ DEFAULT_DEVICE_CONFIG = {
     # behind it and False is the one that has not been run in months.
     "beamformingEnabled": True,
     "beamAngle":        -1,
-    "eqBands":          [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-    "eqLoudness":       False,
+    "eqBands":          [4.5, 3.0, -0.5, 0.0, 1.5, 1.0, 0.0, 1.5],
+    "eqLoudness":       True,
     # LED ring scene (controller-side rendering — see em_scenes.py).
     # ledListenColor/ledThinkColor only apply when ledScene is "custom".
     "ledScene":         "standard",
