@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import types
 
+import numpy as np
+
 import em_sendspin
 
 
@@ -153,5 +155,34 @@ def test_runtime_connects_with_stable_device_identity(monkeypatch, tmp_path):
         assert client_args[0][:2] == ("echomuse-study", "Study")
         assert runtime.status()["devices"][0]["client_id"] == "echomuse-study"
         await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_sendspin_session_applies_streaming_eq_to_audio():
+    async def run():
+        device = FakeDevice()
+        device.eq_bands = [6.0, 0, 0, 0, 0, 0, 0, 0]  # boost
+        device.eq_loudness = True
+        session = em_sendspin.SendspinDeviceSession("study", "Study", device, FakeClock())
+        sdk = FakeSDK()
+        session.attach(sdk)
+        await session.start()
+        sdk.start(None)
+
+        # 1600 samples of 125Hz sine
+        t = np.arange(1600) / 48000.0
+        pcm = (np.sin(2 * np.pi * 125 * t) * 0.2 * 32767).astype(np.int16).tobytes()
+        sdk.audio(1_000, pcm, "pcm")
+        await asyncio.sleep(0)
+        await session.close()
+
+        assert len(device.frames) == 2  # start + pcm
+        pcm_frame = device.frames[1]
+        assert pcm_frame[0] == 0x07  # pcm frame
+        # Audio payload inside frame (bytes 17:) should have EQ applied and differ from input
+        frame_payload = pcm_frame[17:]
+        assert len(frame_payload) == len(pcm)
+        assert frame_payload != pcm
 
     asyncio.run(run())

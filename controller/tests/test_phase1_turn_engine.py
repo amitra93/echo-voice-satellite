@@ -6,6 +6,8 @@ import time
 import wave
 import types
 
+import numpy as np
+
 import em_turn_engine as engine
 import em_test_audio
 import em_ha_sidechannels
@@ -62,6 +64,22 @@ def test_tts_pcm_is_upsampled_to_48khz_s16():
     output = engine._upsample_24_to_48(payload)
     assert len(output) == 12
     assert engine._upsample_24_to_48(b"") == b""
+
+
+def test_upsample_24_to_48_preserves_energy_and_bounds():
+    # 24kHz sine wave at 1kHz
+    sr = 24000
+    t = np.arange(2400) / sr  # 100ms
+    sine_24k = (np.sin(2 * np.pi * 1000 * t) * 0.5 * 32767).astype(np.int16).tobytes()
+    out_48k = engine._upsample_24_to_48(sine_24k)
+    assert len(out_48k) == len(sine_24k) * 2
+
+    # RMS energy must be preserved across upsampler within 3%
+    x_in = np.frombuffer(sine_24k, dtype=np.int16).astype(np.float64)
+    x_out = np.frombuffer(out_48k, dtype=np.int16).astype(np.float64)
+    rms_in = np.sqrt(np.mean(x_in * x_in))
+    rms_out = np.sqrt(np.mean(x_out * x_out))
+    assert abs(rms_out - rms_in) / rms_in < 0.03
 
 
 def test_turn_action_endpoint_sets_processing_signal(monkeypatch):
