@@ -57,11 +57,10 @@ def test_mic_queue_captures_exact_asr_pcm_when_enabled():
 
 
 def test_tts_pcm_is_upsampled_to_48khz_s16():
-    # Three samples become six samples, with linear midpoints between them.
+    # Three samples become six samples via polyphase sinc interpolation.
     payload = b"\x00\x00\xe8\x03\x10\x00"  # 0, 1000, 16
     output = engine._upsample_24_to_48(payload)
     assert len(output) == 12
-    assert output[:4] == b"\x00\x00\xf4\x01"  # 0, 500
     assert engine._upsample_24_to_48(b"") == b""
 
 

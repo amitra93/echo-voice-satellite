@@ -35,6 +35,7 @@ echo "EchoMuse" > /sys/power/wake_lock
 tinymix -D 0 56 On
 tinymix -D 0 64 1 1
 tinymix -D 0 88 On
+tinymix -D 0 67 1 1
 tinymix -D 0 62 24 24
 tinymix -D 0 61 100 100
 

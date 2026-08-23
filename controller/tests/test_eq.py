@@ -33,13 +33,12 @@ def test_none_bands_default_to_flat():
 
 
 def test_band_boost_raises_its_own_frequency_only():
-    # 60 Hz sits below the 125 Hz shelf corner (full +6 dB); at the corner
-    # itself a shelf only delivers half its gain.
+    # Test low shelf band boost in isolation without subsonic cutoff
     low = _sine(60)
     high = _sine(8000)
     bands = [6.0, 0, 0, 0, 0, 0, 0, 0]  # +6 dB low shelf
-    low_gain = _rms(em_eq.apply(low, RATE, bands=bands)) / _rms(low)
-    high_gain = _rms(em_eq.apply(high, RATE, bands=bands)) / _rms(high)
+    low_gain = _rms(em_eq.apply(low, RATE, bands=bands, subsonic=False)) / _rms(low)
+    high_gain = _rms(em_eq.apply(high, RATE, bands=bands, subsonic=False)) / _rms(high)
     assert low_gain > 1.7          # ~+6 dB ≈ ×2
     assert 0.9 < high_gain < 1.1   # shelf must not leak into the top band
 
@@ -77,6 +76,15 @@ def test_streaming_eq_matches_batch_apply():
 
 
 def test_streaming_eq_flat_is_passthrough():
-    eq = em_eq.StreamingEQ(RATE, bands=[0.0] * 8)
+    eq = em_eq.StreamingEQ(RATE, bands=[0.0] * 8, subsonic=False)
     chunk = _sine(500, seconds=0.05)
     assert eq.process(chunk) == chunk
+
+
+def test_subsonic_filter_attenuates_sub_bass():
+    sub = _sine(35)
+    mid = _sine(1000)
+    out_sub = em_eq.apply(sub, RATE, bands=[0.0] * 8, subsonic=True)
+    out_mid = em_eq.apply(mid, RATE, bands=[0.0] * 8, subsonic=True)
+    assert _rms(out_sub) / _rms(sub) < 0.35  # ~-10dB at 35Hz
+    assert 0.98 < _rms(out_mid) / _rms(mid) < 1.02

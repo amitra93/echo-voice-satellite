@@ -353,15 +353,13 @@ async def _send_mic(turn: Turn) -> None:
 
 
 def _upsample_24_to_48(payload: bytes) -> bytes:
-    """Upsample mono S16 PCM by two without a controller ffmpeg process."""
+    """Upsample mono S16 PCM by two using polyphase sinc FIR interpolation."""
+    from scipy.signal import resample_poly
     samples = np.frombuffer(payload, dtype="<i2")
     if samples.size == 0:
         return b""
-    out = np.empty(samples.size * 2, dtype=np.int16)
-    out[0::2] = samples
-    out[1:-1:2] = ((samples[:-1].astype(np.int32) + samples[1:].astype(np.int32)) // 2).astype(np.int16)
-    out[-1] = samples[-1]
-    return out.tobytes()
+    out = resample_poly(samples.astype(np.float32), 2, 1)
+    return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
 
 
 async def _tts_chunks(turn: Turn):

@@ -174,6 +174,7 @@ func (p *PcmSpeaker) Init() error {
 
 	time.Sleep(100 * time.Millisecond)                            // silence reaches the DAC (~2 periods)
 	exec.Command("tinymix", "-D", "0", "62", "24", "24").Run()    // set HP driver analog gain (+18dB)
+	exec.Command("tinymix", "-D", "0", "67", "1", "1").Run()      // enable codec hardware DRC peak limiter
 	exec.Command("tinymix", "-D", "0", "5", "On").Run()           // enable amp onto a clocked, silent DAC
 	time.Sleep(50 * time.Millisecond)                             // let amp settle
 	exec.Command("tinymix", "-D", "0", "61", "100", "100").Run()  // unmute
