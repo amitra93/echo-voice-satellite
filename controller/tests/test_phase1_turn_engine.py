@@ -380,6 +380,54 @@ def test_send_mic_sets_endpoint_on_vad_sentinel():
     asyncio.run(run())
 
 
+def test_trigger_voice_turn_persists_cancelled_outcome_and_cleans_registry(monkeypatch):
+    async def run():
+        device = FakeDevice()
+        device.last_wake = {"model": "hey", "score": 0.8, "threshold": 0.5, "noise_floor": 0.1}
+        updates = []
+        events = []
+        monkeypatch.setattr(engine.db, "create_turn", lambda *args: 21)
+        monkeypatch.setattr(engine.db, "update_turn", lambda *args: updates.append(args))
+        monkeypatch.setattr(engine.db, "get_turn", lambda *args: None)
+        monkeypatch.setattr(engine, "_push_event", lambda event: asyncio.sleep(0, result=events.append(event)))
+        monkeypatch.setattr(engine, "_run_turn", lambda turn: asyncio.sleep(0, result=False))
+        engine.ENGINE.turns.clear()
+        result = await engine.trigger_voice_turn(
+            device, None, None, trigger_label="wakeword", preroll_discard=2
+        )
+        assert result is False
+        assert updates[0][0] == 21
+        assert updates[0][1]["outcome"] == "cancelled"
+        assert updates[0][1]["wake_score"] == 0.8
+        assert events[-1]["outcome"] == "cancelled"
+        assert 21 not in engine.ENGINE.turns
+
+    asyncio.run(run())
+
+
+def test_trigger_voice_turn_handles_audio_timeout_and_cleanup(monkeypatch):
+    async def run():
+        device = FakeDevice()
+        device.last_wake = None
+        updates = []
+        events = []
+        monkeypatch.setattr(engine.db, "create_turn", lambda *args: 22)
+        monkeypatch.setattr(engine.db, "update_turn", lambda *args: updates.append(args))
+        monkeypatch.setattr(engine.db, "get_turn", lambda *args: None)
+        monkeypatch.setattr(engine, "_push_event", lambda event: asyncio.sleep(0, result=events.append(event)))
+        async def timeout(_turn):
+            raise asyncio.TimeoutError()
+        monkeypatch.setattr(engine, "_run_turn", timeout)
+        engine.ENGINE.turns.clear()
+        result = await engine.trigger_voice_turn(device, None, None)
+        assert result is False
+        assert updates[0][1]["outcome"] == "audio_timeout"
+        assert events[-1] == {"type": "turn.terminal", "device_id": "device-1", "turn_id": 22, "outcome": "audio_timeout"}
+        assert 22 not in engine.ENGINE.turns
+
+    asyncio.run(run())
+
+
 def test_pipeline_event_sets_continue_conversation(monkeypatch):
     async def run():
         turn = engine.Turn(20, FakeDevice(), None, None)
