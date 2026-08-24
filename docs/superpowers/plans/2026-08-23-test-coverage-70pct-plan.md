@@ -369,6 +369,15 @@ controller suite passes with the migration tests included.
 (`724 passed, 1 skipped`). Remaining gaps are primarily activity/metrics query
 variants and defensive migration-failure branches.
 
+### Controller workstream execution: wake asset planning slice (completed 2026-08-23)
+Expanded `controller/tests/test_oww_assets.py` to cover device/runtime paths,
+chunked MD5 calculation, stock and custom classifier resolution, missing source
+handling, desired-asset metadata, and duplicate model suppression. The full
+controller suite passes with the new tests.
+
+`em_oww_assets.py` increased from **57.5% to 97.0%** (`727 passed, 1 skipped`).
+Only the unavailable-installed-package branches remain intentionally defensive.
+
 ### Phase 4 — the big lever: `em_api.py` and `em_controller.py`
 This is genuinely necessary — Phases 3+5 alone cap out well short of 70%
 for the controller, because these two files are 48% of production

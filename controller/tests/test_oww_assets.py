@@ -8,6 +8,7 @@ the model a device is using; a wrong "keep" leaves it scoring against a
 stale classifier that silently disagrees with the controller.
 """
 
+import hashlib
 import time
 
 import pytest
@@ -240,3 +241,59 @@ def test_unknown_free_space_does_not_block():
     desired = _base()
     p = A.plan_sync(desired, {}, free_mb=A.parse_free_mb("garbage"))
     assert p.blocked is None and p.push
+
+
+def test_paths_md5_and_runtime_source(tmp_path):
+    runtime = tmp_path / A.RUNTIME_NAME
+    runtime.write_bytes(b"runtime")
+    assert A.device_path("x.onnx") == f"{A.DEVICE_DIR}/x.onnx"
+    assert A.runtime_source(tmp_path) == runtime
+    assert A.runtime_source(tmp_path / "missing") is None
+    assert A.md5_file(runtime, _chunk=2) == hashlib.md5(b"runtime").hexdigest()
+
+
+def test_classifier_source_resolves_stock_custom_and_missing(tmp_path):
+    resources = tmp_path / "resources"
+    models = tmp_path / "models"
+    resources.mkdir()
+    models.mkdir()
+    (resources / "hey.onnx").write_bytes(b"stock")
+    (models / "custom.onnx").write_bytes(b"custom")
+
+    assert A.classifier_source("hey", resources, models) == resources / "hey.onnx"
+    assert A.classifier_source("custom.onnx", resources, models) == models / "custom.onnx"
+    assert A.classifier_source("/absolute/custom.onnx", resources, models) is None
+    assert A.classifier_source("", resources, models) is None
+    assert A.classifier_source("missing", resources, models) is None
+    assert A.classifier_source("hey", None, models) is None
+
+
+def test_desired_assets_reports_missing_sources_and_deduplicates(tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    resources = tmp_path / "resources"
+    models = tmp_path / "models"
+    runtime_dir.mkdir()
+    resources.mkdir()
+    models.mkdir()
+    (runtime_dir / A.RUNTIME_NAME).write_bytes(b"rt")
+    for name in A.SHARED_NAMES:
+        (resources / name).write_bytes(name.encode())
+    (resources / "hey.onnx").write_bytes(b"hey")
+    (models / "custom.onnx").write_bytes(b"custom")
+
+    assets, problems = A.desired_assets(
+        ["hey", "hey", "custom.onnx", "missing"],
+        runtime_dir=runtime_dir,
+        resources=resources,
+        models_dir=models,
+    )
+    names = [asset.name for asset in assets]
+    assert names.count("hey.onnx") == 1
+    assert names.count("custom.onnx") == 1
+    assert len(assets) == 5
+    assert any("missing" in problem for problem in problems)
+    assert all(len(asset.md5) == 32 and asset.size > 0 for asset in assets)
+
+    assets, problems = A.desired_assets([], runtime_dir=tmp_path / "no-runtime", resources=None, models_dir=None)
+    assert not assets
+    assert len(problems) >= 3
