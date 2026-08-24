@@ -154,3 +154,52 @@ def test_global_config_refuses_dropped_keys_and_pushes_effective_values(monkeypa
     assert json.loads(response.text) == {"config": {"keep": 3}, "pushed_to": ["dev-1", "dev-2"]}
     assert saved == [{"keep": 3}]
     assert pushed == [("dev-1", {"device": "dev-1"}), ("dev-2", {"device": "dev-2"})]
+
+
+def test_device_listing_and_crud_handlers(monkeypatch):
+    monkeypatch.setattr(em_api.db, "get_all_devices", lambda: [{"id": 1}])
+    monkeypatch.setattr(em_api.db, "get_pending_devices", lambda: [{"id": 2}])
+    monkeypatch.setattr(em_api, "_merge_device", lambda row: {"id": row["id"], "live": True})
+    assert json.loads(run(em_api._get_devices.__wrapped__(request())).text) == [{"id": 1, "live": True}]
+    assert json.loads(run(em_api._get_pending.__wrapped__(request())).text) == [{"id": 2, "live": True}]
+
+    monkeypatch.setattr(em_api.db, "get_device", lambda device_id: None)
+    missing = request(match_info={"id": "missing"})
+    assert run(em_api._get_device.__wrapped__(missing)).status == 404
+    monkeypatch.setattr(em_api.db, "get_device", lambda device_id: {"id": device_id})
+    assert json.loads(run(em_api._get_device.__wrapped__(missing)).text) == {"id": "missing", "live": True}
+
+    events = []
+    monkeypatch.setattr(em_api, "_push_event", lambda event: asyncio.sleep(0, result=events.append(event)))
+    labels = []
+    monkeypatch.setattr(em_api.db, "set_device_label", lambda device_id, label: labels.append((device_id, label)))
+    patch = request({"label": "Office"}, match_info={"id": "dev"})
+    response = run(em_api._patch_device.__wrapped__(patch))
+    assert json.loads(response.text) == {"device_id": "dev", "label": "Office"}
+    assert labels == [("dev", "Office")]
+
+    deleted = []
+    monkeypatch.setattr(em_api.db, "delete_device", lambda device_id: deleted.append(device_id))
+    assert json.loads(run(em_api._delete_device.__wrapped__(request(match_info={"id": "dev"}))).text) == {}
+    assert deleted == ["dev"]
+
+
+def test_device_config_handler_validates_scope_and_pushes_effective_config(monkeypatch):
+    handler = em_api._post_device_config.__wrapped__
+    monkeypatch.setattr(em_api.db, "get_device", lambda device_id: {"device_id": device_id})
+    monkeypatch.setattr(em_api.db, "get_device_config_sections", lambda device_id: [])
+    monkeypatch.setattr(em_api.db, "get_device_config", lambda device_id: {"owwThreshold": 0.3})
+    monkeypatch.setattr(em_api.db, "get_effective_device_config", lambda device_id: {"owwThreshold": 0.4})
+    monkeypatch.setattr(em_api.db, "set_device_config_sections", lambda *args: None)
+    monkeypatch.setattr(em_api, "_push_event", lambda event: asyncio.sleep(0))
+    monkeypatch.setattr(em_api, "_apply_live_config", lambda *args: asyncio.sleep(0))
+
+    invalid = request({"config_sections": "ring"}, match_info={"id": "dev"})
+    assert run(handler(invalid)).status == 400
+    unknown = request({"config_sections": ["unknown"]}, match_info={"id": "dev"})
+    assert run(handler(unknown)).status == 400
+    dropped = request({"config_sections": [], "owwThreshold": 0.5}, match_info={"id": "dev"})
+    # No device sections means the wake-word key is out of scope and therefore
+    # does not trigger a dropped-key check.
+    response = run(handler(dropped))
+    assert response.status == 200
