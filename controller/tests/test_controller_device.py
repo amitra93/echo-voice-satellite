@@ -852,6 +852,61 @@ def test_wake_listener_escalates_when_mic_frames_stop_arriving(monkeypatch):
     asyncio.run(run())
 
 
+def test_wake_listener_reloads_model_after_live_config_change(monkeypatch):
+    class StopListener(Exception):
+        pass
+
+    class Model:
+        def __init__(self, score):
+            self.score = score
+
+        def reset(self):
+            return None
+
+        def predict(self, samples):
+            return {"new": self.score, "hey": self.score}
+
+    async def run():
+        device = new_device()
+        device.oww_model = "hey"
+        device.oww_threshold = 0.5
+        created = []
+
+        def make_model(**kwargs):
+            name = kwargs["wakeword_models"][0]
+            created.append(name)
+            return Model(0.0 if name == "hey" else 0.9)
+
+        monkeypatch.setattr(em_controller, "OWWModel", make_model)
+        monkeypatch.setattr(em_controller.em_oww_models, "prediction_key", lambda value: value)
+        monkeypatch.setattr(em_controller.db, "log_device", lambda *args: None)
+        monkeypatch.setattr(em_controller.api, "_push_event", lambda *args: asyncio.sleep(0))
+        monkeypatch.setattr(em_controller, "_run_voice_locked", lambda *args, **kwargs: asyncio.sleep(0))
+        device.beam_lock = lambda: asyncio.sleep(0)
+        device.beam_unlock = lambda: asyncio.sleep(0)
+        mic_starts = 0
+
+        async def mic_start():
+            nonlocal mic_starts
+            mic_starts += 1
+            if mic_starts == 1:
+                device.oww_model = "new"
+            elif mic_starts > 1:
+                raise StopListener()
+
+        device.mic_start = mic_start
+        device.mic_stop = lambda: asyncio.sleep(0)
+        task = asyncio.create_task(em_controller.wake_word_listener(device))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await device.mic_queue.put(b"\x01\x00" * (em_controller.CHUNK_BYTES // 2))
+        with pytest.raises(StopListener):
+            await task
+        assert created == ["hey", "new"]
+
+    asyncio.run(run())
+
+
 def test_handle_control_rejects_non_register_and_holds_unknown_device_pending(monkeypatch):
     class WS:
         remote_address = ("192.0.2.1", 1234)
