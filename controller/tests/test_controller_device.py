@@ -595,6 +595,62 @@ def test_shell_handler_bridges_programmatic_and_dashboard_sessions(monkeypatch):
     asyncio.run(run())
 
 
+def test_voice_playback_helpers_wait_for_device_completion(monkeypatch):
+    async def run():
+        monkeypatch.setattr(em_controller.em_eq, "apply", lambda pcm, *args: pcm)
+        monkeypatch.setattr(em_controller, "_push_device_state", lambda *args: asyncio.sleep(0))
+        device = new_device()
+        device.eq_bands = [0.0] * 8
+        device.eq_loudness = False
+
+        async def buffered(pcm):
+            device.playback_done.set()
+
+        device.stream_speaker = buffered
+        await em_controller._run_post_turn_playback(device, b"pcm")
+        assert device.speaking is False
+
+        async def chunks():
+            yield b"pcm"
+
+        async def streamed(source, stream_eq):
+            async for _chunk in source:
+                pass
+            device.playback_done.set()
+            return 4, 1, 0.0, 2
+
+        device.stream_speaker_chunks = streamed
+        assert await em_controller._run_streaming_post_turn_playback(device, chunks()) == 4
+
+        device.cancel_event.set()
+        assert await em_controller._run_streaming_post_turn_playback(device, chunks()) == 0
+
+    asyncio.run(run())
+
+
+def test_meter_at_playback_start_fires_at_prime_or_exhaustion():
+    async def run():
+        starts = []
+
+        async def chunks():
+            yield b"x" * int(em_controller.SPEAKER_PRIME_SECONDS * em_controller.SPEAKER_RATE * 2)
+
+        async for chunk in em_controller._meter_at_playback_start(chunks(), lambda: asyncio.sleep(0, result=starts.append(True))):
+            assert chunk
+        assert starts == [True]
+
+        starts.clear()
+
+        async def short():
+            yield b"short"
+
+        async for _chunk in em_controller._meter_at_playback_start(short(), lambda: asyncio.sleep(0, result=starts.append(True))):
+            pass
+        assert starts == [True]
+
+    asyncio.run(run())
+
+
 def test_handle_control_rejects_non_register_and_holds_unknown_device_pending(monkeypatch):
     class WS:
         remote_address = ("192.0.2.1", 1234)
