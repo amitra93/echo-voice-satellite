@@ -274,6 +274,17 @@ host tests.
 `internal/server` increased from **32.7% to 49.7%**. The full host-testable
 device suite passes, including server/beamformer/discovery/Wi-Fi race checks.
 
+### Device workstream execution: client credentials/reporting slice (completed 2026-08-23)
+Added `device/internal/client/client_test.go` and injectable credential paths.
+Tests cover plain and pinned-CA credential loading, token trimming/headers,
+invalid-CA fallback, TLS build-time clock clamping, disconnected outbound
+report drops, and the existing control-clock tests.
+
+`internal/client` increased from **36.1% to 39.6%**. The client race suite
+passes. The remaining client gap is concentrated in live WebSocket handshake,
+dispatch, shell, and data-plane behavior, which should be covered with fake
+WebSocket integration tests separately rather than broadening this unit slice.
+
 ### Phase 3 — controller quick/medium wins
 `em_auth.py` (session/bcrypt/role logic), `em_db.py`
 (query and migration-fixup logic), `em_oww_assets.py` (LRU eviction,
