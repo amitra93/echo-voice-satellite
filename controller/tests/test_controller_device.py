@@ -262,6 +262,76 @@ def test_stream_speaker_chunks_preserves_partial_data_and_reports_metrics():
     asyncio.run(run())
 
 
+def test_button_handler_routes_hold_tap_mute_and_cancel(monkeypatch):
+    events = []
+    monkeypatch.setattr(em_controller.ha_sidechannels, "button_event", lambda *args: events.append(args))
+    monkeypatch.setattr(em_controller.turn_engine, "cancel_voice_turn", lambda device_id: events.append(("cancel", device_id)))
+
+    async def run():
+        device = new_device(["button_hold"])
+        device.button_single_tap_event = True
+        device.button_multi_tap_ms = 0
+        await em_controller.handle_button_event(device, {"clickType": 138, "down": True})
+        await em_controller.handle_button_event(device, {"clickType": 138, "down": False, "heldMs": 900})
+        await em_controller.handle_button_event(device, {"clickType": 138, "down": False, "heldMs": 100})
+        await em_controller.handle_button_event(device, {"clickType": 138, "down": False, "heldMs": 100, "muted": True})
+        assert events[:2] == [("dev", "long", 900), ("dev", "single")]
+
+        device.voice_lock = asyncio.Lock()
+        await device.voice_lock.acquire()
+        device.button_single_tap_event = False
+        device.send_control = lambda message: asyncio.sleep(0, result=events.append(message))
+        await em_controller.handle_button_event(device, {"clickType": 138, "down": False, "heldMs": 100})
+        assert device.cancel_event.is_set()
+        assert {"type": "speaker_flush"} in events
+        device.voice_lock.release()
+
+    asyncio.run(run())
+
+
+def test_control_handler_rejects_bad_first_message_and_holds_unknown_device(monkeypatch):
+    class WS:
+        remote_address = ("192.0.2.9", 8767)
+
+        def __init__(self, messages):
+            self.incoming = iter(messages)
+            self.sent = []
+            self.closed = False
+
+        async def recv(self):
+            return next(self.incoming)
+
+        async def send(self, value):
+            self.sent.append(json.loads(value))
+
+        async def close(self):
+            self.closed = True
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    async def run():
+        bad = WS([json.dumps({"type": "not_register"})])
+        await em_controller.handle_control(bad)
+        assert bad.closed and bad.sent == []
+
+        monkeypatch.setattr(em_controller, "_link_auth_ok", lambda *args: asyncio.sleep(0, result=True))
+        monkeypatch.setattr(em_controller.db, "get_config", lambda *args: "strict")
+        monkeypatch.setattr(em_controller.db, "get_device", lambda *args: None)
+        monkeypatch.setattr(em_controller.db, "register_new_device", lambda *args: None)
+        monkeypatch.setattr(em_controller.db, "log_device", lambda *args: None)
+        monkeypatch.setattr(em_controller.api, "notify_device_pending", lambda *args: asyncio.sleep(0))
+        pending = WS([json.dumps({"type": "register", "device_id": "new", "ip": "192.0.2.9"})])
+        await em_controller.handle_control(pending)
+        assert pending.sent == [{"type": "pending"}]
+        assert pending.closed
+
+    asyncio.run(run())
+
+
 def test_handle_control_rejects_non_register_and_holds_unknown_device_pending(monkeypatch):
     class WS:
         remote_address = ("192.0.2.1", 1234)

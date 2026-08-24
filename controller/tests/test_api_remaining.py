@@ -105,3 +105,113 @@ def test_device_activity_rolls_up_turns_shadow_counters_and_metrics(monkeypatch)
     assert data["shadow"]["agreed"] == 1
     assert data["shadow"]["unmatched_crossings"] == 1
     assert data["metrics"] == [{"cpu": 1}]
+
+
+def test_wifi_and_log_handlers_cover_validation_and_async_scan(monkeypatch):
+    class Live:
+        def __init__(self):
+            self.wifi_scan_future = None
+            self.sent = []
+
+        async def send_control(self, msg):
+            self.sent.append(msg)
+            if msg["type"] == "wifi_scan":
+                self.wifi_scan_future.set_result({"networks": [{"ssid": "Home"}]})
+
+    live = Live()
+    old = em_api._devices
+    em_api._devices = {"dev": live}
+    monkeypatch.setattr(em_api, "wifi_state", lambda device_id: {"pending": None, "last_result": None})
+    monkeypatch.setattr(em_api.db, "log_device", lambda *args: None)
+    monkeypatch.setattr(em_api, "_push_event", lambda *args: asyncio.sleep(0))
+    try:
+        bad = request({"ssid": "bad\"ssid", "psk": ""}, match_info={"id": "dev"})
+        assert run(em_api._post_device_wifi.__wrapped__(bad)).status == 400
+        good = run(em_api._post_device_wifi.__wrapped__(request({"ssid": "Home", "psk": "password"}, match_info={"id": "dev"})))
+        assert good.status == 202 and live.sent[0]["type"] == "wifi_change"
+        scan = run(em_api._post_device_wifi_scan.__wrapped__(request(match_info={"id": "dev"})))
+        assert json.loads(scan.text) == {"networks": [{"ssid": "Home"}]}
+    finally:
+        em_api._devices = old
+
+    class URL:
+        def __init__(self, values):
+            self.query = values
+    log_request = request(match_info={"id": "dev"})
+    log_request.rel_url = URL({"limit": "nope"})
+    monkeypatch.setattr(em_api.db, "get_device", lambda *args: {"id": "dev"})
+    assert run(em_api._get_device_logs.__wrapped__(log_request)).status == 400
+    monkeypatch.setattr(em_api.db, "get_device_logs", lambda *args: [{"id": 1, "ts": 2, "level": "info", "source": "device", "message": "ok"}])
+    log_request.rel_url = URL({"limit": "1", "before": "100"})
+    assert json.loads(run(em_api._get_device_logs.__wrapped__(log_request)).text)[0]["message"] == "ok"
+
+
+def test_release_and_system_config_handlers(monkeypatch):
+    monkeypatch.setattr(em_api, "_get_cached_release", lambda: asyncio.sleep(0, result=None))
+    assert run(em_api._get_latest_release.__wrapped__(request())).status == 404
+    monkeypatch.setattr(em_api, "_fetch_latest_release", lambda force=False: asyncio.sleep(0, result={"version": "v1"}))
+    assert json.loads(run(em_api._post_check_release.__wrapped__(request())).text) == {"version": "v1"}
+
+    stored = []
+    monkeypatch.setattr(em_api.db, "get_config", lambda key, default=None: None)
+    monkeypatch.setattr(em_api.db, "set_config", lambda key, value: stored.append((key, value)))
+    monkeypatch.setattr(em_api.auth, "generate_api_key", lambda: "em_key")
+    assert json.loads(run(em_api._post_api_key_generate.__wrapped__(request())).text)["rotated"] is False
+    assert json.loads(run(em_api._post_api_key_rotate.__wrapped__(request())).text)["rotated"] is True
+    assert json.loads(run(em_api._delete_api_key.__wrapped__(request())).text) == {"api_key_configured": False}
+    assert stored[-1] == ("ha_api_key", None)
+
+    monkeypatch.setattr(em_api.db, "set_config", lambda key, value: stored.append((key, value)))
+    monkeypatch.setattr(em_api.em_sendspin, "configure", lambda value: asyncio.sleep(0))
+    response = run(em_api._patch_system_config.__wrapped__(request({"device_approval": "auto", "music_assistant_url": "ma.local"})))
+    assert response.status == 200
+    assert run(em_api._patch_system_config.__wrapped__(request({"immutable": True}))).status == 400
+
+
+def test_ota_update_rollback_and_fleet_deploy_decisions(monkeypatch):
+    async def cached():
+        return {"version": "v2", "url": "url"}
+
+    rows = {
+        "dev": {"id": "dev", "approved": 1, "firmware_ver": "v1", "firmware_previous": "v0"},
+        "old": {"id": "old", "approved": 1, "firmware_ver": "v2", "firmware_previous": None},
+        "pending": {"id": "pending", "approved": 0, "firmware_ver": "v1", "firmware_previous": None},
+    }
+    monkeypatch.setattr(em_api, "_get_cached_release", cached)
+    monkeypatch.setattr(em_api.db, "get_device", lambda device_id: rows.get(device_id))
+    monkeypatch.setattr(em_api, "_devices", {"dev": object(), "old": object(), "pending": object()})
+    started = []
+
+    async def update(*args):
+        started.append(("update", args))
+
+    async def rollback(*args):
+        started.append(("rollback", args))
+
+    monkeypatch.setattr(em_api, "_run_update", update)
+    monkeypatch.setattr(em_api, "_run_rollback", rollback)
+    monkeypatch.setattr(em_api, "_updates_in_progress", set())
+
+    response = run(em_api._post_device_update.__wrapped__(request({}, match_info={"id": "dev"})))
+    assert response.status == 202
+    run(asyncio.sleep(0))
+    assert started[0][0] == "update"
+
+    assert run(em_api._post_device_update.__wrapped__(request({"upload_token": "missing"}, match_info={"id": "dev"}))).status == 404
+    assert run(em_api._post_device_update.__wrapped__(request({}, match_info={"id": "missing"}))).status == 404
+    monkeypatch.setattr(em_api, "_devices", {})
+    assert run(em_api._post_device_update.__wrapped__(request({}, match_info={"id": "dev"}))).status == 409
+    monkeypatch.setattr(em_api, "_devices", {"dev": object()})
+
+    response = run(em_api._post_device_rollback.__wrapped__(request(match_info={"id": "dev"})))
+    assert response.status == 202
+    run(asyncio.sleep(0))
+    assert any(item[0] == "rollback" for item in started)
+    assert run(em_api._post_device_rollback.__wrapped__(request(match_info={"id": "pending"}))).status == 404
+    assert run(em_api._post_device_rollback.__wrapped__(request(match_info={"id": "missing"}))).status == 404
+
+    monkeypatch.setattr(em_api, "_devices", {"dev": object(), "old": object(), "pending": object()})
+    response = run(em_api._post_deploy_all.__wrapped__(request({})))
+    data = json.loads(response.text)
+    assert data["started"] == ["dev"]
+    assert {item["device_id"] for item in data["skipped"]} == {"old", "pending"}
