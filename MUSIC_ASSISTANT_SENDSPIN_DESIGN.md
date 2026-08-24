@@ -132,10 +132,23 @@ remain harmless if delayed in TCP.
 
 ## Playback Ownership
 
-Sendspin and legacy URL playback are mutually exclusive per device. A Sendspin
-stream start stops and flushes `em_player` before forwarding synchronized PCM.
-Legacy playback may start only after the Sendspin stream is idle or has been
-explicitly stopped.
+Sendspin and legacy URL playback are mutually exclusive per device, and the
+**last direct request wins**. A Sendspin stream start stops and flushes
+`em_player` before forwarding synchronized PCM. Symmetrically, a direct legacy
+`play_media` request (a spoken "play jazz" routed through Home Assistant to
+`0x04`) **wins over an active Sendspin group**: the controller makes that
+device leave the Sendspin group cleanly — clear+end the scheduled stream so the
+device's mixer lets `0x04` play, then disconnect the Sendspin socket so the
+server stops streaming to a client nobody is listening to (leaving is not
+ignoring). It stays out of the group until the legacy playback ends, at which
+point the player becomes available again. That re-arm is **not a rejoin**: it
+does not resume the old group's audio (the server only streams on a fresh group
+start), so no music appears in the room that nobody asked for at that moment —
+regrouping the device is a deliberate user action.
+
+This resolves the failure mode where an active/paused Sendspin stream would
+otherwise suppress the legacy plane on the device and silently swallow a direct
+"play jazz".
 
 Voice turns do not pause the Music Assistant group. The device attenuates its
 local synchronized music plane while voice audio plays, preserving the shared

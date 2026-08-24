@@ -160,6 +160,27 @@ def _session(device_id: str) -> "MediaSession":
     return s
 
 
+async def _sendspin_yield(device_id: str) -> None:
+    """Tell any Sendspin session to leave the group — a direct 0x04 request
+    (HA "play jazz") owns the device's music plane (HA wins). Best-effort and
+    lazily imported so em_player has no hard dependency on the Sendspin runtime.
+    """
+    try:
+        import em_sendspin
+        await em_sendspin.yield_device(device_id)
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning(f"[{device_id}] Sendspin yield failed: {exc}")
+
+
+async def _sendspin_release(device_id: str) -> None:
+    """Legacy playback ended — let the Sendspin player become available again."""
+    try:
+        import em_sendspin
+        await em_sendspin.release_device(device_id)
+    except Exception as exc:  # pragma: no cover - defensive
+        log.warning(f"[{device_id}] Sendspin release failed: {exc}")
+
+
 def state(device_id: str) -> str:
     s = _sessions.get(device_id)
     return s.state if s else IDLE
@@ -200,6 +221,10 @@ def reported_state(device_id: str) -> str:
 
 
 async def play(device_id: str, url: str) -> None:
+    # A direct play request wins the music plane over any Sendspin group (HA
+    # wins), even when a turn defers the actual playback: the user asked for
+    # this, so leave the group now rather than letting it be silently swallowed.
+    await _sendspin_yield(device_id)
     s = _session(device_id)
     if s.owned_by_turn:
         # The common collision: "play some jazz" runs the intent BEFORE Home
@@ -242,6 +267,7 @@ async def stop(device_id: str) -> None:
         await s.push_intent(IDLE)
         return
     await s.stop()
+    await _sendspin_release(device_id)
 
 
 async def interrupt(device_id: str) -> None:
@@ -659,6 +685,9 @@ class MediaSession:
             log.info(f"[{self.device_id}] Media finished "
                      f"({sent // SPEAKER_BYTES} periods)")
             await self._push_state()
+            # Media ran to its natural end — the device is free again, so let a
+            # yielded Sendspin session reconnect (not a rejoin of old audio).
+            await _sendspin_release(self.device_id)
         except asyncio.CancelledError:
             # pause()/stop() tearing us down. Bookmark ≈ what has audibly
             # played: the device plays realtime once primed, so wall time

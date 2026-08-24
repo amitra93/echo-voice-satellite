@@ -52,7 +52,7 @@ The prototype's Sendspin protocol implementation is not reused unchanged. It has
 
 ### 1. SDK Boundary
 
-- Pin `aiosendspin==9.1.0` and the matching protocol revision.
+- Pin `aiosendspin==6.0.5` and the matching protocol revision (the version actually deployed in Music Assistant's add-on and pinned in `requirements.txt`).
 - Add `controller/em_sendspin.py` as the only controller-facing SDK adapter.
 - Advertise only mono 48 kHz S16 PCM initially.
 - Keep SDK callbacks non-blocking; callbacks enqueue work for a dedicated renderer path.

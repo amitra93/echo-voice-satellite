@@ -21,6 +21,18 @@ log = logging.getLogger("sendspin")
 PCM_SAMPLE_RATE = 48_000
 PCM_CHANNELS = 1
 PCM_BIT_DEPTH = 16
+PCM_BYTES_PER_SECOND = PCM_SAMPLE_RATE * PCM_CHANNELS * (PCM_BIT_DEPTH // 8)  # 96000
+
+# buffer_capacity advertised to Music Assistant is "max bytes of (here
+# uncompressed) audio yet to be played", and MA's BufferTracker paces against
+# it — too large and MA bursts further ahead than we can hold and our writer
+# queue drops; too small and it starves us. Derive it from what the DEVICE can
+# actually hold: audioChanDepth (128 periods x 2048 samples / 48kHz ≈ 5.46s).
+# Advertise a hair under that so a full device buffer never becomes an overrun.
+# (It was hardcoded to 2_000_000 — ~20.8s of PCM — against a ~5s device buffer
+# and a 256-frame writer queue, exactly the mismatch this constant removes.)
+BUFFER_SECONDS = 5.0
+BUFFER_CAPACITY_BYTES = int(BUFFER_SECONDS * PCM_BYTES_PER_SECOND)  # 480000
 
 
 def normalize_server_url(value: str) -> str:
@@ -132,6 +144,22 @@ async def unregister_device(device_id: str) -> None:
         await _runtime.unregister_device(device_id)
 
 
+async def yield_device(device_id: str) -> None:
+    """Direct legacy 0x04 playback is starting — Sendspin yields (HA wins).
+
+    A no-op when the runtime or a session for this device is absent, so the
+    media player can call it unconditionally without knowing about Sendspin.
+    """
+    if _runtime is not None:
+        await _runtime.yield_device(device_id)
+
+
+async def release_device(device_id: str) -> None:
+    """Legacy playback ended — let the Sendspin player become available again."""
+    if _runtime is not None:
+        await _runtime.release_device(device_id)
+
+
 async def configure(server_url: str) -> None:
     if _runtime is not None:
         await _runtime.configure(server_url)
@@ -171,6 +199,13 @@ def player_support(*, buffer_capacity: int, commands: list[Any] | None = None) -
     from aiosendspin.models.types import AudioCodec, PlayerCommand
 
     supported_commands = commands or [PlayerCommand.VOLUME, PlayerCommand.MUTE]
+    # We advertise ONLY the exact PCM tuple we consume. This is load-bearing:
+    # a `stream/request-format` MUST exactly match a format advertised here, and
+    # when it does not MA logs a warning on ITS side and silently falls back to
+    # the base format, telling the client nothing. So any later format we might
+    # request (e.g. `channels: 2` on jack insert, or FLAC) must be ADDED to this
+    # list up front — advertising mono and later requesting stereo would appear
+    # to work, change nothing, and leave no trace on the device.
     return ClientHelloPlayerSupport(
         supported_formats=[
             SupportedAudioFormat(
@@ -573,7 +608,13 @@ class SendspinDeviceSession:
         )
         self.client_id: str | None = None
         self._eq: Any | None = None
-        self._queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=256)
+        # The queue carries lightweight work items, not encoded bytes: the SDK
+        # audio callback must return promptly, so EQ (numpy) and frame encoding
+        # are done by the writer, not inside the callback. Items are tuples
+        # tagged "start"/"clear"/"end" (control) or "pcm" (generation, sequence,
+        # device-target time, raw PCM). ~256 items ≈ 5s at 20ms MA chunks, which
+        # matches BUFFER_SECONDS above.
+        self._queue: asyncio.Queue[tuple] = asyncio.Queue(maxsize=256)
         self._writer_task: asyncio.Task | None = None
         self.connection_task: asyncio.Task | None = None
         self.disconnected = asyncio.Event()
@@ -582,6 +623,11 @@ class SendspinDeviceSession:
         self.dropped_frames = 0
         self.rejected_frames = 0
         self.closed = False
+        # A direct legacy 0x04 request (HA "play jazz") owns the device's music
+        # plane; while it does we leave the Sendspin group cleanly and do not
+        # reconnect until released. See yield_to_legacy / release_legacy.
+        self._legacy_owns = False
+        self._rearm = asyncio.Event()
 
     def attach(self, client: Any) -> None:
         self.player.attach(client)
@@ -617,10 +663,13 @@ class SendspinDeviceSession:
         self.player.detach()
 
     def on_stream_start(self, _message: Any) -> None:
-        # A synchronized group stream owns the music plane. Stop any legacy
-        # URL feed before its first timestamped frame can reach the device.
-        # The task is deliberately detached from the SDK callback so the
-        # Sendspin reader is never blocked by the legacy player teardown.
+        # A new synchronized group stream is a direct user request, so it
+        # reclaims the music plane from any legacy 0x04 owner (last direct
+        # request wins) and stops that legacy URL feed before its first
+        # timestamped frame can reach the device. The task is deliberately
+        # detached from the SDK callback so the Sendspin reader is never
+        # blocked by the legacy player teardown.
+        self._legacy_owns = False
         asyncio.create_task(self._stop_legacy_player())
         try:
             import em_eq
@@ -636,7 +685,7 @@ class SendspinDeviceSession:
             self._generation = 1
         self._sequence = 0
         self._discard_queued()
-        self._enqueue(self._encode_start(self._generation))
+        self._enqueue(("start", self._generation))
 
     async def _stop_legacy_player(self) -> None:
         try:
@@ -653,38 +702,73 @@ class SendspinDeviceSession:
         if self._generation:
             self._sequence = 0
             self._discard_queued()
-            self._enqueue(self._encode_clear(self._generation))
+            self._enqueue(("clear", self._generation))
 
     def on_stream_end(self, roles: list[str] | None) -> None:
         if roles is not None and "player" not in roles:
             return
         self._eq = None
         if self._generation:
-            self._enqueue(self._encode_end(self._generation))
+            self._enqueue(("end", self._generation))
 
     def on_disconnect(self) -> None:
         self._eq = None
-        self._discard_queued()
+        # A legacy-owned yield queues clear+end for the device and then
+        # disconnects the Sendspin socket; those frames must survive to reach
+        # the device, so only a genuine (non-yield) disconnect discards them.
+        if not self._legacy_owns:
+            self._discard_queued()
         self.disconnected.set()
 
+    async def yield_to_legacy(self) -> None:
+        """Hand the device's music plane to a direct legacy 0x04 request.
+
+        HA wins: a direct "play jazz" is the user's instruction, so the device
+        leaves the Sendspin group and plays what it was asked for. We clear+end
+        the scheduled stream (so ``silenceLoop``'s else-if lets 0x04 play) and
+        disconnect the Sendspin socket cleanly — leaving is not ignoring, or the
+        server keeps streaming to a client nobody hears and the group's view of
+        the device stays wrong. We do not reconnect until released.
+        """
+        if self._legacy_owns:
+            return
+        self._legacy_owns = True
+        if self._generation:
+            self._discard_queued()
+            self._enqueue(("clear", self._generation))
+            self._enqueue(("end", self._generation))
+        self._eq = None
+        await self.player.disconnect()
+
+    async def release_legacy(self) -> None:
+        """Legacy playback ended — make the player available again.
+
+        This is NOT a rejoin: it does not resume the old group's audio (the
+        server only streams on a fresh group start), it just lets the
+        connection loop reconnect so the device can be regrouped by the user.
+        """
+        if not self._legacy_owns:
+            return
+        self._legacy_owns = False
+        self._rearm.set()
+
     def on_audio(self, timestamp_us: int, data: bytes, _audio_format: Any) -> None:
-        if not self._generation or not self.clock_sync.synchronized:
+        # Runs on the SDK reader: do only the cheap, ordered bookkeeping (time
+        # conversion + sequence) and enqueue. EQ and encoding happen in the
+        # writer so this callback never blocks the SDK on numpy work.
+        if not self._generation or not self.clock_sync.synchronized or self._legacy_owns:
             self.rejected_frames += 1
             return
         try:
-            if self._eq is not None:
-                data = self._eq.process(data)
             target_us = self.clock_sync.controller_to_device(
                 self.player.compute_play_time(timestamp_us)
             )
-            frame = self._encode_pcm(self._PcmFrame(
-                self._generation, self._sequence, target_us, data
-            ))
         except (RuntimeError, ValueError):
             self.rejected_frames += 1
             return
+        sequence = self._sequence
         self._sequence = (self._sequence + 1) & 0xFFFFFFFF
-        self._enqueue(frame)
+        self._enqueue(("pcm", self._generation, sequence, target_us, data))
 
     def _enqueue(self, frame: bytes) -> None:
         try:
@@ -701,7 +785,30 @@ class SendspinDeviceSession:
 
     async def _writer(self) -> None:
         while True:
-            frame = await self._queue.get()
+            item = await self._queue.get()
+            # No await between dequeue and encode, so a clear/end callback
+            # cannot swap self._eq out from under an in-flight PCM frame; a
+            # clear also discards the queue, so a surviving item is always
+            # consistent with the current EQ state.
+            kind = item[0]
+            if kind == "pcm":
+                _, generation, sequence, target_us, raw = item
+                data = self._eq.process(raw) if self._eq is not None else raw
+                try:
+                    frame = self._encode_pcm(
+                        self._PcmFrame(generation, sequence, target_us, data)
+                    )
+                except (RuntimeError, ValueError):
+                    self.rejected_frames += 1
+                    continue
+            elif kind == "start":
+                frame = self._encode_start(item[1])
+            elif kind == "clear":
+                frame = self._encode_clear(item[1])
+            elif kind == "end":
+                frame = self._encode_end(item[1])
+            else:
+                continue
             await self.device.send_data(frame)
 
 
@@ -760,7 +867,7 @@ class SendspinRuntime:
         client = await create_sdk_client(
             client_id,
             name,
-            buffer_capacity=2_000_000,
+            buffer_capacity=BUFFER_CAPACITY_BYTES,
             initial_volume=round(float(getattr(device, "volume", 1.0)) * 100),
             initial_muted=bool(getattr(device, "muted", False)),
         )
@@ -803,6 +910,13 @@ class SendspinRuntime:
     async def _connection_loop(self, session: SendspinDeviceSession, url: str) -> None:
         delay = 1.0
         while not session.closed and self.sessions.get(session.device_id) is session:
+            if session._legacy_owns:
+                # A direct legacy request owns the plane; stay disconnected
+                # (no silent rejoin) until release_legacy re-arms us.
+                session._rearm.clear()
+                await session._rearm.wait()
+                delay = 1.0
+                continue
             session.disconnected.clear()
             state = session.player.state
             state.error = None
@@ -823,7 +937,7 @@ class SendspinRuntime:
                 state.error = str(exc)
                 session.publish_state(state)
                 log.warning("[%s] Sendspin connection failed: %s", session.device_id, exc)
-            if not session.closed:
+            if not session.closed and not session._legacy_owns:
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, 30.0)
 
@@ -852,6 +966,18 @@ class SendspinRuntime:
                 for session in self.sessions.values()
             ],
         }
+
+    async def yield_device(self, device_id: str) -> None:
+        """A direct legacy 0x04 request started — leave the group (HA wins)."""
+        session = self.sessions.get(device_id)
+        if session is not None:
+            await session.yield_to_legacy()
+
+    async def release_device(self, device_id: str) -> None:
+        """Legacy playback ended — make the Sendspin player available again."""
+        session = self.sessions.get(device_id)
+        if session is not None:
+            await session.release_legacy()
 
     async def command(self, device_id: str, command: str, **kwargs: Any) -> None:
         session = self.sessions.get(device_id)

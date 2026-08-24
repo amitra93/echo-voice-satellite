@@ -159,6 +159,115 @@ def test_runtime_connects_with_stable_device_identity(monkeypatch, tmp_path):
     asyncio.run(run())
 
 
+def test_buffer_capacity_is_derived_from_device_depth():
+    # 5.0s of 48kHz mono S16 = 480000 bytes — well under the device's ~5.46s
+    # (audioChanDepth) buffer and far below the old hardcoded 2_000_000.
+    assert em_sendspin.BUFFER_CAPACITY_BYTES == 480_000
+    assert em_sendspin.BUFFER_CAPACITY_BYTES < 2_000_000
+    assert em_sendspin.PCM_BYTES_PER_SECOND == 96_000
+
+
+def test_register_device_advertises_derived_buffer_capacity(monkeypatch, tmp_path):
+    import em_ha_sidechannels
+
+    captured = {}
+    sdk = RuntimeSDK()
+
+    async def client(*_args, **kwargs):
+        captured.update(kwargs)
+        return sdk
+
+    monkeypatch.setattr(em_sendspin, "create_sdk_client", client)
+    monkeypatch.setattr(em_ha_sidechannels, "sendspin_state", lambda *_a, **_k: None)
+
+    async def run():
+        runtime = em_sendspin.SendspinRuntime(None, str(tmp_path))
+        await runtime.configure("ma.local:8927")
+        await runtime.register_device("study", "Study", FakeDevice())
+        await asyncio.sleep(0)
+        assert captured["buffer_capacity"] == em_sendspin.BUFFER_CAPACITY_BYTES
+        await runtime.close()
+
+    asyncio.run(run())
+
+
+def test_audio_callback_enqueues_raw_pcm_not_encoded_or_eq_processed():
+    # The SDK audio callback must not run EQ/encoding — those move to the writer
+    # so the callback returns promptly. Peek the queue before the writer runs.
+    async def run():
+        device = FakeDevice()
+        device.eq_bands = [6.0, 0, 0, 0, 0, 0, 0, 0]
+        device.eq_loudness = True
+        session = em_sendspin.SendspinDeviceSession("study", "Study", device, FakeClock())
+        sdk = FakeSDK()
+        session.attach(sdk)
+        sdk.start(None)                 # enqueues ("start", 1) — no writer running
+        sdk.audio(1_000, b"\x11\x22", "pcm")
+
+        first = session._queue.get_nowait()
+        second = session._queue.get_nowait()
+        assert first == ("start", 1)
+        assert second[0] == "pcm"
+        assert second[4] == b"\x11\x22"  # raw, unencoded, un-EQ'd
+
+    asyncio.run(run())
+
+
+def test_legacy_play_makes_sendspin_yield_then_release_rearms(monkeypatch, tmp_path):
+    import em_ha_sidechannels
+
+    sdk = RuntimeSDK()
+
+    async def client(*_args, **_kwargs):
+        return sdk
+
+    monkeypatch.setattr(em_sendspin, "create_sdk_client", client)
+    monkeypatch.setattr(em_ha_sidechannels, "sendspin_state", lambda *_a, **_k: None)
+
+    async def run():
+        device = FakeDevice()
+        runtime = em_sendspin.SendspinRuntime(None, str(tmp_path))
+        await runtime.configure("ma.local:8927")
+        session = await runtime.register_device("study", "Study", device)
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert sdk.connect_calls == ["ws://ma.local:8927/sendspin"]
+
+        # An active Sendspin stream is flowing to the device.
+        sdk.start(None)
+        sdk.audio(1_000, b"\x01\x00", "pcm")
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert 0x06 in [f[0] for f in device.frames]
+
+        # Direct legacy "play jazz" — HA wins.
+        device.frames.clear()
+        await runtime.yield_device("study")
+        for _ in range(3):
+            await asyncio.sleep(0)
+        # Device is handed back to 0x04: clear then end of the scheduled stream.
+        assert [f[0] for f in device.frames] == [0x08, 0x09]
+        assert session._legacy_owns is True
+        # Left the group cleanly and does NOT reconnect while legacy owns it.
+        assert len(sdk.connect_calls) == 1
+        # Audio that still arrives is dropped, not forwarded.
+        rejected_before = session.rejected_frames
+        sdk.audio(2_000, b"\x02\x00", "pcm")
+        assert session.rejected_frames == rejected_before + 1
+
+        # Legacy playback ended — the player becomes available again (reconnect,
+        # not a rejoin of old audio).
+        await runtime.release_device("study")
+        for _ in range(3):
+            await asyncio.sleep(0)
+        assert session._legacy_owns is False
+        assert len(sdk.connect_calls) == 2
+
+        await runtime.close()
+
+    asyncio.run(run())
+
+
 def test_sendspin_session_applies_streaming_eq_to_audio():
     async def run():
         device = FakeDevice()
