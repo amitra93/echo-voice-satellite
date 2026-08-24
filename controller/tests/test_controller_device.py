@@ -432,6 +432,53 @@ def test_control_handler_processes_device_state_messages(monkeypatch):
     asyncio.run(run())
 
 
+def test_data_handler_routes_valid_audio_and_vad_sentinel(monkeypatch):
+    class DataWS:
+        remote_address = ("192.0.2.11", 8767)
+
+        def __init__(self, frames):
+            self.frames = iter(frames)
+            self.closed = False
+
+        async def recv(self):
+            return json.dumps({"type": "identify", "device_id": "dev"})
+
+        async def close(self):
+            self.closed = True
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self.frames)
+            except StopIteration:
+                raise StopAsyncIteration
+
+    async def run():
+        device = new_device()
+        old_devices = em_controller._devices
+        em_controller._devices = {"dev": device}
+        monkeypatch.setattr(em_controller, "_link_auth_ok", lambda *args: asyncio.sleep(0, result=True))
+        ws = DataWS([
+            "not binary",
+            b"\x01",
+            b"\x02bad",
+            bytes([em_controller.MIC_FRAME_TYPE, 0, 0]) + b"audio",
+            bytes([em_controller.MIC_FRAME_TYPE, 0, 0, em_controller.VAD_END_TYPE]),
+        ])
+        try:
+            await em_controller.handle_data(ws)
+            assert device.mic_queue.get_nowait() == b"audio"
+            assert device.mic_queue.get_nowait() == em_controller.turn_engine.VAD_SENTINEL_END
+            assert device.data_ws is None
+            assert not device.data_ready.is_set()
+        finally:
+            em_controller._devices = old_devices
+
+    asyncio.run(run())
+
+
 def test_handle_control_rejects_non_register_and_holds_unknown_device_pending(monkeypatch):
     class WS:
         remote_address = ("192.0.2.1", 1234)
