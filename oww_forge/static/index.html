@@ -26,10 +26,27 @@
     --err:       #b03030;
     --accent:    #405878;
   }
+  :root[data-theme="dark"] {
+    --bg:        #24231f;
+    --surface:   #302e28;
+    --card:      #39362f;
+    --border:    #575249;
+    --lcd-bg:    #151812;
+    --lcd-green: #b5d991;
+    --lcd-text:  #d8e8c5;
+    --lcd-dim:   #8cab70;
+    --text:      #f0ece2;
+    --text2:     #d0cbc0;
+    --muted:     #aaa498;
+    --ok:        #72bd8d;
+    --warn:      #e29a55;
+    --err:       #ee8585;
+    --accent:    #9ebee8;
+  }
   * { box-sizing: border-box; margin: 0; }
   html, body { min-height: 100%; }
   body {
-    background: linear-gradient(160deg, var(--bg) 0%, #b8b4ac 100%);
+    background: linear-gradient(160deg, var(--bg) 0%, var(--surface) 100%);
     color: var(--text); font: 400 14px/1.5 'DM Sans', sans-serif;
   }
   .mono { font-family: 'DM Mono', monospace; }
@@ -40,7 +57,7 @@
   header {
     display: flex; align-items: center; gap: 14px; padding: 16px 28px;
     border-bottom: 1px solid var(--border);
-    background: linear-gradient(180deg, #d8d4cc, #ccc8c0);
+    background: linear-gradient(180deg, var(--card), var(--surface));
   }
   header h1 { font-size: 17px; font-weight: 600; letter-spacing: 0.02em; }
   header .sub { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted);
@@ -53,6 +70,12 @@
   }
   .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
   .pill.on .dot { background: #40906a; box-shadow: 0 0 5px #40906a; }
+  #themeToggle { margin-left: 0; }
+
+  :root[data-theme="dark"] .card { background: linear-gradient(170deg, #403d35, #34312b); box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset, 0 2px 6px rgba(0,0,0,0.35); }
+  :root[data-theme="dark"] button { background: linear-gradient(180deg,#4b4840,#39362f); color: var(--text); border-color: #625d54; }
+  :root[data-theme="dark"] button.accent { background: linear-gradient(180deg,#678ab9,#46698f); color: #f1f6ff; border-color: #3b5876; }
+  :root[data-theme="dark"] input { background: #27251f; color: var(--text); border-color: #625d54; }
 
   main { max-width: 1180px; margin: 0 auto; padding: 22px 28px 80px;
          display: grid; grid-template-columns: 330px 1fr; gap: 20px; }
@@ -168,6 +191,7 @@
     <h1>Wake Word Forge</h1>
     <div class="sub">EchoMuse &middot; custom wake words</div>
   </div>
+  <button id="themeToggle" class="small" type="button" aria-label="Toggle color theme">Theme: auto</button>
   <span class="pill" id="gpuBadge"><span class="dot"></span><span id="gpuText">connecting…</span></span>
 </header>
 
@@ -239,16 +263,6 @@
       </div>
     </div>
 
-    <div class="card">
-      <div class="microlabel">Google Cloud TTS</div>
-      <div id="googleCredentialStatus" class="hint" style="margin:0 0 8px">Optional: Chirp 3 samples need a service-account key.</div>
-      <input id="googleCredential" type="file" accept="application/json,.json">
-      <div class="row" style="margin-top:9px">
-        <button id="saveGoogleCredential" class="small">Save service-account key</button>
-        <button id="checkGoogleCredential" class="small" style="display:none">Verify key</button>
-        <button id="deleteGoogleCredential" class="small" style="display:none">Remove key</button>
-      </div>
-    </div>
   </section>
 
   <section>
@@ -269,6 +283,22 @@
 
 <script>
 const $ = id => document.getElementById(id);
+const THEME_KEY = 'em-forge-theme';
+function applyTheme(value) {
+  const theme = value === 'dark' || value === 'light' ? value : 'auto';
+  const dark = theme === 'dark' || (theme === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  $('themeToggle').textContent = `Theme: ${theme}`;
+  $('themeToggle').dataset.theme = theme;
+}
+function cycleTheme() {
+  const current = $('themeToggle').dataset.theme || 'auto';
+  const next = current === 'auto' ? 'light' : current === 'light' ? 'dark' : 'auto';
+  localStorage.setItem(THEME_KEY, next);
+  applyTheme(next);
+}
+applyTheme(localStorage.getItem(THEME_KEY) || 'auto');
+$('themeToggle').onclick = cycleTheme;
 let state = null, logOffset = 0, lastJobKey = null, liveTest = null;
 const LOG_WINDOW_LINES = 120;
 const optionalSelection = new Set();
@@ -320,13 +350,6 @@ function render() {
   const mdc = state.credentials?.mdc_api_key;
   $('mdcApiKey').placeholder = mdc ? `Saved: ${mdc}` : 'Required for full Common Voice';
   const commonVoice = state.assets.find(a => a.part === 'common_voice');
-  const google = state.google || {};
-  $('googleCredentialStatus').textContent = google.present && google.valid
-    ? `Google key ready for ${google.project_id || 'an unnamed project'} (${google.client_email || 'service account'})`
-    : google.present ? `Google key needs attention: ${google.error || 'invalid JSON'}`
-    : 'Optional: Chirp 3 samples need a Google service-account JSON key.';
-  $('deleteGoogleCredential').style.display = google.present ? '' : 'none';
-  $('checkGoogleCredential').style.display = google.present && google.valid ? '' : 'none';
   const commonVoiceFeatures = state.assets.find(a => a.part === 'common_voice_features');
   const ami = state.assets.find(a => a.part === 'ami');
   const fleurs = state.assets.find(a => a.part === 'fleurs');
@@ -767,27 +790,6 @@ $('saveMdcApiKey').onclick = async () => {
     headers: {'Content-Type': 'application/json'}, body: JSON.stringify({api_key: key})});
   $('mdcApiKey').value = '';
   refresh();
-};
-
-$('saveGoogleCredential').onclick = async () => {
-  const input = $('googleCredential');
-  if (!input.files.length) return alert('Choose the Google service-account JSON key first.');
-  await api('/api/google', {method: 'PUT', headers: {'Content-Type': 'application/json'},
-    body: await input.files[0].text()});
-  input.value = '';
-  refresh();
-};
-
-$('deleteGoogleCredential').onclick = async () => {
-  if (!confirm('Remove the saved Google service-account key?')) return;
-  await api('/api/google', {method: 'DELETE'});
-  refresh();
-};
-
-$('checkGoogleCredential').onclick = async () => {
-  const result = await api('/api/google/check', {method: 'POST'});
-  alert(result.ok ? `Google Text-to-Speech is ready (${result.voices} voices visible).` :
-    `Google key check failed: ${result.error}`);
 };
 
 $('cancelJob').onclick = async () => {

@@ -174,7 +174,7 @@ the deletion or current HACS implementation.
 
 | Commit | Disposition | Follow |
 |---|---|---|
-| `2bd5cce` Forge run control/UI/image | Merge with adaptation | Preserve current Forge feature-store/data workflow. Add process-group cancellation, Google credential management, theme support, deploy compose, and release workflow. Keep MDC credentials separate from Google credentials. Publish CPU amd64/arm64 and CUDA amd64; do not advertise WSL ROCm as portable. |
+| `2bd5cce` Forge run control/UI/image | Merge with adaptation | Preserve current Forge feature-store/data workflow. Add process-group cancellation, theme support, deploy compose, and release workflow. **Do not take the browser-managed Google service-account upload/check/remove UI:** Chirp credentials are deployment-owned and supplied only through `GOOGLE_APPLICATION_CREDENTIALS`. Keep MDC credentials separate from Google credentials. Publish CPU amd64/arm64 and CUDA amd64; do not advertise WSL ROCm as portable. |
 | `ad86f67` Transient Google errors | Merge with adaptation | Retire a voice only for permanent request/auth/permission errors. Quota/network/service exhaustion fails a clip, logs retry exhaustion, and leaves the voice eligible. |
 | `6b2fff4` Piper languages/preview | Merge with adaptation | Add `piper_voices.py`, Docker inclusion, catalogue selection, preview endpoint/UI, and tests. Integrate with current manifests and distinguish generated filenames by source. |
 | `30567b3` Quota retry | Adapt | Retain current request pacer and retry controls; complete the permanent-versus-transient classification from `ad86f67`. |

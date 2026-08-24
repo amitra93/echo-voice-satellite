@@ -30,18 +30,12 @@ TMP = forge.DATA / "tmp"
 STATIC = Path(__file__).parent / "static"
 
 FORGE_PY = str(Path(__file__).parent / "forge.py")
-GOOGLE_CREDS = forge.DATA / "google-credentials.json"
 CANCEL_GRACE_S = 10.0
 
 
 def _job_env() -> dict:
-    """Use an uploaded key for new jobs without retaining a stale env value."""
-    env = dict(os.environ)
-    if GOOGLE_CREDS.exists():
-        env["GOOGLE_APPLICATION_CREDENTIALS"] = str(GOOGLE_CREDS)
-    else:
-        env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
-    return env
+    """Pass the deployment-provided environment through to Forge jobs."""
+    return dict(os.environ)
 
 
 class Job:
@@ -234,7 +228,6 @@ def _wakewords_state() -> list:
 async def api_state(request):
     return web.json_response({
         "gpu": _gpu(),
-        "google": _google_state(),
         "assets": _assets_state(),
         "credentials": {"mdc_api_key": forge.masked_mdc_api_key()},
         "wakewords": _wakewords_state(),
@@ -259,73 +252,6 @@ async def api_job_cancel(request):
     label = _job.label
     await asyncio.to_thread(_job.cancel)
     return web.json_response({"ok": True, "cancelled": label})
-
-
-def _google_state() -> dict:
-    """Expose key metadata only; a private key never returns to the browser."""
-    if not GOOGLE_CREDS.exists():
-        return {"present": False}
-    try:
-        key = json.loads(GOOGLE_CREDS.read_text())
-    except Exception as error:
-        return {"present": True, "valid": False, "error": f"not readable as JSON: {error}"}
-    return {"present": True, "valid": True, "project_id": key.get("project_id"),
-            "client_email": key.get("client_email")}
-
-
-def _validate_service_account(raw: bytes) -> None:
-    try:
-        key = json.loads(raw.decode("utf-8"))
-    except Exception as error:
-        raise web.HTTPBadRequest(text=f"not valid JSON: {error}")
-    if not isinstance(key, dict) or key.get("type") != "service_account":
-        raise web.HTTPBadRequest(text="expected a Google service-account JSON key")
-    missing = [field for field in ("project_id", "client_email", "private_key") if not key.get(field)]
-    if missing:
-        raise web.HTTPBadRequest(text="service-account key is missing: " + ", ".join(missing))
-
-
-async def api_google_get(request):
-    return web.json_response(_google_state())
-
-
-async def api_google_put(request):
-    raw = await request.read()
-    _validate_service_account(raw)
-    GOOGLE_CREDS.parent.mkdir(parents=True, exist_ok=True)
-    part = GOOGLE_CREDS.with_suffix(".part")
-    fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    try:
-        with os.fdopen(fd, "wb") as output:
-            output.write(raw)
-        part.replace(GOOGLE_CREDS)
-        os.chmod(GOOGLE_CREDS, 0o600)
-    except Exception:
-        part.unlink(missing_ok=True)
-        raise
-    return web.json_response(_google_state())
-
-
-async def api_google_delete(request):
-    GOOGLE_CREDS.unlink(missing_ok=True)
-    return web.json_response({"ok": True, "present": False})
-
-
-async def api_google_check(request):
-    """Verify the saved key against the API, not just its JSON shape."""
-    if not GOOGLE_CREDS.exists():
-        raise web.HTTPBadRequest(text="no Google service-account key is saved")
-    probe = (
-        "from google.cloud import texttospeech\n"
-        "print(len(texttospeech.TextToSpeechClient().list_voices().voices))\n"
-    )
-    result = await asyncio.to_thread(
-        subprocess.run, [sys.executable, "-c", probe], capture_output=True,
-        text=True, timeout=60, env=_job_env())
-    if result.returncode:
-        lines = (result.stderr or result.stdout).strip().splitlines()
-        return web.json_response({"ok": False, "error": lines[-1] if lines else "unknown error"})
-    return web.json_response({"ok": True, "voices": int(result.stdout.strip())})
 
 
 async def api_assets_download(request):
@@ -749,10 +675,6 @@ def make_app() -> web.Application:
     app.router.add_get("/api/state", api_state)
     app.router.add_get("/api/log", api_log)
     app.router.add_post("/api/job/cancel", api_job_cancel)
-    app.router.add_get("/api/google", api_google_get)
-    app.router.add_put("/api/google", api_google_put)
-    app.router.add_post("/api/google/check", api_google_check)
-    app.router.add_delete("/api/google", api_google_delete)
     app.router.add_post("/api/assets/download", api_assets_download)
     app.router.add_post("/api/settings/mdc-api-key", api_mdc_api_key)
     app.router.add_post("/api/wakewords", api_wakeword_create)

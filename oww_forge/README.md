@@ -241,11 +241,13 @@ expand the configured positive set. After adding Chirp clips or importing a
 labelled dataset, select **Retrain**: Forge detects changed clips and
 automatically rebuilds feature arrays before training.
 
-Setup: create a GCP service account with the Text-to-Speech API enabled, save
-the JSON key as `./data/google-credentials.json`. **Usually free**: the API's
-always-free tier covers ~1M premium-voice characters/month and a 2,000-clip
-wake-word run is ~25k characters (~2% of it). Past the free tier it's ~$16/1M
-chars; the command prints an estimate and asks before running.
+Setup: create a GCP service account with the Text-to-Speech API enabled and
+provide its JSON key to the deployment through
+`GOOGLE_APPLICATION_CREDENTIALS`. Forge never accepts, inspects, or removes
+this credential through its browser UI. **Usually free**: the API's always-free
+tier covers ~1M premium-voice characters/month and a 2,000-clip wake-word run
+is ~25k characters (~2% of it). Past the free tier it's ~$16/1M chars; the
+command prints an estimate and asks before running.
 
 ## Installing a model into EchoMuse
 
