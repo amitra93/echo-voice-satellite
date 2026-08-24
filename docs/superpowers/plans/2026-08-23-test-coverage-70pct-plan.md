@@ -252,6 +252,17 @@ service is required.
 `internal/discovery` increased from **0% to 45.8%**. The full host-testable
 device suite passes, including discovery/Wi-Fi race checks.
 
+### Device workstream execution: beamformer slice (completed 2026-08-23)
+Expanded `device/internal/beamformer/beamformer_test.go` to cover onset and
+burst fallback ratios, lock/unlock behavior, signed S24 decoding, band-diff
+and energy helpers, wrapped angle selection, gain/clipping accounting,
+short-input centre-channel extraction, and unlocked/auto/fixed locked output
+modes.
+
+`internal/beamformer` increased from **33.3% to 93.8%**. The full
+host-testable device suite passes, including beamformer/discovery/Wi-Fi race
+checks.
+
 ### Phase 3 — controller quick/medium wins
 `em_auth.py` (session/bcrypt/role logic), `em_db.py`
 (query and migration-fixup logic), `em_oww_assets.py` (LRU eviction,
