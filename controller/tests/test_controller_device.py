@@ -517,6 +517,49 @@ def test_router_and_shell_handler_reject_invalid_sessions(monkeypatch):
     asyncio.run(run())
 
 
+def test_control_and_data_handlers_cover_registration_failures(monkeypatch):
+    class WS:
+        remote_address = ("192.0.2.13", 8767)
+
+        def __init__(self, raw=None):
+            self.raw = raw
+            self.closed = False
+
+        async def recv(self):
+            if isinstance(self.raw, BaseException):
+                raise self.raw
+            return self.raw
+
+        async def close(self):
+            self.closed = True
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            raise StopAsyncIteration
+
+    async def run():
+        em_controller.websockets.exceptions = types.SimpleNamespace(ConnectionClosed=Exception)
+        timeout_ws = WS(asyncio.TimeoutError())
+        await em_controller.handle_control(timeout_ws)
+        assert not timeout_ws.closed
+
+        bad_data = WS(json.dumps({"type": "wrong", "device_id": "dev"}))
+        await em_controller.handle_data(bad_data)
+        assert bad_data.closed
+
+        original_sleep = asyncio.sleep
+        monkeypatch.setattr(em_controller, "_link_auth_ok", lambda *args: original_sleep(0, result=True))
+        monkeypatch.setattr(em_controller, "_devices", {})
+        monkeypatch.setattr(em_controller.asyncio, "sleep", lambda *args: original_sleep(0))
+        unknown = WS(json.dumps({"type": "identify", "device_id": "missing"}))
+        await em_controller.handle_data(unknown)
+        assert unknown.closed
+
+    asyncio.run(run())
+
+
 def test_shell_handler_bridges_programmatic_and_dashboard_sessions(monkeypatch):
     import aiohttp
 

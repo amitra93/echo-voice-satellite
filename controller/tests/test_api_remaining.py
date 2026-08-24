@@ -127,10 +127,23 @@ def test_wifi_and_log_handlers_cover_validation_and_async_scan(monkeypatch):
     try:
         bad = request({"ssid": "bad\"ssid", "psk": ""}, match_info={"id": "dev"})
         assert run(em_api._post_device_wifi.__wrapped__(bad)).status == 400
+        assert run(em_api._post_device_wifi.__wrapped__(request({"ssid": "Home", "psk": "short"}, match_info={"id": "dev"}))).status == 400
         good = run(em_api._post_device_wifi.__wrapped__(request({"ssid": "Home", "psk": "password"}, match_info={"id": "dev"})))
         assert good.status == 202 and live.sent[0]["type"] == "wifi_change"
+        monkeypatch.setattr(em_api, "wifi_state", lambda device_id: {"pending": {"ssid": "Other"}, "last_result": None})
+        assert run(em_api._post_device_wifi.__wrapped__(request({"ssid": "Home2"}, match_info={"id": "dev"}))).status == 409
+        monkeypatch.setattr(em_api, "wifi_state", lambda device_id: {"pending": None, "last_result": None})
         scan = run(em_api._post_device_wifi_scan.__wrapped__(request(match_info={"id": "dev"})))
         assert json.loads(scan.text) == {"networks": [{"ssid": "Home"}]}
+        live.send_control = lambda msg: asyncio.sleep(0, result=live.wifi_scan_future.set_result({"error": "scan failed"}))
+        failed_scan = run(em_api._post_device_wifi_scan.__wrapped__(request(match_info={"id": "dev"})))
+        assert failed_scan.status == 502
+        live.wifi_scan_future = object()
+        assert run(em_api._post_device_wifi_scan.__wrapped__(request(match_info={"id": "dev"}))).status == 409
+        live.wifi_scan_future = None
+        em_api._devices = {}
+        assert run(em_api._post_device_wifi.__wrapped__(request({"ssid": "Gone"}, match_info={"id": "dev"}))).status == 409
+        em_api._devices = {"dev": live}
     finally:
         em_api._devices = old
 
@@ -157,6 +170,9 @@ def test_release_and_system_config_handlers(monkeypatch):
     monkeypatch.setattr(em_api.db, "set_config", lambda key, value: stored.append((key, value)))
     monkeypatch.setattr(em_api.auth, "generate_api_key", lambda: "em_key")
     assert json.loads(run(em_api._post_api_key_generate.__wrapped__(request())).text)["rotated"] is False
+    monkeypatch.setattr(em_api.db, "get_config", lambda key, default=None: "existing")
+    assert run(em_api._post_api_key_generate.__wrapped__(request())).status == 409
+    monkeypatch.setattr(em_api.db, "get_config", lambda key, default=None: None)
     assert json.loads(run(em_api._post_api_key_rotate.__wrapped__(request())).text)["rotated"] is True
     assert json.loads(run(em_api._delete_api_key.__wrapped__(request())).text) == {"api_key_configured": False}
     assert stored[-1] == ("ha_api_key", None)
@@ -211,6 +227,9 @@ def test_ota_update_rollback_and_fleet_deploy_decisions(monkeypatch):
     assert run(em_api._post_device_rollback.__wrapped__(request(match_info={"id": "missing"}))).status == 404
 
     monkeypatch.setattr(em_api, "_devices", {"dev": object(), "old": object(), "pending": object()})
+    em_api._updates_in_progress.add("dev")
+    assert run(em_api._post_device_update.__wrapped__(request({}, match_info={"id": "dev"}))).status == 409
+    em_api._updates_in_progress.clear()
     response = run(em_api._post_deploy_all.__wrapped__(request({})))
     data = json.loads(response.text)
     assert data["started"] == ["dev"]
@@ -260,3 +279,99 @@ def test_ota_and_shell_helpers_cover_failure_stages(monkeypatch):
     monkeypatch.setattr(em_api, "_devices", {})
     run(em_api._run_rollback("dev", "v1"))
     assert "disconnected" in failures[-1][1].lower()
+
+
+def test_upload_handlers_cover_multipart_validation_and_success(monkeypatch, tmp_path):
+    class Field:
+        def __init__(self, name, data=b"", filename=None):
+            self.name = name
+            self.data = data
+            self.filename = filename
+
+        async def read(self):
+            return self.data
+
+    class Reader:
+        def __init__(self, field):
+            self.field = field
+
+        async def next(self):
+            return self.field
+
+    class UploadRequest(dict):
+        def __init__(self, field, body=b"", content_type="multipart/form-data"):
+            super().__init__()
+            self.field = field
+            self.body = body
+            self.content_type = content_type
+
+        async def multipart(self):
+            return Reader(self.field)
+
+        async def read(self):
+            return self.body
+
+    assert run(em_api._post_upload_binary.__wrapped__(UploadRequest(Field("wrong", b"x")))).status == 400
+    assert run(em_api._post_upload_binary.__wrapped__(UploadRequest(Field("binary", b"")))).status == 400
+    uploaded = run(em_api._post_upload_binary.__wrapped__(UploadRequest(Field("binary", b"abc"))))
+    assert uploaded.status == 200
+    token = json.loads(uploaded.text)["upload_token"]
+    assert em_api._pending_uploads[token] == b"abc"
+
+    monkeypatch.setattr(em_api.em_test_audio, "decode_test_audio", lambda data: asyncio.sleep(0, result=b"pcm"))
+    monkeypatch.setattr(em_api.em_test_audio, "pcm_to_wav", lambda data: b"wav")
+    invalid = UploadRequest(Field("wrong", b"x"))
+    invalid.match_info = {"id": "dev"}
+    assert run(em_api._post_test_audio.__wrapped__(invalid)).status == 400
+    raw = UploadRequest(None, body=b"raw", content_type="application/octet-stream")
+    raw.match_info = {"id": "dev"}
+    response = run(em_api._post_test_audio.__wrapped__(raw))
+    assert response.status == 201 and em_api._test_audio["dev"] == b"wav"
+
+    monkeypatch.setattr(em_api.em_oww_models, "models_dir", lambda: tmp_path)
+    monkeypatch.setattr(em_api.em_oww_models, "safe_model_filename", lambda name: name if name.endswith(".onnx") and "/" not in name else None)
+    monkeypatch.setattr(em_api.em_oww_models, "scan", lambda: [{"file": "custom.onnx"}])
+    bad_model = UploadRequest(Field("model", b"x", "bad.txt"))
+    assert run(em_api._post_oww_model_upload.__wrapped__(bad_model)).status == 400
+    good_model = UploadRequest(Field("model", b"onnx", "custom.onnx"))
+    response = run(em_api._post_oww_model_upload.__wrapped__(good_model))
+    assert response.status == 201 and (tmp_path / "custom.onnx").read_bytes() == b"onnx"
+
+    empty_model = UploadRequest(Field("model", b"", "empty.onnx"))
+    assert run(em_api._post_oww_model_upload.__wrapped__(empty_model)).status == 400
+    monkeypatch.setattr(em_api.em_test_audio, "decode_test_audio", lambda data: (_ for _ in ()).throw(ValueError("bad wav")))
+    invalid_audio = UploadRequest(None, body=b"bad", content_type="application/octet-stream")
+    invalid_audio.match_info = {"id": "dev"}
+    assert run(em_api._post_test_audio.__wrapped__(invalid_audio)).status == 400
+
+    assert run(em_api._delete_oww_model.__wrapped__(request(match_info={"file": "bad/name.onnx"}))).status == 400
+    assert run(em_api._delete_oww_model.__wrapped__(request(match_info={"file": "missing.onnx"}))).status == 404
+    (tmp_path / "custom.onnx").write_bytes(b"x")
+    monkeypatch.setattr(em_api.db, "get_global_device_config", lambda: {})
+    monkeypatch.setattr(em_api.db, "get_all_devices", lambda: [])
+    monkeypatch.setattr(em_api.em_oww_models, "in_use_by", lambda *args: ["global"])
+    assert run(em_api._delete_oww_model.__wrapped__(request(match_info={"file": "custom.onnx"}))).status == 409
+    monkeypatch.setattr(em_api.em_oww_models, "in_use_by", lambda *args: [])
+    assert run(em_api._delete_oww_model.__wrapped__(request(match_info={"file": "custom.onnx"}))).status == 200
+
+
+def test_test_turn_handler_reports_device_preconditions(monkeypatch):
+    device = SimpleNamespace(muted=False, capabilities=["test_audio"])
+    em_api._test_audio.pop("dev", None)
+    old = em_api._devices
+    em_api._devices = {}
+    try:
+        assert run(em_api._post_test_turn.__wrapped__(request(match_info={"id": "dev"}))).status == 409
+        em_api._devices = {"dev": device}
+        monkeypatch.setattr(em_api.db, "get_device", lambda *args: None)
+        assert run(em_api._post_test_turn.__wrapped__(request(match_info={"id": "dev"}))).status == 409
+        monkeypatch.setattr(em_api.db, "get_device", lambda *args: {"approved": 1})
+        device.capabilities = []
+        assert run(em_api._post_test_turn.__wrapped__(request(match_info={"id": "dev"}))).status == 409
+        device.capabilities = ["test_audio"]
+        device.muted = True
+        assert run(em_api._post_test_turn.__wrapped__(request(match_info={"id": "dev"}))).status == 409
+        device.muted = False
+        assert run(em_api._post_test_turn.__wrapped__(request(match_info={"id": "dev"}))).status == 404
+    finally:
+        em_api._devices = old
