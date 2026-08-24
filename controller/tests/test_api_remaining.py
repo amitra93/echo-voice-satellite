@@ -82,3 +82,26 @@ def test_training_capture_handlers_validate_and_forward(monkeypatch):
     assert run(em_api._delete_training_capture.__wrapped__(request(match_info={"model": "hey", "name": "x"}))).status == 404
     monkeypatch.setattr(em_api.em_training_captures, "discard", lambda *args: True)
     assert run(em_api._delete_training_capture.__wrapped__(request(match_info={"model": "hey", "name": "x"}))).status == 200
+
+
+def test_device_activity_rolls_up_turns_shadow_counters_and_metrics(monkeypatch):
+    now = 1_700_000_000
+    turn = {
+        "ts": now, "outcome": "ok", "total_ms": 100, "wake_score": 0.5,
+        "underruns": 1, "wake_model": "hey", "dev_shadow": 1,
+        "dev_threshold": 0.3, "wake_threshold": 0.5,
+        "dev_wake_score": 0.4, "dev_wake_delta_ms": -10,
+    }
+    monkeypatch.setattr(em_api.time, "time", lambda: now + 10)
+    monkeypatch.setattr(em_api.db, "get_turns", lambda *args: [turn])
+    monkeypatch.setattr(em_api.db, "get_wake_counters", lambda *args: [{
+        "dev_crossings": 2, "dev_frames": 10, "dev_drops": 1,
+    }])
+    monkeypatch.setattr(em_api.db, "get_device_metrics", lambda *args: [{"cpu": 1}])
+    response = run(em_api._get_device_activity.__wrapped__(request(match_info={"id": "dev"})))
+    data = json.loads(response.text)
+    assert data["days"][0]["turns"] == 1
+    assert data["wake_models"]["hey"]["score_avg"] == 0.5
+    assert data["shadow"]["agreed"] == 1
+    assert data["shadow"]["unmatched_crossings"] == 1
+    assert data["metrics"] == [{"cpu": 1}]
