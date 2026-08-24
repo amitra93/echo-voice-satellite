@@ -346,6 +346,18 @@ option→env-var mapping is already exercised as *data* by
 **Illustrative targets**: 85%, 82%, 85%, 88%, 92%, 85%, 45%, 40%
 respectively (+~384 stmt).
 
+### Controller workstream execution: auth slice (completed 2026-08-23)
+Added `controller/tests/test_auth.py` covering password helpers and async
+wrappers, token extraction, login failures/success, ingress provisioning and
+role preservation, session caching, WebSocket resolution, access decorators,
+bootstrap setup/validation, logout, and error responses. Database and bcrypt
+boundaries are stubbed where the test is exercising auth decisions.
+
+`em_auth.py` increased from **47.6% to 94.7%** across the focused auth tests
+and existing phase-0 auth coverage. The focused suite passes; the remaining
+branches are minor defensive paths in API-key parsing, bootstrap races, and
+credential length validation.
+
 ### Phase 4 — the big lever: `em_api.py` and `em_controller.py`
 This is genuinely necessary — Phases 3+5 alone cap out well short of 70%
 for the controller, because these two files are 48% of production
