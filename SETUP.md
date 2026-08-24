@@ -121,7 +121,28 @@ wake_word_listener():
 
 **Key: the stream runs continuously and is completely stateless — no gate, no adaptive gain, nothing that can drift with room history. OWW always sees uninterrupted audio. ch6 omni during idle. Per-room adaptation happens controller-side as a noise-floor *measurement*, consumed by endpointing — never applied to the signal.**
 
-### Wake word detected → command capture
+### Current HACS turn path
+
+The ESPHome protocol diagrams that follow are retained as historical evidence,
+not the live architecture. Current turns use the controller's
+`em_turn_engine.py` and the EchoMuse HACS integration:
+
+```text
+wake/button → controller creates turn row and emits wake.offer
+            → HACS opens /api/v1/ws/ha/audio/{turn_id}
+            → controller forwards MIC_PCM/MIC_EOS from voice_queue
+            → HACS drives Assist and reports lifecycle REST events
+            → HACS streams 24kHz TTS_PCM/TTS_EOS on the same socket
+            → controller upsamples to 48kHz, applies EQ, sends device frames
+            → device playback_stats confirms the real end of playback
+```
+
+The controller owns the turn state and event broadcast. HACS owns the normal
+Home Assistant Assist invocation. Barge-in currently flushes device audio and
+cancels the local turn; aborting an already-running Assist pipeline remains
+roadmap work.
+
+### Historical ESPHome command-capture diagram
 
 ```
 wake_word_listener():
@@ -168,7 +189,7 @@ and the beam_lock switching the mic channel. Command audio flows in with
 zero gap.
 ```
 
-### HA pipeline → response
+### Historical ESPHome pipeline-response diagram
 
 ```
 HA Assist:
@@ -273,7 +294,11 @@ vadThreshold 0.001 sits comfortably between ambient and speech. Raise to 0.003�
 
 ## Voice Pipeline
 
-Home Assistant's Assist pipeline (via the impersonated ESPHome satellite) is
+**Current architecture:** EchoMuse uses the HACS turn engine described above.
+The ESPHome-specific material in the remainder of this historical section is
+kept for context and must not be used as an implementation or setup guide.
+
+Home Assistant's Assist pipeline (via the former impersonated ESPHome satellite) was
 the only voice backend — the legacy claracore WebSocket path this section
 used to open with was removed 2026-07-12.
 

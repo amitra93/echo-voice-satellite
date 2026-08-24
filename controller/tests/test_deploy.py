@@ -566,7 +566,7 @@ def test_start_server_sh_install_is_verified_like_the_binary_is():
 # test_no_unjustified_hardcoded_media_state used to pin em_esphome.py's
 # MediaPlayerState reporting (#53: a hardcoded IDLE at turn end overwrote the
 # feed's PLAYING and showed HA "idle" over audible music). Removed with
-# em_esphome.py (FULL_DUPLEX_PLAN.md Phase 4 cutover) rather than ported: the
+# em_esphome.py (docs/design/full-duplex-plan.md Phase 4 cutover) rather than ported: the
 # new turn engine has no media_player entity yet at all ("No media_player
 # entity yet" — Phase 3's notes), so there is no hardcoded-state call site to
 # guard against. Re-add an equivalent the day a media_player entity exists.
@@ -1244,7 +1244,7 @@ def test_debug_env_var_is_not_truthy_for_zero():
         "REQUIRE_DEVICE_TLS already uses")
 
 
-# Four tests removed here with em_esphome.py (FULL_DUPLEX_PLAN.md Phase 4
+# Four tests removed here with em_esphome.py (docs/design/full-duplex-plan.md Phase 4
 # cutover), none ported — each pinned a mechanism specific to the ESPHome
 # native-API protocol that the new turn engine + HACS assist_satellite.py
 # does not reimplement, because the problem it solved does not exist the

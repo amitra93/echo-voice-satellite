@@ -1,8 +1,11 @@
 # Plan: raise test coverage to 70% (controller, device, dashboard)
 
-Status: in progress. Baseline numbers below were measured directly against
-this tree on 2026-08-23 (`git log -1` = `c1f7a37`), not estimated; completed
-phases record their own measured outcomes.
+Status: in progress. The controller production-only target was reached at
+**70.0%** on 2026-08-24 (`788 passed, 1 skipped`). Device and dashboard remain
+separate per-component targets; dashboard coverage currently measures the
+extracted pure-logic surface, not the full React SPA. Baseline numbers below
+were measured directly against the tree on 2026-08-23 (`git log -1` =
+`c1f7a37`), not estimated; completed phases record their own measured outcomes.
 
 ## Target definition (confirmed with the repo owner)
 

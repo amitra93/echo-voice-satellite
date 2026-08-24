@@ -43,7 +43,7 @@ work reads as a bigger number when fewer are. Without the core count beside
 it the figure can appear to halve when nothing actually changed.
 
 Two other device tabs worth knowing: **Status** (IP, firmware, WiFi network,
-ESPHome port, current volume, whether the config is fleet or overridden,
+current volume, whether the config is fleet or overridden,
 resource meters including **Latency** (the round trip to the device — amber
 past 200ms, red past 1s; the only link-health signal the Echo's WiFi driver
 actually provides, since it reports no retry or noise figures) and **Temp**
@@ -173,30 +173,9 @@ a few seconds. If the copy fails, the device stays on the word it already has
 and the device log says why. It is never left listening for a word it does not
 have.
 
-**Changing the wake word briefly reconnects the device in Home Assistant.**
-Home Assistant only reads a satellite's wake word configuration when it
-connects, so the controller drops and remakes that connection to make the new
-name show up. It takes a few milliseconds, but during it **every entity for
-that device goes unavailable and comes straight back** — the voice assistant,
-the media player, the action button, the ambient light sensor.
-
-That matters if you have an automation using a **state trigger** on any of
-them: coming back online is a state change, and the automation will fire. The
-action button's event entity is the one people hit, because a returning event
-entity restores its last event and looks exactly like the button being pressed
-again. Exclude the transition:
-
-```yaml
-trigger:
-  - platform: state
-    entity_id: event.your_device_action_button
-    not_from:
-      - unavailable
-      - unknown
-```
-
-Nothing is wrong with the device when this happens, and it only happens when
-you change the wake word.
+Changing the wake word updates the controller's live device record. The HACS
+integration reads that record on its normal update path, so the controller does
+not tear down every Home Assistant entity merely to refresh a wake-word label.
 
 ### Arbitration window
 With more than one Echo, saying the wake word in earshot of two of them
@@ -564,11 +543,9 @@ The device passively listens for Bluetooth Low Energy advertisements
 (presence beacons, BLE temperature/humidity sensors, phones and watches for
 room-presence systems like Bermuda) and forwards them to Home Assistant.
 
-In Home Assistant the proxy appears as a **separate ESPHome device** (named
-`<label> BT Proxy`), independent of the voice assistant — you can add,
-remove, or ignore it without touching the voice satellite. Once added, its
-scanner feeds HA's Bluetooth integration exactly like an ESP32 Bluetooth
-proxy would, and a diagnostic sensor counts received advertisements.
+The EchoMuse HACS integration forwards enabled scanner data to Home Assistant's
+Bluetooth remote-scanner path. It is not a separate ESPHome device; its
+availability follows the EchoMuse device and controller connection.
 
 Two things to know before enabling:
 
@@ -612,6 +589,8 @@ These are set once, on the server, and need a controller restart to change:
 | `SERVER_IP` | The controller computer's LAN IP — what devices are told to connect to. Leave it empty to detect it from this host; the controller refuses to start rather than advertise an address it had to guess at, and warns if the detected one looks like a container bridge. |
 | `OWW_MODEL` / `OWW_THRESHOLD` | Startup defaults for wake word/sensitivity — the dashboard values override these. |
 | `DEVICE_APPROVAL` | `strict` (you approve every new device — recommended) or `auto`. |
+| `SENDSPIN_ENABLED` | Enables the Music Assistant Sendspin connection and music controls for capable devices. |
+| `MUSIC_ASSISTANT_URL` | Base URL of the Music Assistant server used when Sendspin is enabled. |
 | `SERVER_TLS_PORT` | Encrypted device link (wss) port — default 8770, `0` disables. Devices switch to it automatically once they hold pushed credentials (wizard install, or the **Secure link** button on the device Status tab). |
 | `REQUIRE_DEVICE_TLS` | Set to `1` **only after every device shows "wss (TLS)"** on its Status tab — from then on the controller rejects unencrypted or tokenless device connections. |
 

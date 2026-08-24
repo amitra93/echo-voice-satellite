@@ -4,11 +4,11 @@ Give your Amazon Echo Dot 2nd Generation a second life as a fully local,
 open-source voice assistant and media player for Home Assistant.
 
 EchoMuse replaces the Alexa firmware with a lightweight Go server and pairs
-it with a Python controller that presents each Dot to Home Assistant as a
-native **ESPHome voice satellite** — no cloud, no custom HA integration to
-install. Say your wake word, talk to [Assist](https://www.home-assistant.io/voice_control/),
-hear the answer through the Dot's speaker. The hardware you already own
-($10 on the second-hand market) does the rest.
+it with a Python controller plus a Home Assistant custom integration. The
+integration presents each Dot as an Assist satellite and exposes its supported
+media, button, sensor, and Bluetooth features. Say your wake word, talk to
+[Assist](https://www.home-assistant.io/voice_control/), hear the answer
+through the Dot's speaker.
 
 ## What you get
 
@@ -18,14 +18,16 @@ hear the answer through the Dot's speaker. The hardware you already own
 - **Custom wake words** — train your own ("hey biscuit") from synthetic TTS
   speech with the bundled [`oww_forge/`](oww_forge/README.md) trainer, then
   install it from the dashboard in one click.
-- **On-device wake word (experimental)** — the Echo can run the wake model
-  itself and report what it *would* have detected, without acting on it, so
-  the two can be compared on identical audio before anything depends on it.
-  Off by default; see [docs/configuration.md](docs/configuration.md).
+- **On-device wake word (experimental)** — choose `off` for controller
+  detection, `shadow` to compare local scores without acting, or capability-
+  and model-gated `on` to let the Echo initiate a wake while the controller
+  continues measuring agreement. Off is the default; see
+  [docs/configuration.md](docs/configuration.md).
 - **Barge-in** — say the wake word over the assistant's own reply to cut it
   off, backed by an on-device echo canceller (vendored speexdsp).
 - **Multi-room done right** — one utterance in earshot of two Echos gets
-  **one** response: detections are pooled and the best-placed device answers.
+  **one** response: the first detector claims the turn and peers in the
+  suppression window stand down.
 - **Music** — each Dot is an HA `media_player` you can actually play things
   on (media browser, Music Assistant, radio streams), with instant
   pause/stop. Speaking over music **ducks** it rather than pausing it: the
@@ -68,16 +70,16 @@ that's genuinely hardware (ADC off, red ring, button LED).
 ## How it works
 
 ```
-Echo Dot (Go firmware) ⇄ WebSocket/TLS ⇄ Controller (Python) ⇄ ESPHome native API ⇄ Home Assistant
+Echo Dot (Go firmware) ⇄ WebSocket/TLS ⇄ Controller (Python) ⇄ HACS integration ⇄ Home Assistant
 ```
 
 The device is deliberately dumb: it captures, beamforms, and streams audio
 continuously, and plays what it's sent. Everything that can drift or
 misjudge — wake scoring, endpointing, noise suppression, EQ, arbitration —
 lives on the controller where it can be observed and updated fleet-wide.
-(The one exception is opt-in and observational: the Echo can *also* score the
-wake word locally and report what it would have detected, which is how we're
-measuring whether that belongs on the device at all.)
+(The opt-in exception is on-device wake-word scoring: shadow mode compares
+local and controller detections, while active mode can initiate a turn when
+the firmware and model assets support it.)
 The full tour is in [docs/voice-pipeline.md](docs/voice-pipeline.md).
 
 The two halves version independently, so any pairing of firmware and
@@ -138,8 +140,10 @@ there the **provisioning
 wizard** takes a stock Dot the rest of the way over USB: root, debloat,
 WiFi, firmware, TLS credentials and the on-device wake word assets. It ends
 by rebooting the Dot, which then finds the controller itself and appears as
-pending for you to approve. Home Assistant discovers each approved device
-automatically via its built-in ESPHome integration.
+pending for you to approve. Install the EchoMuse HACS integration, enter the
+controller URL, and generate an integration API key in the dashboard's
+Settings page; the integration then receives device updates and adds supported
+entities.
 
 See the [quickstart](docs/quickstart.md) for the full walkthrough and
 [configuration](docs/configuration.md) for every knob explained in plain
@@ -166,8 +170,9 @@ docker build -t echomuse-compiler compiler/
 Controller from source: `cd controller && pip install -r requirements.txt
 && python em_controller.py` (Python 3.12), or `docker compose up --build`.
 
-Tests run on the host and in CI on every push: `go test ./...` under
-`device/` (pure-Go logic) and `python -m pytest tests/` under `controller/`.
+Tests run on the host and in CI on every push: `go test ./internal/... ./pkg/...`
+under `device/` (host-testable Go logic) and `python -m pytest tests/` under
+`controller/`.
 
 ---
 
@@ -190,7 +195,8 @@ guaranteed. Two rules keep that safe:
 
 **Features are negotiated by capability, not version.** On connect, a device
 announces what it implements (`mic`, `speaker`, `leds`, `led_anim`, `buttons`,
-`oww_shadow`). The controller asks "does this device say it can?" rather than
+`test_audio`, `oww_shadow`, `oww_trigger`, `audio_mix`, `music_sync`, and
+sensor/button extensions). The controller asks "does this device say it can?" rather than
 "is its version at least X" — because the latter means encoding release
 history into the controller, and it gets a dev build wrong immediately. A
 control that depends on a capability the device lacks is shown disabled with

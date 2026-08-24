@@ -1009,7 +1009,7 @@ async def leds_spin_green(device: Device, stop_event: asyncio.Event):
 # gone. TTS no longer arrives via a fetched URL at all — em_turn_engine.py
 # receives it as 24kHz PCM chunks over the per-turn audio WebSocket, streamed
 # by the HACS integration as HA's TTS engine produces them, and does its own
-# small 24→48 linear-interp upsample before EQ. See FULL_DUPLEX_PLAN.md's
+# small 24→48 linear-interp upsample before EQ. See docs/design/full-duplex-plan.md's
 # "TTS conversion" section.)
 
 

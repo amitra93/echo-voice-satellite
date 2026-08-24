@@ -1,7 +1,11 @@
 # Wake-word capture, labeling & oww_forge retraining — design
 
 **Date:** 2026-08-23
-**Status:** approved
+**Status:** implemented with changes
+
+The capture, labeling, export, and forge-import flow shipped. Implementation
+also added configurable `wakeNearMissFloor`, which controls the score floor
+used to classify near-miss capture candidates.
 
 ## Goal
 

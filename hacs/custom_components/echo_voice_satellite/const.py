@@ -2,7 +2,7 @@
 
 Device identity is the Echo's own `ro.serialno` end to end — the same string
 the controller, the device firmware, and the ESPHome-MAC derivation already
-use. There is no UUID layer and no converter: FULL_DUPLEX_PLAN.md's identity
+use. There is no UUID layer and no converter: docs/design/full-duplex-plan.md's identity
 decision.
 """
 

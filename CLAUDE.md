@@ -100,7 +100,7 @@ and the only visible sign was a wall of paragraphs. Fixing it afterwards means
 commit list by hand, since the PATCH replaces the whole body.
 
 **Device/controller compatibility.** The two halves version independently, so any pairing can occur in the field. Two rules, both guarded by `tests/test_capabilities.py`:
-- **Negotiate by capability, not version.** The device announces what it implements in its register message (`internal/client/control.go`: `mic`, `speaker`, `leds`, `led_anim`, `buttons`, `test_audio`, `oww_shadow`, `button_hold`, and `ambient_light` **only when the sensor is actually readable**); the controller reads `Device.capabilities` via properties like `led_anim_capable` / `oww_shadow_capable`. Never compare version strings — that puts release history in the controller and misjudges dev builds. A UI control whose feature the device lacks is shown **disabled with the reason**, never as a control that silently does nothing.
+- **Negotiate by capability, not version.** The device announces what it implements in its register message (`internal/client/control.go`: `mic`, `speaker`, `leds`, `led_anim`, `buttons`, `test_audio`, `oww_shadow`, `oww_trigger`, `button_hold`, `audio_mix`, `music_sync`, and `ambient_light` **only when the sensor is actually readable**); the controller reads `Device.capabilities` via properties like `led_anim_capable` / `oww_shadow_capable`. Never compare version strings — that puts release history in the controller and misjudges dev builds. A UI control whose feature the device lacks is shown **disabled with the reason**, never as a control that silently does nothing.
 - **Degrade to old behaviour, never to a wrong answer.** Unknown JSON fields and message types are ignored both ways. Where a new field records a measurement, absence stores as **NULL, not 0** — old firmware reporting no `playback_stats` must not read as "zero underruns", and a device that cannot score wake words locally must not read as "scored and missed" (hence `turns.dev_shadow` alongside `dev_wake_score`).
 
 ### Schema migrations
@@ -347,7 +347,7 @@ impersonation.** That backend (`em_esphome.py`, `em_ble_proxy.py`, the
 vendored `esphome/` protobuf package: one asyncio TCP listener per device
 posing as ESPHome native-API firmware, dialled by HA's built-in ESPHome
 integration) was fully deleted in the Phase 4 cutover — see
-`FULL_DUPLEX_PLAN.md` for the design and the ten locked-in decisions (Q1–Q10)
+`docs/design/full-duplex-plan.md` for the design and the ten locked-in decisions (Q1–Q10)
 behind it, and `hacs/` for the integration itself. The paragraphs below
 describe the **current** architecture; the ESPHome-native-API lessons that
 motivated it (HA's blocking-announcement contract, `RUN_END`/`RUN_START`
@@ -411,18 +411,15 @@ reach HA's pipeline (`turn.cancel` reaches the turn engine but not a running
 Assist pipeline run) — a gap noted in `em_turn_engine.py`'s own docstring
 rather than left silent.
 
-**Mute has no writable HA control.** Mute is device-sovereign (see "Volume /
-mute persistence") — only the hardware button sets it — so it is a read-only
-`binary_sensor`, never a `switch`, on the HACS side. A writable control here
-would be exactly the "control that silently does nothing" the capability rule
-below forbids, just pointed the other way: HA has no mechanism to make the
-device act on it.
+**Mute remains device-sovereign.** The HACS integration exposes a privacy-mute
+switch, but the only device primitive is `mute_toggle`, which invokes the same
+device state transition as the hardware button. The switch checks live state
+before sending that toggle; it cannot silently set an impossible state.
 
-**No `media_player` entity yet.** The REST media-command endpoint
-(`POST /api/devices/{id}/media`, forwarding to `em_player` and the device
-control plane) exists and the `number` volume entity uses it, but
-play/pause/stop/media-browse are not yet exposed as HA entities — follow-up
-work, not a silent gap.
+**`media_player` is capability-gated.** Devices declaring `music_sync` receive
+the HACS Sendspin media-player entity, which supports media commands, seek,
+volume, and mute. Devices without that capability expose no misleading music
+control.
 
 ### HA entities beyond the voice satellite
 
@@ -552,7 +549,7 @@ The always-on wake stream (`mic_start` without `lock_mic`) is **ungated and AGC-
 ### Controller audio pipeline
 
 1. **Wake word** — openwakeword (ONNX) runs in a thread executor per device on `mic_queue`. When 2+ devices are connected, `em_arbiter.py` applies **first-detector-wins** suppression: the first device to cross threshold answers *immediately* (no added latency, the claim is synchronous) and any other device detecting within `wakeArbitrationMs` (default 700, 0 = off) stands down and logs "Wake ceded". The claim is released at turn end. Do NOT reinstate the original best-SNR-after-a-wait design: it taxed every wake ~364ms (it gated on devices *connected*, not in earshot) and field data showed SNR at detection was indistinguishable across devices (0.9/1.15/0.93) while the SNR winner produced a worse transcript than the first detector.
-2. **Voice turn** — on wake or dot-button: drain stale frames → acquire `voice_lock` → `em_turn_engine.trigger_voice_turn` streams mic frames up the per-turn audio WebSocket (`MIC_PCM`, `em_audio_frame.py`) to the HACS integration, which drives HA's Assist pipeline and streams the resulting TTS back down the same socket as 24kHz PCM chunks (`TTS_PCM`) **as HA's TTS engine produces them** — not a URL the controller fetches. The controller upsamples 24→48 (linear interpolation; TTS is narrowband speech, so this is cheap and sufficient) → EQ (`em_eq.py`) → `stream_speaker` → device `0x02` frames. Playback starts while HA is still generating, the same "don't accumulate the whole response first" property the old `_stream_tts_audio` had, achieved here by construction rather than by an explicit streaming-fetch helper — there is no URL fetch step to write one for. See "Voice backend" above for the full turn-engine/HACS design and `FULL_DUPLEX_PLAN.md` for why (Model 3)
+2. **Voice turn** — on wake or dot-button: drain stale frames → acquire `voice_lock` → `em_turn_engine.trigger_voice_turn` streams mic frames up the per-turn audio WebSocket (`MIC_PCM`, `em_audio_frame.py`) to the HACS integration, which drives HA's Assist pipeline and streams the resulting TTS back down the same socket as 24kHz PCM chunks (`TTS_PCM`) **as HA's TTS engine produces them** — not a URL the controller fetches. The controller upsamples 24→48 (linear interpolation; TTS is narrowband speech, so this is cheap and sufficient) → EQ (`em_eq.py`) → `stream_speaker` → device `0x02` frames. Playback starts while HA is still generating, the same "don't accumulate the whole response first" property the old `_stream_tts_audio` had, achieved here by construction rather than by an explicit streaming-fetch helper — there is no URL fetch step to write one for. See "Voice backend" above for the full turn-engine/HACS design and `docs/design/full-duplex-plan.md` for why (Model 3)
 ### Ducking: music and voice are separate planes on the device
 
 **A voice turn DUCKS music; it does not pause it** — on firmware announcing
@@ -645,7 +642,7 @@ with no way for the user to tell which they had.
 | `em_oww_assets.py` | On-device wake word asset distribution — plans what a device needs (runtime + shared models + classifiers), what to push and what to evict. Pure logic; the two transports live in `em_api.py` |
 | `em_shadow.py` | On-device wake word shadow mode — correlates device-reported threshold crossings with the controller's own detections (clock domains, match window, consume-on-match) |
 | `em_scenes.py` | LED ring scenes — resolves `ledScene`/`ledListenColor`/`ledThinkColor` config into render-ready listening/spinner frames |
-| `em_turn_engine.py` | The voice-turn state machine — wired into `em_api.py`, not a standalone server. Owns `trigger_voice_turn`/`cancel_voice_turn`, `_stream_mic_audio`, `_persist_turn`, and the per-turn audio-WS registry (`turn_id → ws`). Replaces `em_esphome.py` (deleted, Phase 4 cutover — see `FULL_DUPLEX_PLAN.md`) |
+| `em_turn_engine.py` | The voice-turn state machine — wired into `em_api.py`, not a standalone server. Owns `trigger_voice_turn`/`cancel_voice_turn`, `_stream_mic_audio`, `_persist_turn`, and the per-turn audio-WS registry (`turn_id → ws`). Replaces `em_esphome.py` (deleted, Phase 4 cutover — see `docs/design/full-duplex-plan.md`) |
 | `em_audio_frame.py` | The `>BBI` mic/TTS frame codec (`MIC_PCM`/`MIC_EOS`/`TTS_PCM`/`TTS_EOS`) for the per-turn audio WebSocket — the only custom wire protocol left in the voice path. Mirrored, not shared, by `hacs/.../audio_frame.py` on the HA side |
 | `em_ha_sidechannels.py` | Publishes the non-audio `/api/events` payloads the HACS integration consumes: `button.event`, `ambient_light`, `volume_state`, `capabilities`, `wake_model`, `ble.adverts` |
 | `em_test_audio.py` | Phase 1b E2E test-turn support — admin-only WAV upload/normalize-to-16kHz-mono and synthetic-wake `voice_queue` injection, for exercising the full turn engine + HACS round-trip without a real wake word |

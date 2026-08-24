@@ -1,6 +1,6 @@
 """Phase 4 cutover additions to em_turn_engine.py — repointing
 VOICE_PREROLL_DISCARD/BUTTON_HOLD_MS/VAD_SENTINEL_* from em_esphome.py "with
-equivalent signatures" (FULL_DUPLEX_PLAN.md) turned out to mean more than
+equivalent signatures" (docs/design/full-duplex-plan.md) turned out to mean more than
 relocating the names: the no-speech short-circuit and the preroll discard
 were being computed upstream and silently thrown away. See em_turn_engine.py
 for the full reasoning; this file pins the resulting behavior.

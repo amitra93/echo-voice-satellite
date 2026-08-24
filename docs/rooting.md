@@ -512,8 +512,17 @@ adb shell "su -c 'cat /tmp/server.log'"
 ✅ VAD threshold tunable down to 0.0001 (dashboard slider floor corrected)
 ✅ Beamformer structural fix — smoothers always run, output by lock state not flag
 ✅ AGC release frozen during silence — prevents noise floor amplification past VAD threshold
-✅ Acoustic feedback fix — controller sleeps for audio duration after EOS before mic restart
-✅ Spinner runs for full response duration — duration calculated from PCM length
+### Historical completion log
+
+The entries below are a chronological implementation record, not a current
+architecture checklist. In particular, ESPHome references describe the retired
+backend. Current Home Assistant setup uses the EchoMuse HACS integration; see
+[quickstart.md](quickstart.md). Current voice playback waits for the device's
+`playback_stats` completion report rather than a controller duration estimate,
+and capable firmware renders LED animations locally.
+
+✅ Acoustic feedback fix — historical controller duration wait before mic restart
+✅ Spinner runs for full response duration — historical PCM-duration calculation
 ✅ VAD threshold default 0.001 — matches measured conversational speech range at 1.3m (v2.6.5; was 0.003, which sat above soft speech)
 ✅ Mute button — toggles mic mute, red LED ring, blocks action button
 ✅ Volume buttons — local interception, cyan LED ring feedback
@@ -539,22 +548,17 @@ adb shell "su -c 'cat /tmp/server.log'"
 ✅ WebSocket protocol keepalives — dead connections detected within 30s
 ✅ Controller management dashboard — React SPA, vendored assets, no CDN dependency
 ✅ Safe per-device WiFi change (dashboard WiFi tab) — device-side executor with auto-rollback: full wpa_supplicant.conf replacement written *while WiFi is disabled* + verified `svc wifi` bounce (via sh — the script has no shebang), gated on associate-to-target-SSID ≤45s → IP ≤20s → controller reconnect ≤90s; any failure restores the backed-up config; uncommitted changes roll back on boot (pending-marker recovery, same philosophy as the A/B binary slots); result delivery is at-least-once (re-sent until the controller's wifi_commit ack); last-known-controller-address fast path makes cross-subnet controllers reachable without mDNS. All three paths hardware-validated 2026-07-11: rollback (garbage SSID, 65s round trip), startup recovery, happy path (30s)
-✅ LED ring scenes (controller-rendered) — Standard/Airy/Malevolent/Pride/Custom palettes for the listening ring and thinking spinner (em_scenes.py); mute ring stays red and volume arc stays cyan in every scene; frames carry an explicit `listening` flag so the device's direction overlay works on any colour (falls back to the all-green heuristic for old controllers), and the overlay brightens the scene colour instead of painting green
+✅ LED ring scenes — Standard/Airy/Malevolent/Pride/Custom palettes for the listening ring and thinking spinner (`em_scenes.py`); capable firmware renders `led_anim` locally, with controller-rendered frames as a legacy fallback. Mute stays red and the volume arc cyan in every scene.
 ✅ Dashboard live state — mute/listen/speak/offline via WebSocket events + 5s poll
 ✅ Dashboard shell terminal — browser-based root shell, Ctrl+C support
-✅ ESPHome native API satellite integration (the only voice backend since 2026-07-12)
-✅ Both devices registered in HA as voice satellites (port 16001, 16002)
-✅ ESPHome setup wizard passes on both devices
-✅ TTS announcements via HA Assist pipeline (MP3→PCM via ffmpeg, standalone play)
-✅ MediaPlayerState ANNOUNCING/IDLE transitions for wizard audio test
-✅ ESPHome port lifecycle — ports up/down with physical device connect/disconnect
-✅ mDNS _esphomelib._tcp per device (device_id[-12:] suffix to avoid prefix collision)
-✅ DB migration v2 — esphome_api_port, esphome_noise_psk columns, next_esphome_port
-✅ ~~VOICE_MODE env var~~ — claracore backend removed 2026-07-12; esphome is unconditional
-✅ OWW/button-triggered voice turns in esphome mode — full wake word → STT → intent → TTS → speaker round-trip confirmed working end-to-end against real HA Core 2026.6.4
+✅ ESPHome native API satellite integration — historical backend, retired by the HACS turn-engine cutover
+✅ Per-device ESPHome ports and mDNS — historical backend behavior, no longer used
+✅ HACS turn engine — current backend: REST/event lifecycle plus one authenticated per-turn audio WebSocket
+✅ TTS announcements via HA Assist pipeline, streamed as PCM through the controller
+✅ OWW/button-triggered voice turns through the current HACS integration
 ✅ HA-side announce (setup wizard test, push TTS) plays correctly on device — live callback lookup, not a snapshot taken at connect
 ✅ Local no-speech timeout (5s) — matches Alexa's "wake word, then silence" behaviour; scoped correctly to bounded voice turns only, never the permanent OWW listening stream
-✅ HA VAD-end is the turn endpointing authority — _stream_mic_audio exits on HA's STT_VAD_END/ERROR, device RMS-gate sentinel advisory, 20s hard cap; fixes stuck spinner in noisy rooms (v2.6.5, C1)
+✅ Historical HA VAD-end endpointing — superseded by the turn engine's endpoint and audio-socket rendezvous
 ✅ Conversation continuation actually works — mic restarted before each continuation turn; shipped broken in v2.6.4 (v2.6.5, C2)
 ✅ Preroll discard wake-turns-only — button/continuation turns pass 0, no first-word clipping on those paths (v2.6.5, C3)
 ✅ Mute is device-authoritative — mute stops the running mic stream, unmute restores it; audio stops leaving the device while the ring is red (v2.6.5, C5 partial — full-chip ADC mute pending)
@@ -567,4 +571,6 @@ adb shell "su -c 'cat /tmp/server.log'"
 ✅ ADC mute controls identified for all four chips — tinymix dump in device/tools/ confirms B–D at 123/124, 141/142, 159/160
 ```
 
-**HA MVP reached** — this is the milestone ESPHOME_SPEC.md §1 called "the last functional barrier before a public v1 announcement." EchoMuse devices work as real Home Assistant voice satellites without ClaraCore.
+The current Home Assistant voice backend is documented in
+[docs/design/full-duplex-plan.md](design/full-duplex-plan.md) and
+[docs/voice-pipeline.md](voice-pipeline.md).

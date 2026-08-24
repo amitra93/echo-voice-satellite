@@ -1,5 +1,9 @@
 # Sendspin Integration Plan
 
+**Status:** Implemented with changes. Sendspin transport, device `music_sync`,
+and the HACS media player shipped. The original limitation to group controls
+and metadata is obsolete: the media player also supports media commands.
+
 ## Decisions
 
 - Target **Music Assistant** first, while keeping the implementation aligned with the generic Sendspin protocol.

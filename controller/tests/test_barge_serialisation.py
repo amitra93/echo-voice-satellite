@@ -10,7 +10,7 @@ RUN_END arrived ~4ms after the new turn started and the "HA ended a run it
 never started" branch read it as terminal.
 
 `em_runbarrier.RunBarrier` is the state machine that fixed it, split out of
-`em_esphome` (now deleted, FULL_DUPLEX_PLAN.md's Phase 4 cutover) for the
+`em_esphome` (now deleted, docs/design/full-duplex-plan.md's Phase 4 cutover) for the
 reason `em_linkauth.decide` was: the suite could not import `em_esphome` (it
 pulled in zeroconf, aiohttp and the database), so logic that lived there had
 no coverage. `em_turn_engine.py` — the ESPHome-era satellite's replacement —

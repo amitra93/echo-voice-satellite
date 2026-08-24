@@ -169,13 +169,18 @@ State names used below: `IDLE`, `LISTENING`, `THINKING`, `PLAYING`, `MUTED`,
 
 ### 4.1 Action (dot) button — clickType 138
 
+`[today]` denotes shipped behavior. `[proposed]` remains design work and must
+not be read as firmware behavior. The current controller/HACS turn path uses
+`em_turn_engine.py`; references to the deleted ESPHome backend below are
+historical rationale only.
+
 | # | State | Link | Device action | Ring outcome | Controller | Status |
 |---|---|---|---|---|---|---|
 | A1 | IDLE | LINKED | Send button event | *Nothing until controller replies* — ring lights one RTT later | Starts turn, sends `led_anim` listening | [today] |
 | A2 | IDLE | LINKED | Send button event **+ paint listening ring locally**, arm confirmation deadline | Listening ring **immediately** | Confirms with `led_anim` listening, replacing provisional paint | [proposed] |
 | A3 | IDLE | LINKED, no confirmation before deadline | Withdraw provisional paint, mark link DOWN | **Hard cut** to orange pulse — no fade (§6 Q4) | — | [proposed] |
 | A4 | IDLE | DOWN / SUSPECT | Do not send, do not paint a turn state | Orange pulse continues (unchanged) | — | [proposed] |
-| A5 | LISTENING / THINKING / PLAYING | LINKED | Send button event | Ring clears when controller's cleanup arrives | Cancels turn (`cancel_event` + `speaker_flush`); **local only — HA's pipeline runs to completion, result discarded** (`em_esphome.py:1158`) | [today] |
+| A5 | LISTENING / THINKING / PLAYING | LINKED | Send button event | Ring clears when controller's cleanup arrives | Cancels the turn (`cancel_event` + `speaker_flush`); an active HA pipeline abort remains follow-up work | [today] |
 | A6 | LISTENING / THINKING / PLAYING | LINKED | Send button event **+ clear ring locally** (press during a turn state is unambiguously *cancel*) | Ring clears **immediately** | Cancels as above | [proposed] |
 | A7 | **MUTED** | tap | Sent with `muted: true`; **controller refuses the turn** (`em_button.decide` → `BLOCKED`) | Red ring unchanged — **silent by design** (see §6 Q1) | Nothing. Mic never opens: `mic_start` is rejected device-side while muted | [today] |
 | A8 | **MUTED** | hold | Sent with `muted: true` | Red ring unchanged | **Fires `long` to HA.** A hold is not speech, so the mute has no opinion about it | [today] |

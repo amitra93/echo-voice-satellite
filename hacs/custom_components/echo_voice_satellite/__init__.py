@@ -1,7 +1,7 @@
 """EchoMuse Home Assistant integration package.
 
 Sets up the controller client, the device coordinator, the entity platforms,
-and — per FULL_DUPLEX_PLAN.md Phase 2b — one passive BLE remote scanner per
+and — per docs/design/full-duplex-plan.md Phase 2b — one passive BLE remote scanner per
 known device, fed from `ble.adverts` events. There is no ESPHome dependency
 anywhere in this package: devices are wholly owned by this integration.
 

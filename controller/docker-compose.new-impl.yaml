@@ -1,6 +1,6 @@
 # Redeploy of the Phase 4 (turn-engine + HACS) implementation, replacing the
 # ESPHome-impersonation-era container that was running before this cutover
-# (FULL_DUPLEX_PLAN.md). Builds fresh from this working tree rather than
+# (docs/design/full-duplex-plan.md). Builds fresh from this working tree rather than
 # pulling the published image, so it picks up em_esphome.py's deletion and
 # everything else in the cutover.
 #

@@ -12,7 +12,7 @@ always-on wake stream (16kHz mono S16_LE) continuously, and the OWW listener in
 em_controller already scores it and detects near-misses — so a small per-device
 rolling ring buffer there is all the pre-roll this needs. No device firmware
 change, no OTA, no new wire protocol. See
-docs/superpowers/specs/2026-08-23-wake-capture-labeling-design.md.
+docs/design/2026-08-23-wake-capture-labeling-design.md.
 
 Storage mirrors em_recordings and em_oww_models: files live under
 `training_captures/` beside the SQLite DB, inside the persisted Docker volume.

@@ -1438,7 +1438,7 @@ def delete_device(device_id: str) -> None:
 # get_esphome_port/assign_esphome_port/free_esphome_port and their BLE-proxy
 # counterparts (get_ble_proxy_port/ensure_ble_proxy_port/free_ble_proxy_port,
 # BLE_PORT_OFFSET) allocated per-device TCP ports for the ESPHome-impersonation
-# voice satellite and BT proxy — both gone (FULL_DUPLEX_PLAN.md). Deleted along
+# voice satellite and BT proxy — both gone (docs/design/full-duplex-plan.md). Deleted along
 # with their only callers (em_esphome.py, em_ble_proxy.py), not migrated: the
 # esphome_api_port/ble_proxy_port COLUMNS stay in the schema (never dropped —
 # MIGRATIONS is append-only) but are no longer read or written anywhere.

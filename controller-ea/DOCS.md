@@ -40,9 +40,10 @@ Assistant add-on instead of a separate docker-compose deployment.
 3. Use the dashboard's **provisioning wizard** (USB, Chrome) to set up a
    rooted Echo Dot. It finds this controller automatically — no manual IP
    entry on the device side.
-4. Approve the device in the dashboard once it appears as pending. Home
-   Assistant then discovers it automatically via the built-in ESPHome
-   integration.
+4. Approve the device in the dashboard once it appears as pending. Generate an
+   API key in **Settings → Home Assistant Integration**, install the EchoMuse
+   HACS integration, and configure it with this controller URL and key. The
+   integration adds supported approved devices automatically.
 
 ### The provisioning wizard needs a secure browser context
 

@@ -1,6 +1,6 @@
 # EchoMuse Controller — Backend & Management Console Spec
 
-**Status:** Implemented (v2.2.0)  
+**Status:** Superseded historical record (v2.2.0)
 **Last updated:** 2026-05-20
 
 > ⚠️ **This is a v2.2.0 design spec, kept as a record of what was designed —
@@ -10,9 +10,9 @@
 > and the PTY shell as not implemented, and both shipped (v2.4.5 and v2.7.1
 > respectively); the OTA section describes an `update.sh` pushed to the device
 > that no longer exists. For how the controller actually works today, read
-> **`CLAUDE.md`** (current architecture and the invariants behind it) and
-> **[`JOURNAL.md`](JOURNAL.md)** (why each thing is the way it is). For using it,
-> **`docs/quickstart.md`**.
+> [`full-duplex-plan.md`](full-duplex-plan.md), **`CLAUDE.md`** (current
+> architecture and invariants), and **[`JOURNAL.md`](../../JOURNAL.md)** (why
+> each thing is the way it is). For using it, **[`quickstart.md`](../quickstart.md)**.
 
 ---
 

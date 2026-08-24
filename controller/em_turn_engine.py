@@ -2,7 +2,7 @@
 
 The controller owns device capture and playback. This module owns the live
 turn rendezvous with the HACS integration: REST/event lifecycle plus one
-bidirectional audio WebSocket per turn. See FULL_DUPLEX_PLAN.md for the full
+bidirectional audio WebSocket per turn. See docs/design/full-duplex-plan.md for the full
 design and CLAUDE.md's "Voice backend" section for how this fits with
 `em_controller.py` and the HACS integration under `hacs/`.
 

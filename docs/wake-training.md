@@ -66,6 +66,10 @@ holds **10%** of each polarity out for the test set — the same split policy as
 its synthetic data — so the model's reported accuracy stays honest. Your real
 clips displace synthetic ones rather than simply inflating the set.
 
+Forge records the clip and feature-generation inputs it used. If clips or
+augmentation settings changed since features were generated, retraining rebuilds
+those stale features first instead of silently training on an older dataset.
+
 ## 5. Install the retrained model
 
 When the build finishes you have a new `.onnx`. Install it the usual way —

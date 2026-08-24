@@ -119,9 +119,10 @@ that can drift, misjudge your room, or degrade over days (both of which
 actually happened with earlier, cleverer designs; boring won).
 
 That uninterrupted stream is also what makes it possible to run the *same*
-recogniser on the Dot itself and compare the two on byte-identical audio —
-which is exactly what the experimental on-device scoring mode does, without
-being allowed to act on the result. It is also why gating this stream on
+recogniser on the Dot itself and compare the two on byte-identical audio. In
+shadow mode that local score is observational; in capability- and model-gated
+active mode the Dot can report a wake crossing for the controller to turn into
+a normal voice turn. It is also why gating this stream on
 "sounds like speech" would be harder than it looks: the recogniser's internal
 buffers assume continuity, and splicing gated bursts together measurably
 depresses its scores.

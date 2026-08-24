@@ -2,9 +2,9 @@
 
 A HACS custom integration that adds your EchoMuse devices to Home Assistant
 directly — as a native `assist_satellite` plus supporting entities — instead
-of through HA's built-in ESPHome integration. See `/FULL_DUPLEX_PLAN.md` at
-the repo root for the full design and why this replaced the ESPHome
-impersonation.
+of through HA's built-in ESPHome integration. See
+[`docs/design/full-duplex-plan.md`](../docs/design/full-duplex-plan.md) for
+the full design and why this replaced the ESPHome impersonation.
 
 This is a standalone HACS custom repository. The integration is intentionally
 not installed into the controller's own Python environment — it talks to the
@@ -25,9 +25,12 @@ integration talks to the device it manages.
 
 - `assist_satellite.<label>_voice_assistant` — the voice pipeline; supports
   announcements.
-- `binary_sensor` — online, privacy mute (read-only: mute is device-sovereign,
-  set only by the hardware button).
-- `number` — volume.
+- `switch` — privacy mute. It reflects device state and uses the device's
+  toggle command only when the requested state differs, so the hardware
+  button remains the underlying mute authority.
+- `media_player` — Music Assistant/Sendspin playback for `music_sync` devices,
+  including play, pause, stop, seek, track controls, volume, and mute.
+- `number` — volume where separately supported by the device configuration.
 - `sensor` — firmware version, wake-word model, and (capability-gated)
   ambient light.
 - `event` — the action button's single/double/triple/long gestures

@@ -1,4 +1,4 @@
-"""BLE proxy retirement (Phase 4 cutover, FULL_DUPLEX_PLAN.md).
+"""BLE proxy retirement (Phase 4 cutover, docs/design/full-duplex-plan.md).
 
 em_ble_proxy.py's ESPHome-hosted BT proxy (its own TCP listener, mDNS entry,
 protobuf-encoded advertisements) is gone. What forwarding still needs — "only

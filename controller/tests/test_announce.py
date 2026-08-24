@@ -5,7 +5,7 @@ VoiceAssistantAnnounceFinished is HA's completion signal, and HA BLOCKS on it.
 as "should block until the announcement is done playing", holds
 `_is_announcing` and the RESPONDING state for its duration, and raises
 `SatelliteBusyError` if another announcement arrives meanwhile. The old
-ESPHome-impersonation satellite (`em_esphome.py`, deleted — FULL_DUPLEX_PLAN.md
+ESPHome-impersonation satellite (`em_esphome.py`, deleted — docs/design/full-duplex-plan.md
 Phase 4) implemented that by awaiting our reply
 (`send_voice_assistant_announcement_await_response`); it used to answer
 synchronously in the message handler, before a byte had played, so the

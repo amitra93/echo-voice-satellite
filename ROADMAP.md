@@ -1,5 +1,10 @@
 # EchoMuse Roadmap
 
+**Current state (2026-08-24):** the HACS turn engine, continued
+conversation, Sendspin music playback, and device-side wake triggering are
+already present. The items below describe the remaining reliability and
+feature work, not a greenfield ESPHome implementation.
+
 This roadmap focuses on making EchoMuse a polished, privacy-conscious voice satellite while preserving its strongest differentiator: deeply repurposing Echo Dot hardware with reliable, observable fleet management.
 
 ## Guiding Principles
@@ -25,9 +30,10 @@ This roadmap focuses on making EchoMuse a polished, privacy-conscious voice sate
 
 **Relevant code:** `controller/em_turn_engine.py`, `controller/em_controller.py`, `controller/em_runbarrier.py`, `hacs/custom_components/echo_voice_satellite/assist_satellite.py`
 
-### 2. Add Remote Start And Continued Conversations
+### 2. Add Remote Start And Richer Continued Conversations
 
-**Goal:** Support Home Assistant's `START_CONVERSATION` satellite feature.
+**Goal:** Support Home Assistant's `START_CONVERSATION` satellite feature and
+extend the existing HA-requested continuation flow.
 
 - Advertise `AssistSatelliteEntityFeature.START_CONVERSATION` only after the controller supports it.
 - Implement announcement-then-listen behavior.

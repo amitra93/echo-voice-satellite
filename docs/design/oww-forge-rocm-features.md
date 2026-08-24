@@ -1,5 +1,9 @@
 # ROCm Feature Extraction Implementation Plan
 
+**Status:** Implemented with changes. Runtime PyTorch conversion, CPU fallback,
+and parity tests shipped. Ordinary CI remains GPU-free; the ROCm benchmark and
+the proposed throughput gate remain manual validation work.
+
 This plan covers replacing the CPU-only ONNX feature-extraction path with a
 native PyTorch implementation that can run on the AMD ROCm GPU. It must not
 change the feature representation used by openWakeWord.

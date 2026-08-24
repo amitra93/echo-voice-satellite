@@ -1,6 +1,6 @@
 """Trusted-LAN client for the EchoMuse controller's HA-facing surface.
 
-Deliberately NOT a custom control-WebSocket protocol (FULL_DUPLEX_PLAN.md
+Deliberately NOT a custom control-WebSocket protocol (docs/design/full-duplex-plan.md
 "No standalone gateway / no custom control-WS protocol"): the controller's
 existing `em_api.py` already has authenticated REST plus a broadcast
 `/api/events` WebSocket, so this module is a thin typed wrapper around that —

@@ -1,4 +1,4 @@
-"""Config flow: manual controller URL + API key (FULL_DUPLEX_PLAN.md Q8/Q9).
+"""Config flow: manual controller URL + API key (docs/design/full-duplex-plan.md Q8/Q9).
 
 No mDNS discovery — the fork's zeroconf attempt hit a real HA limitation
 (service names capped at 15 characters) and manual entry is what it shipped

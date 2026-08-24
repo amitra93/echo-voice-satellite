@@ -2,10 +2,10 @@
 
 ## Status
 
-Design for the direct interface between the EchoMuse controller and Music
-Assistant. The timestamped controller-to-device protocol and scheduled device
-renderer already exist. The outbound Music Assistant connection described here
-is the next implementation step.
+**Implemented with changes.** The controller connects directly to Music
+Assistant through Sendspin, and the device protocol includes scheduled music
+rendering. The HACS integration now has a media-player entity, rather than
+only Echo-specific status as originally proposed.
 
 ## Decisions
 

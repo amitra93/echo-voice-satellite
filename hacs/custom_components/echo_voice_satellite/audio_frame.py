@@ -5,7 +5,7 @@ importing it: this package ships as a standalone HA custom integration and
 must not depend on the controller's Python path. Frame types, sizes, and the
 `>BBI` header are the wire contract between the two — a controller-side
 change here needs the matching change on both sides (see
-`FULL_DUPLEX_PLAN.md`).
+`docs/design/full-duplex-plan.md`).
 """
 
 from __future__ import annotations

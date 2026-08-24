@@ -1,5 +1,11 @@
 # Full-Duplex Turn Engine + HACS Integration — Implementation Plan
 
+**Status:** Implemented with changes. The ESPHome voice path was removed and
+the controller/HACS turn engine shipped. The remaining full-duplex gap is
+controller-driven abort of an active Home Assistant pipeline during barge-in;
+see [`ROADMAP.md`](../../ROADMAP.md). The HACS integration now also exposes a
+media player, beyond this plan's original entity scope.
+
 Replace the ESPHome impersonation as EchoMuse's voice path by extending the
 existing controller API with a turn engine and a Home Assistant custom (HACS)
 integration. Devices appear in HA through that integration instead of as

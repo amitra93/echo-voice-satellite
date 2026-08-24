@@ -1,6 +1,6 @@
 """Native Assist satellite facade; the controller's turn engine stays turn
 authority (mic capture, playback, barge-in all live there — see
-FULL_DUPLEX_PLAN.md). This entity's only job is to run HA's Assist pipeline
+docs/design/full-duplex-plan.md). This entity's only job is to run HA's Assist pipeline
 against the controller-offered mic stream and stream the resulting TTS back
 down the same per-turn audio channel.
 

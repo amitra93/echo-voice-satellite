@@ -1,6 +1,6 @@
 """Incremental transcode of HA's TTS ResultStream to the wire PCM format.
 
-Model 3 (FULL_DUPLEX_PLAN.md "TTS conversion"): HA's `assist_satellite`
+Model 3 (docs/design/full-duplex-plan.md "TTS conversion"): HA's `assist_satellite`
 support gives a custom integration a streaming `ResultStream`
 (`tts.async_get_stream`), not just a `tts_proxy` URL. Providers commonly
 return MP3/OGG/WAV at whatever rate the engine produces, so a decode step is

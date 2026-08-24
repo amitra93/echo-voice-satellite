@@ -1,5 +1,5 @@
 """
-Phase 4 cutover (FULL_DUPLEX_PLAN.md) — deployment-shape and dead-code-removal
+Phase 4 cutover (docs/design/full-duplex-plan.md) — deployment-shape and dead-code-removal
 guards that the other test_phase4_*.py files don't already cover: the parts
 of the cutover that live in `main()`'s startup/shutdown, the connect/disconnect
 handlers, `em_db.py`'s port allocators, the Dockerfile, and the dashboard.
@@ -184,7 +184,7 @@ def test_main_no_longer_starts_or_stops_esphome_or_ble_proxy_servers():
     """
     main() used to bring up/tear down a per-device ESPHome listener pool and
     a separate BLE-proxy server pool. Both are gone: there is no per-device
-    server under the turn-engine/HACS architecture at all (FULL_DUPLEX_PLAN.md
+server under the turn-engine/HACS architecture at all (docs/design/full-duplex-plan.md
     Phase 4), so nothing needs starting at boot or cancelling at shutdown.
     """
     src = (CONTROLLER / "em_controller.py").read_text()
