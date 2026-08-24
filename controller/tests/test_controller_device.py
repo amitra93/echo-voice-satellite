@@ -332,6 +332,106 @@ def test_control_handler_rejects_bad_first_message_and_holds_unknown_device(monk
     asyncio.run(run())
 
 
+def test_control_handler_processes_device_state_messages(monkeypatch):
+    class WS(FakeWS):
+        remote_address = ("192.0.2.10", 8767)
+
+        def __init__(self, first, messages):
+            self.sent = []
+            self.first = first
+            self.messages = iter(messages)
+            self.closed = False
+
+        async def send(self, message):
+            self.sent.append(message)
+
+        async def recv(self):
+            return self.first
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self.messages)
+            except StopIteration:
+                raise StopAsyncIteration
+
+        async def close(self):
+            self.closed = True
+
+    async def never_wake(_device):
+        await asyncio.Event().wait()
+
+    async def no_op(*args, **kwargs):
+        return None
+
+    row = {"label": "Kitchen", "approved": 1, "firmware_ver": "v1"}
+    config = {"owwOnDevice": "off", "startupVolume": 80,
+              "owwModel": "hey_jarvis_v0.1", "bleProxyEnabled": True}
+    messages = [
+        json.dumps({"type": "ambient_light", "lux": 12}),
+        json.dumps({"type": "mute_state", "muted": True}),
+        json.dumps({"type": "volume_state", "level": 90}),
+        json.dumps({"type": "stats", "cpuPct": 5, "ambientLux": 12,
+                    "owwShadow": {"frames": 3, "drops": 1, "crossings": 1,
+                                   "maxScore": 0.8, "threshold": 0.3}}),
+        json.dumps({"type": "wifi_result", "ok": True, "ssid": "Home"}),
+        json.dumps({"type": "playback_stats", "periods": 4, "underruns": 1,
+                    "stats": {"min_depth": 2}}),
+        json.dumps({"type": "oww_shadow_cross", "score": 0.7, "ageMs": 20}),
+        json.dumps({"type": "oww_wake", "score": 0.8, "threshold": 0.3, "ageMs": 10}),
+        json.dumps({"type": "ble_adverts", "adverts": [{"address": "x"}]}),
+        json.dumps({"type": "wifi_scan_result", "networks": []}),
+        json.dumps({"type": "log", "level": "info", "message": "hello"}),
+        json.dumps({"type": "pong"}),
+        json.dumps({"type": "unknown"}),
+    ]
+
+    async def run():
+        old_devices = em_controller._devices
+        em_controller._devices = {}
+        em_controller.websockets.exceptions = types.SimpleNamespace(ConnectionClosed=Exception)
+        ws = WS(json.dumps({"type": "register", "device_id": "dev",
+                            "ip": "192.0.2.10", "capabilities": ["oww_shadow"]}), messages)
+        monkeypatch.setattr(em_controller, "_link_auth_ok", lambda *args: asyncio.sleep(0, result=True))
+        monkeypatch.setattr(em_controller.db, "get_config", lambda *args: "strict")
+        monkeypatch.setattr(em_controller.db, "get_device", lambda *args: row)
+        monkeypatch.setattr(em_controller.db, "get_turns", lambda *args: [])
+        monkeypatch.setattr(em_controller.db, "get_effective_device_config", lambda *args: config)
+        monkeypatch.setattr(em_controller.db, "get_device_config", lambda *args: {})
+        monkeypatch.setattr(em_controller.db, "set_device_config", lambda *args: None)
+        monkeypatch.setattr(em_controller.db, "record_device_stats", lambda *args: None)
+        monkeypatch.setattr(em_controller.db, "touch_device_seen", lambda *args: None)
+        monkeypatch.setattr(em_controller.db, "bump_wake_counters", lambda *args, **kwargs: None)
+        monkeypatch.setattr(em_controller.db, "upsert_device_seen", lambda *args: None)
+        monkeypatch.setattr(em_controller.db, "log_device", lambda *args: None)
+        monkeypatch.setattr(em_controller.db, "set_turn_playback", lambda *args: None)
+        monkeypatch.setattr(em_controller.api, "_push_event", no_op)
+        monkeypatch.setattr(em_controller.api, "_push_log_event", no_op)
+        monkeypatch.setattr(em_controller.api, "wifi_record_result", lambda *args: ({"pending": None}, False))
+        monkeypatch.setattr(em_controller.api, "notify_device_connected", no_op)
+        monkeypatch.setattr(em_controller.api, "notify_device_disconnected", no_op)
+        monkeypatch.setattr(em_controller.em_sendspin, "unregister_device", no_op)
+        monkeypatch.setattr(em_controller.em_player, "device_gone", lambda *args: None)
+        monkeypatch.setattr(em_controller, "leds_off", no_op)
+        monkeypatch.setattr(em_controller, "wake_word_listener", never_wake)
+        monkeypatch.setattr(em_controller.ha_sidechannels, "ambient_light", lambda *args: None)
+        monkeypatch.setattr(em_controller.ha_sidechannels, "mute_state", lambda *args: None)
+        monkeypatch.setattr(em_controller.ha_sidechannels, "volume", lambda *args: None)
+        monkeypatch.setattr(em_controller.ha_sidechannels, "capabilities", lambda *args: None)
+        monkeypatch.setattr(em_controller.ha_sidechannels, "wake_model", lambda *args: None)
+        monkeypatch.setattr(em_controller.ha_sidechannels, "ble_adverts", lambda *args: None)
+        try:
+            await em_controller.handle_control(ws)
+            assert ws.closed is False
+            assert any(json.loads(value)["type"] == "ack" for value in ws.sent)
+        finally:
+            em_controller._devices = old_devices
+
+    asyncio.run(run())
+
+
 def test_handle_control_rejects_non_register_and_holds_unknown_device_pending(monkeypatch):
     class WS:
         remote_address = ("192.0.2.1", 1234)
