@@ -358,6 +358,17 @@ and existing phase-0 auth coverage. The focused suite passes; the remaining
 branches are minor defensive paths in API-key parsing, bootstrap races, and
 credential length validation.
 
+### Controller workstream execution: database registry/config slice (completed 2026-08-23)
+Added `controller/tests/test_db_registry.py` with temporary SQLite databases.
+Tests cover device registration, pending/approval lifecycle, seen-state updates,
+labels, link-token mint/reuse/revocation, per-device config fallback and bad
+JSON handling, and global config defaults/raw persistence. The complete
+controller suite passes with the migration tests included.
+
+`em_db.py` increased from **61.7% to 72.8%** across the full controller suite
+(`724 passed, 1 skipped`). Remaining gaps are primarily activity/metrics query
+variants and defensive migration-failure branches.
+
 ### Phase 4 — the big lever: `em_api.py` and `em_controller.py`
 This is genuinely necessary — Phases 3+5 alone cap out well short of 70%
 for the controller, because these two files are 48% of production
