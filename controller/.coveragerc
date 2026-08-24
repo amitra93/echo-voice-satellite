@@ -1,0 +1,13 @@
+[run]
+# Scope coverage to production code only. Without this, `tests/*.py`
+# themselves count as statements (and trivially self-cover at ~100%,
+# since a test file's own lines execute just by running), which inflates
+# the reported total to a number nobody could act on — 68% blended vs.
+# 45% production-only, measured on this tree 2026-08-23. What's excluded
+# below is measurement scope only: it does not change which tests run.
+omit =
+    tests/*
+
+[report]
+precision = 1
+skip_covered = false

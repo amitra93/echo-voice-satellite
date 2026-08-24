@@ -27,10 +27,12 @@ jobs:
         # level, needed by handler-level tests driven through aiohttp.test_utils.
         # websockets remains stubbed via sys.modules, while openwakeword and
         # onnxruntime stay out: nothing here needs a real wake-word model.
-        run: pip install pytest numpy scipy pyyaml aiohttp
+        # pytest-cov measures production code only via .coveragerc;
+        # cryptography supports the isolated device-link PKI tests.
+        run: pip install pytest pytest-cov numpy scipy pyyaml aiohttp cryptography
       - name: Run pytest
         working-directory: controller
-        run: python -m pytest tests/ -v
+        run: python -m pytest tests/ -v --cov=. --cov-config=.coveragerc --cov-report=term-missing
 
   forge-tests:
     name: Forge unit tests

@@ -53,18 +53,39 @@ cd device
 **Run Go tests (host):**
 ```bash
 cd device
-go test ./...
+go test ./internal/... ./pkg/...
+# with coverage:
+go test -coverprofile=cover.out ./internal/... ./pkg/... && go tool cover -func=cover.out
 ```
+`cmd/` imports the hardware bindings, which carry `//go:build server` (device
+builds pass `-tags server`) — listing it on a host platform fails package
+setup with a build-constraints error, not a test failure, so don't `go test
+./...`. This is also CI's exact scope (`.github/workflows/ci.yml`).
 
 Tests only cover pure-Go logic — hardware-dependent code is not testable on the host.
 
 **Run controller tests (host):**
 ```bash
 cd controller
-python -m pytest tests/        # needs: pytest numpy scipy pyyaml — not the full requirements.txt
+python -m pytest tests/        # needs: pytest numpy scipy pyyaml aiohttp — not the full requirements.txt
+# with coverage (tests/ itself excluded from the denominator via .coveragerc):
+python -m pytest tests/ --cov=. --cov-report=term-missing   # needs: pytest-cov
 ```
 
-Controller tests cover the pure-logic modules only (`em_eq`, `em_scenes`, `em_oww_models`, `version`, `em_hostip`, `em_ingressauth`) — keep it that way unless you're prepared to pull openwakeword/aiohttp into the test environment. Both suites (plus `go vet`) run in CI on every push/PR (`.github/workflows/ci.yml`).
+Most of the controller test suite covers pure-logic modules — the bulk of
+`em_*.py` is now built as small decision functions with their own tests
+(`em_button`, `em_linkauth`, `em_ingressauth`, `em_turnclock`, `em_arbiter`,
+`em_shadow`, `em_scenes`, `em_config_sections`, and more), the pattern
+CLAUDE.md documents throughout this file. `em_api.py` is the one exception
+importing a genuinely heavy dependency at module level (`aiohttp`), which is
+why it's in the install list — but its OTHER heavy import (`websockets`) is
+stubbed via `sys.modules` rather than installed, since the handlers under
+test don't need it (`tests/test_training_captures_api.py` is the pattern to
+follow for more of `em_api.py`). `em_controller.py` is still excluded
+entirely, since it imports `openwakeword`/`onnxruntime` and `zeroconf` at
+module level with no stub in place yet — pulling those in would cost minutes
+of install for a real wake-word model nothing here exercises. Both suites
+(plus `go vet`) run in CI on every push/PR (`.github/workflows/ci.yml`).
 
 **Release:** pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds the binary in the compiler image and attaches it to a GitHub release. **Tag with `git tag -a --cleanup=verbatim`** — the annotation message becomes the release body (`body_path` from `git tag -l --format='%(contents)'`), which is what the dashboard shows next to an available update. Write it for the person deciding whether to push firmware to a device they depend on: what changed, what to expect, anything required of them. GitHub's generated commit list is still appended below it. A lightweight tag yields an empty body and falls back to that list, which is a worse experience, not a broken one.
 
