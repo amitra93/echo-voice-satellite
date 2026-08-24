@@ -695,6 +695,52 @@ def test_run_voice_locked_handles_normal_turn_and_continuation(monkeypatch):
     asyncio.run(run())
 
 
+def test_barge_watcher_detects_thinking_and_playback_wakes(monkeypatch):
+    class Model:
+        def __init__(self, scores):
+            self.scores = iter(scores)
+
+        def reset(self):
+            return None
+
+        def predict(self, samples):
+            return {"hey": next(self.scores)}
+
+    async def run():
+        monkeypatch.setattr(em_controller.em_oww_models, "prediction_key", lambda value: "hey")
+        monkeypatch.setattr(em_controller.db, "log_device", lambda *args: None)
+        monkeypatch.setattr(em_controller.turn_engine, "cancel_voice_turn", lambda *args, **kwargs: None)
+        device = new_device()
+        device.oww_model = "hey"
+        device._barge_model_key = "hey"
+        device.oww_threshold = 0.5
+        device.barge_threshold = 0.1
+        payload = b"\x00" * em_controller.CHUNK_BYTES * 2
+
+        device._barge_model = Model([0.25, 0.26])
+        thinking_task = asyncio.create_task(em_controller._barge_watcher(device, asyncio.Event()))
+        await asyncio.sleep(0)
+        await device.voice_queue.put(payload)
+        await thinking_task
+        assert device.barge_detected
+        assert device.cancel_event.is_set()
+        device.barge_detected = False
+        device.cancel_event.clear()
+
+        flushed = []
+        device.send_control = lambda message: asyncio.sleep(0, result=flushed.append(message))
+        device._barge_model = Model([0.2])
+        playback = asyncio.Event()
+        playback.set()
+        playback_task = asyncio.create_task(em_controller._barge_watcher(device, playback))
+        await asyncio.sleep(0)
+        await device.voice_queue.put(payload)
+        await playback_task
+        assert {"type": "speaker_flush"} in flushed
+
+    asyncio.run(run())
+
+
 def test_handle_control_rejects_non_register_and_holds_unknown_device_pending(monkeypatch):
     class WS:
         remote_address = ("192.0.2.1", 1234)
