@@ -18,10 +18,8 @@ jobs:
       # math, nothing that pulls in openwakeword/onnxruntime (which would
       # cost minutes of install for zero coverage).
       - name: Install test dependencies
-        # pyyaml is for the add-on config parity tests (test_channels.py):
-        # config.yaml is genuinely YAML and hand-parsing it to compare
-        # options and schema would be fragile in exactly the way that test
-        # exists to prevent. Pure Python and dependency-free.
+        # pyyaml is used by the add-on configuration tests: config.yaml is
+        # genuinely YAML and hand-parsing it would be fragile.
         #
         # aiohttp is the real web framework em_api.py imports at module
         # level, needed by handler-level tests driven through aiohttp.test_utils.

@@ -278,9 +278,6 @@ anything that happened in between. Decide within a day rather than a month.
   them, ask before migrating.
 - **Open the dashboard yourself first** — the first Home Assistant user
   through the door becomes the admin.
-- **Early Access is a separate add-on with separate storage.** Installing it
-  is *another* migration with all of the above again, `tls/` included.
-  Switching channels is not a toggle.
 - **`docker compose pull` on the old install can quietly bring it back.** If
   you have automation that pulls and restarts, disable it, or the two
   controllers problem returns weeks later when you have forgotten about it.

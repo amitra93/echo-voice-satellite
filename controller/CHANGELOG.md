@@ -2,7 +2,7 @@
 
 ## 2.20.1
 
-Everything from the 2.20.1 Early Access builds. All fixes — no new settings,
+Changes since the 2.20.0 prerelease builds. All fixes — no new settings,
 no database migration, no firmware requirement, and nothing to do on your
 devices.
 
@@ -70,7 +70,7 @@ and the original answer is gone rather than resumed.
   add-on**, in `docs/migrate-to-addon.md`. Read the part about `tls/` before
   you start.
 
-## 2.20.1-ea.5 — Early Access
+## 2.20.1-ea.5 — Prerelease
 
 - **Changing a wake word now installs it before switching the device onto
   it.** In ea.3 and ea.4, picking a wake word a device did not have made the
@@ -88,7 +88,7 @@ and the original answer is gone rather than resumed.
   model file means nothing to them, so the change applies immediately as
   before.
 
-## 2.20.1-ea.4 — Early Access
+## 2.20.1-ea.4 — Prerelease
 
 - **The dashboard's Speaking state now follows the device.** In ea.3 the tile
   showed Speaking slightly early, dropped back to Thinking while the device
@@ -102,7 +102,7 @@ and the original answer is gone rather than resumed.
   and it only tells the controller when playback *ends*. Reporting the start
   too needs a firmware change.
 
-## 2.20.1-ea.3 — Early Access
+## 2.20.1-ea.3 — Prerelease
 
 - **Changing a device's wake word can no longer leave it deaf.** If you picked
   a wake word a device had never been given, and that device was doing its own
@@ -122,7 +122,7 @@ and the original answer is gone rather than resumed.
   same ~10MB every time. It is now kept on disk beside your database and
   checked against its fingerprint before use.
 
-## 2.20.1-ea.2 — Early Access
+## 2.20.1-ea.2 — Prerelease
 
 Two announcement faults found while testing ea.1.
 
@@ -143,7 +143,7 @@ Two announcement faults found while testing ea.1.
 An announcement now also tells Home Assistant whether the audio actually
 reached the speaker, rather than always reporting success.
 
-## 2.20.1-ea.1 — Early Access
+## 2.20.1-ea.1 — Prerelease
 
 - **Talking over a response now works.** Saying the wake word while EchoMuse
   was answering did stop it — and then nothing happened. Whatever you said
@@ -164,7 +164,7 @@ reached the speaker, rather than always reporting success.
   and the satellite dropped out of its "responding" state early. It now waits
   for playback, and says whether the audio actually reached the speaker.
 
-## 2.20.0-ea.6 — Early Access
+## 2.20.0-ea.6 — Prerelease
 
 - **Installing wake word models on a device works again.** Sending a wake
   word model to an Echo failed with an internal error, every time. If you
@@ -248,10 +248,6 @@ that same range, so a press always moves it.
 - **A Debug logging option.** The controller could always do this, but only
   if you ran it as a container and knew the environment variable. Leave it
   off unless you are chasing something; it is verbose.
-- **An Early Access channel**, installed as a separate add-on for anyone who
-  wants the next release before it is general. It has its own storage, so
-  switching channels is a migration rather than a toggle — see its
-  documentation before installing.
 - The provisioning wizard's WebUSB error now names the exact origin the
   browser needs allowed, instead of suggesting an address the add-on refuses.
 
@@ -270,12 +266,11 @@ that same range, so a press always moves it.
 - A voice turn that Home Assistant ends before it starts listening is no
   longer recorded as "no speech" — it was blaming the speaker for something
   at the other end, in a figure the activity statistics report.
-### Early Access prereleases
+### Prerelease builds
 
-This release was published to the Early Access channel first, as
-`2.20.0-ea.1` through `2.20.0-ea.5`. Each carried a subset of the above;
-`2.20.0-ea.5` is the same set of changes as this release. Nothing further is
-needed if you were running one of them.
+This release was preceded by `2.20.0-ea.1` through `2.20.0-ea.5`. Each carried
+a subset of the above; `2.20.0-ea.5` is the same set of changes as this
+release.
 
 
 ## 2.19.0

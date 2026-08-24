@@ -61,7 +61,7 @@ Split by what's already covered vs. not:
 - **Real gaps, all pure-testable-in-principle**: `em_auth.py` (54%),
   `em_db.py` (62%), `em_oww_assets.py`
   (57%), `em_sendspin.py` (75%), `em_hostip.py` (78%),
-  `tools/sync_channels.py` (56%), `em_start.py` (0%).
+  `em_start.py` (0%).
 - **The big lever**: `em_controller.py` (1421 stmts, **0%**) and
   `em_api.py` (2077 stmts, **15%**) together are **3498 of 7262 production
   statements — 48% of the whole controller.** No distribution of effort
@@ -343,7 +343,7 @@ suite and full host-testable device suite pass.
 (query and migration-fixup logic), `em_oww_assets.py` (LRU eviction,
 free-space math — CLAUDE.md already calls this "pure logic, unit-tested,"
 so 57% is real untested branches, not a designed gap), `em_sendspin.py`,
-`em_hostip.py`, `tools/sync_channels.py`, `em_start.py` (the
+`em_hostip.py`, `em_start.py` (the
 option→env-var mapping is already exercised as *data* by
 `test_deploy.py`; add tests that actually run `main()`'s mapping logic).
 **Illustrative targets**: 85%, 82%, 85%, 88%, 92%, 85%, 45%, 40%
@@ -397,15 +397,6 @@ routing probes, socket cleanup, cached `server_ip()` resolution, and the
 container-bridge warning path. The full controller suite passes.
 
 `em_hostip.py` increased from **77.5% to 100.0%** (`732 passed, 1 skipped`).
-
-### Controller workstream execution: channel generator slice (completed 2026-08-23)
-Expanded `controller/tests/test_channels.py` with isolated temporary-tree tests
-for version preservation/fallback, generated documentation and presentation
-copying, drift detection, and `main()` check/set-version behavior.
-
-`tools/sync_channels.py` reached **85.6%** across the full controller suite
-(`735 passed, 1 skipped`). Remaining
-branches are missing presentation files and the ordinary no-argument write path.
 
 ### Controller workstream execution: add-on startup mapping slice (completed 2026-08-23)
 Refactored `controller/em_start.py`'s existing import-time behavior into

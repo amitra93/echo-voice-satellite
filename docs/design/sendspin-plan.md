@@ -152,7 +152,6 @@ Sendspin server timestamp
 - Add dashboard status for identity, pairing, connected server, group, synchronization, and buffer health.
 - Provide pairing-token generation and reset without logging PSKs.
 - Include `aiosendspin` in both amd64 and arm64 controller images.
-- Generate Early Access add-on files through `sync_channels.py`.
 
 ## Testing Before Hardware
 
