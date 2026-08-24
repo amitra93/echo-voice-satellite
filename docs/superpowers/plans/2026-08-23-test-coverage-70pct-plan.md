@@ -429,6 +429,12 @@ admin setup, password login/logout, ingress login rejection/success, and the
 public `/api/auth/me` response shape. The full controller suite passes
 (`746 passed, 1 skipped`); `em_api.py` reached **17.2%** overall.
 
+Expanded that slice with user-list and role-management tests covering role
+validation, malformed IDs, missing users, unchanged roles, last-admin
+protection, successful role updates, and password-field omission. The full
+controller suite passes (`748 passed, 1 skipped`); `em_api.py` reached
+**18.3%** overall.
+
 ### Phase 4 — the big lever: `em_api.py` and `em_controller.py`
 This is genuinely necessary — Phases 3+5 alone cap out well short of 70%
 for the controller, because these two files are 48% of production

@@ -14,10 +14,17 @@ def run(awaitable):
 
 
 def request(body=None, **kwargs):
-    async def json_body():
-        return body
+    class Request(dict):
+        async def json(self):
+            return body
 
-    return SimpleNamespace(json=json_body, headers={}, remote=None, **kwargs)
+    result = Request()
+    result.update(kwargs)
+    result.headers = {}
+    result.remote = None
+    for key, value in kwargs.items():
+        setattr(result, key, value)
+    return result
 
 
 def test_setup_state_reflects_bootstrap_token(monkeypatch):
@@ -83,3 +90,45 @@ def test_get_me_returns_only_public_user_fields():
     actual = Request(user=req.user)
     response = run(handler(actual))
     assert json.loads(response.text) == {"id": 1, "username": "admin", "role": "admin"}
+
+
+def test_user_role_patch_validates_and_protects_last_admin(monkeypatch):
+    handler = em_api._patch_user.__wrapped__
+    base = {"id": 1, "username": "admin", "role": "admin"}
+
+    bad_role = request({"role": "owner"}, match_info={"id": "1"}, user={"username": "admin"})
+    assert run(handler(bad_role)).status == 400
+    bad_id = request({"role": "readonly"}, match_info={"id": "x"}, user={"username": "admin"})
+    assert run(handler(bad_id)).status == 400
+
+    monkeypatch.setattr(em_api.db, "get_user_by_id", lambda user_id: None)
+    missing = request({"role": "readonly"}, match_info={"id": "1"}, user={"username": "admin"})
+    assert run(handler(missing)).status == 404
+
+    monkeypatch.setattr(em_api.db, "get_user_by_id", lambda user_id: base)
+    same = request({"role": "admin"}, match_info={"id": "1"}, user={"username": "admin"})
+    assert json.loads(run(handler(same)).text)["changed"] is False
+
+    monkeypatch.setattr(em_api.db, "admin_count", lambda: 1)
+    last = request({"role": "readonly"}, match_info={"id": "1"}, user={"username": "admin"})
+    assert run(handler(last)).status == 409
+
+    changed = []
+    monkeypatch.setattr(em_api.db, "admin_count", lambda: 2)
+    monkeypatch.setattr(em_api.db, "set_user_role", lambda user_id, role: changed.append((user_id, role)))
+    response = run(handler(last))
+    assert json.loads(response.text)["changed"] is True
+    assert changed == [(1, "readonly")]
+
+
+def test_get_users_omits_password_hash(monkeypatch):
+    handler = em_api._get_users.__wrapped__
+    monkeypatch.setattr(em_api.db, "get_all_users", lambda: [{
+        "id": 1, "username": "admin", "role": "admin", "ha_user_id": None,
+        "created_at": "now", "password_hash": "secret",
+    }])
+    response = run(handler({}))
+    assert json.loads(response.text) == [{
+        "id": 1, "username": "admin", "role": "admin", "ha_linked": False,
+        "created_at": "now",
+    }]
