@@ -761,6 +761,47 @@ def test_wake_capture_snapshot_is_debounced_and_saved_off_loop(monkeypatch):
     asyncio.run(run())
 
 
+def test_wake_listener_triggers_controller_turn_and_restores_listening(monkeypatch):
+    class StopListener(Exception):
+        pass
+
+    class Model:
+        def reset(self):
+            return None
+
+        def predict(self, samples):
+            return {"hey": 0.9}
+
+    async def run():
+        device = new_device()
+        device.oww_model = "hey"
+        device.oww_threshold = 0.5
+        device.oww_on_device = em_controller.em_shadow.MODE_OFF
+        device.save_wake_captures = False
+        calls = []
+        monkeypatch.setattr(em_controller, "OWWModel", lambda **kwargs: Model())
+        monkeypatch.setattr(em_controller.em_oww_models, "prediction_key", lambda value: "hey")
+        monkeypatch.setattr(em_controller.db, "log_device", lambda *args: None)
+        monkeypatch.setattr(em_controller.api, "_push_event", lambda *args: asyncio.sleep(0))
+        monkeypatch.setattr(em_controller, "_run_voice_locked", lambda *args, **kwargs: asyncio.sleep(0, result=calls.append("turn")))
+        monkeypatch.setattr(em_controller, "_maybe_capture_wake", lambda *args: calls.append("capture"))
+        device.mic_start = lambda: asyncio.sleep(0, result=calls.append("mic_start")) if calls.count("mic_start") == 0 else (_ for _ in ()).throw(StopListener())
+        device.mic_stop = lambda: asyncio.sleep(0, result=calls.append("mic_stop"))
+        device.beam_lock = lambda: asyncio.sleep(0, result=calls.append("beam_lock"))
+        device.beam_unlock = lambda: asyncio.sleep(0, result=calls.append("beam_unlock"))
+
+        task = asyncio.create_task(em_controller.wake_word_listener(device))
+        await asyncio.sleep(0)
+        await asyncio.sleep(0)
+        await device.mic_queue.put(b"\x01\x00" * (em_controller.CHUNK_BYTES // 2))
+        with pytest.raises(StopListener):
+            await task
+        assert calls[:4] == ["mic_start", "beam_lock", "turn", "beam_unlock"]
+        assert device.oww_paused.is_set()
+
+    asyncio.run(run())
+
+
 def test_handle_control_rejects_non_register_and_holds_unknown_device_pending(monkeypatch):
     class WS:
         remote_address = ("192.0.2.1", 1234)
