@@ -651,6 +651,50 @@ def test_meter_at_playback_start_fires_at_prime_or_exhaustion():
     asyncio.run(run())
 
 
+def test_run_voice_locked_handles_normal_turn_and_continuation(monkeypatch):
+    async def run():
+        device = new_device()
+        device.oww_paused.set()
+        device.barge_in_enabled = False
+        calls = []
+
+        async def record(name, *args, **kwargs):
+            calls.append(name)
+
+        device.mic_start = lambda: record("mic_start")
+        device.mic_stop = lambda: record("mic_stop")
+        monkeypatch.setattr(em_controller.em_player, "interrupt", lambda *args: record("interrupt"))
+        monkeypatch.setattr(em_controller.em_player, "resume_interrupted", lambda *args: record("resume"))
+        monkeypatch.setattr(em_controller, "leds_listening", lambda *args: record("listening"))
+        monkeypatch.setattr(em_controller, "_leds_turn_end", lambda *args: record("turn_end"))
+        monkeypatch.setattr(em_controller, "_push_device_state", lambda *args: record("state"))
+        monkeypatch.setattr(em_controller, "leds_spin_green", lambda *args: asyncio.sleep(3600))
+        monkeypatch.setattr(em_controller, "_run_streaming_post_turn_playback", lambda *args: asyncio.sleep(0, result=1))
+        monkeypatch.setattr(em_controller._wake_arbiter, "release", lambda *args: calls.append("release"))
+
+        turns = []
+
+        async def trigger(**kwargs):
+            turns.append((kwargs["trigger_label"], kwargs["preroll_discard"]))
+            await kwargs["on_thinking"]()
+            async def pcm():
+                yield b"response"
+            await kwargs["post_turn_play"](pcm())
+            return len(turns) == 1
+
+        monkeypatch.setattr(em_controller.turn_engine, "trigger_voice_turn", trigger)
+        await em_controller._run_voice_locked(device, "wakeword", is_wakeword=True)
+
+        assert turns[0][0] == "wakeword"
+        assert turns[1][0] == "continuation"
+        assert turns[1][1] == 0
+        assert "interrupt" in calls and "resume" in calls
+        assert calls.count("mic_start") == 1
+        assert device.oww_paused.is_set() is False
+
+    asyncio.run(run())
+
+
 def test_handle_control_rejects_non_register_and_holds_unknown_device_pending(monkeypatch):
     class WS:
         remote_address = ("192.0.2.1", 1234)
