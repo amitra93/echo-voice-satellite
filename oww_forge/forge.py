@@ -927,6 +927,148 @@ def cmd_build(args) -> None:
         shutil.copy2(src, dest)
         log(f"model ready: {dest} ({dest.stat().st_size / 1e3:.0f} kB)")
         log("install into EchoMuse: see oww_forge/README.md §Installing")
+        evaluate_model(name)
+
+
+def score_wav_file(oww_model, path: Path) -> float:
+    """Score a single WAV file against an openWakeWord model instance."""
+    import librosa
+    import numpy as np
+    import soundfile as sf
+
+    audio, sr = sf.read(path, dtype="int16")
+    if sr != 16000:
+        f = audio.astype("float32") / 32768.0
+        f = librosa.resample(f.T if f.ndim > 1 else f, orig_sr=sr, target_sr=16000)
+        audio = (np.clip(f if f.ndim == 1 else f.mean(axis=0), -1, 1) * 32767).astype("int16")
+    if audio.ndim > 1:
+        audio = audio.mean(axis=1).astype("int16")
+    oww_model.reset()
+    peak = 0.0
+    for i in range(0, len(audio) - 1280, 1280):
+        scores = oww_model.predict(audio[i : i + 1280])
+        peak = max(peak, max(scores.values()))
+    return float(peak)
+
+
+def _format_eval_row(label: str, scores: list[float], threshold_hi: float = 0.5, threshold_lo: float = 0.3) -> str:
+    import numpy as np
+    if not scores:
+        return f"{label:<28}: 0 clips"
+    arr = np.array(scores)
+    hi_pct = 100 * np.mean(arr >= threshold_hi)
+    lo_pct = 100 * np.mean(arr >= threshold_lo)
+    return (f"{label:<28}: {len(scores):4d} clips | mean={arr.mean():.3f} | max={arr.max():.3f} | "
+            f">={threshold_hi:.1f}: {hi_pct:5.1f}% | >={threshold_lo:.1f}: {lo_pct:5.1f}%")
+
+
+def _score_files_parallel(model_path: Path, files: list[Path], num_workers: int = 6) -> dict[Path, float]:
+    """Score a list of audio files across worker threads with per-thread ONNX models."""
+    from concurrent.futures import ThreadPoolExecutor
+    from openwakeword.model import Model
+
+    if not files:
+        return {}
+
+    def worker_loop(chunk):
+        m = Model(wakeword_models=[str(model_path)], inference_framework="onnx")
+        return [(p, score_wav_file(m, p)) for p in chunk]
+
+    chunks = [files[i::num_workers] for i in range(num_workers) if files[i::num_workers]]
+    results = {}
+    with ThreadPoolExecutor(max_workers=len(chunks)) as pool:
+        for chunk_res in pool.map(worker_loop, chunks):
+            for p, score in chunk_res:
+                results[p] = score
+    return results
+
+
+def evaluate_model(name: str) -> None:
+    """Evaluate a trained model against its test sets and output a granular report."""
+    from collections import defaultdict
+    import numpy as np
+
+    model_path = MODELS / f"{name}.onnx"
+    if not model_path.exists():
+        log(f"evaluation skipped: {model_path} not found")
+        return
+
+    cfg_path = WAKEWORDS / name / "config.yml"
+    work_dir = WAKEWORDS / name / name
+    if cfg_path.exists():
+        import yaml
+        cfg = yaml.safe_load(cfg_path.read_text())
+        if cfg.get("output_dir") and cfg.get("model_name"):
+            work_dir = Path(cfg["output_dir"]) / cfg["model_name"]
+
+    pos_dir = work_dir / "positive_test"
+    neg_dir = work_dir / "negative_test"
+    pos_files = sorted(pos_dir.glob("*.wav")) if pos_dir.exists() else []
+    neg_files = sorted(neg_dir.glob("*.wav")) if neg_dir.exists() else []
+
+    if not pos_files and not neg_files:
+        log("evaluation skipped: no test audio in positive_test or negative_test")
+        return
+
+    log("=" * 72)
+    log(f" MODEL EVALUATION REPORT: {name}.onnx")
+    log("=" * 72)
+
+    pos_scores = []
+    if pos_files:
+        log("\n--- Positive Test Clips (Target Wake Word) ---")
+        by_source = defaultdict(list)
+        by_gtts_locale = defaultdict(list)
+        pos_map = _score_files_parallel(model_path, pos_files)
+        pos_scores = [pos_map[p] for p in pos_files]
+        for p, score in pos_map.items():
+            if p.name.startswith("google_"):
+                by_source["Google Chirp 3"].append(score)
+                parts = p.name.split("_")
+                locale = parts[1] if len(parts) > 1 else "unknown"
+                by_gtts_locale[locale].append(score)
+            elif p.name.startswith("user_") or p.name.startswith("custom_"):
+                by_source["Custom / Recorded"].append(score)
+            else:
+                by_source["Piper / Synthetic"].append(score)
+
+        log(_format_eval_row("  Overall Positives", pos_scores, 0.5, 0.3))
+        for src, sc in sorted(by_source.items()):
+            log(_format_eval_row(f"    - {src}", sc, 0.5, 0.3))
+        if by_gtts_locale:
+            log("    Google Chirp 3 by Locale:")
+            for loc, sc in sorted(by_gtts_locale.items()):
+                log(_format_eval_row(f"      • {loc}", sc, 0.5, 0.3))
+
+    neg_scores = []
+    if neg_files:
+        log("\n--- Negative Test Clips (Confusables & Adversarials) ---")
+        by_neg_source = defaultdict(list)
+        neg_map = _score_files_parallel(model_path, neg_files)
+        neg_scores = [neg_map[p] for p in neg_files]
+        for p, score in neg_map.items():
+            if p.name.startswith("google_"):
+                by_neg_source["Google Chirp Confusables"].append(score)
+            elif p.name.startswith("custom_") or p.name.startswith("user_"):
+                by_neg_source["Custom / Recorded"].append(score)
+            else:
+                by_neg_source["Piper Adversarial"].append(score)
+
+        log(_format_eval_row("  Overall Negatives", neg_scores, 0.5, 0.2))
+        for src, sc in sorted(by_neg_source.items()):
+            log(_format_eval_row(f"    - {src}", sc, 0.5, 0.2))
+
+    log("-" * 72)
+    if pos_scores and neg_scores:
+        pos_arr = np.array(pos_scores)
+        neg_arr = np.array(neg_scores)
+        neg_p995 = float(np.percentile(neg_arr, 99.5))
+        pos_mean = float(np.mean(pos_arr))
+        rec_min = max(0.30, round(neg_p995 + 0.10, 2))
+        rec_max = min(0.60, max(rec_min + 0.10, round(pos_mean, 2)))
+        log(f" Suggested EchoMuse wake threshold : {rec_min:.2f} – {rec_max:.2f}")
+        log(f"   (99.5% Confusables rejected below {neg_p995:.3f} | Positive test mean: {pos_mean:.3f})")
+    log("=" * 72)
 
 
 # ---------------------------------------------------------------- google-tts
@@ -965,11 +1107,109 @@ def cmd_google_tts(args) -> None:
         )
 
 
-# ---------------------------------------------------------------- test
+# ---------------------------------------------------------------- import
+
+# Audio the dashboard export or a hand-assembled ZIP might carry. Captures from
+# EchoMuse are already 16kHz mono WAV; anything else ffmpeg normalises.
+DATASET_AUDIO_EXTS = {".wav", ".webm", ".ogg", ".oga", ".mp3", ".m4a", ".flac", ".opus"}
+
+
+def _convert_16k(src: Path, dest: Path) -> None:
+    """Any audio → 16kHz mono s16 WAV, the format train.py augments."""
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src),
+         "-ar", "16000", "-ac", "1", "-sample_fmt", "s16", str(dest)],
+        check=True, timeout=120,
+    )
+
+
+def import_labeled_dataset(name: str, zip_path: Path) -> dict:
+    """
+    Unpack a labelled dataset ZIP (`positive/…` and `negative/…`, as exported
+    by the EchoMuse dashboard) into a wake word's train/test directories.
+
+    Preserves oww_forge's split policy: TEST_FRACTION (0.1) of each polarity is
+    held out for test, applied with the same stable `index % round(1/frac) == 0`
+    rule google_tts uses, so positives and negatives are split independently and
+    a re-run is idempotent per file order. Clips are named `custom_*` so
+    forge.py's evaluation buckets them as "Custom / Recorded". Real recordings
+    displace synthetic clips at generate time, exactly like `+ Family
+    recordings`.
+
+    Returns per-directory counts (plus `skipped`). Raises FileNotFoundError if
+    the wake word does not exist.
+    """
+    import yaml
+    import zipfile
+    import tempfile
+    import uuid
+    import google_tts
+
+    cfg_path = WAKEWORDS / name / "config.yml"
+    if not cfg_path.exists():
+        raise FileNotFoundError(f"no such wake word: {name} (run forge.py new first)")
+    cfg = yaml.safe_load(cfg_path.read_text())
+    base = Path(cfg["output_dir"]) / cfg["model_name"]
+    dirs = {
+        ("positive", "train"): base / "positive_train",
+        ("positive", "test"):  base / "positive_test",
+        ("negative", "train"): base / "negative_train",
+        ("negative", "test"):  base / "negative_test",
+    }
+    for d in dirs.values():
+        d.mkdir(parents=True, exist_ok=True)
+
+    test_every = max(2, round(1 / google_tts.TEST_FRACTION))
+    counts = {"positive_train": 0, "positive_test": 0,
+              "negative_train": 0, "negative_test": 0, "skipped": 0}
+    seen = {"positive": 0, "negative": 0}
+    # A per-run token, not a wall-clock second: two imports of the same wake
+    # word in the same second both start idx at 0, so a `custom_<seconds>_…`
+    # name would silently overwrite the first import's clips.
+    stamp = uuid.uuid4().hex[:8]
+
+    with zipfile.ZipFile(zip_path) as z, tempfile.TemporaryDirectory() as tmp:
+        for info in z.infolist():
+            if info.is_dir():
+                continue
+            parts = info.filename.replace("\\", "/").split("/")
+            polarity = next((p for p in parts if p in ("positive", "negative")), None)
+            ext = Path(parts[-1]).suffix.lower()
+            if polarity is None or ext not in DATASET_AUDIO_EXTS:
+                counts["skipped"] += 1
+                continue
+            idx = seen[polarity]
+            seen[polarity] += 1
+            split = "test" if idx % test_every == 0 else "train"
+            raw = Path(tmp) / f"in_{polarity}_{idx}{ext}"
+            raw.write_bytes(z.read(info))
+            dest = dirs[(polarity, split)] / f"custom_{stamp}_{polarity}_{idx:06d}.wav"
+            try:
+                _convert_16k(raw, dest)
+                counts[f"{polarity}_{split}"] += 1
+            except Exception as e:
+                counts["skipped"] += 1
+                log(f"skip {info.filename}: {e}")
+            finally:
+                raw.unlink(missing_ok=True)
+    return counts
+
+
+def cmd_import(args) -> None:
+    zip_path = Path(args.zip)
+    if not zip_path.exists():
+        sys.exit(f"dataset zip not found: {zip_path}")
+    counts = import_labeled_dataset(args.name, zip_path)
+    log(f"imported into '{args.name}': "
+        f"positives {counts['positive_train']}+{counts['positive_test']} (train+test), "
+        f"negatives {counts['negative_train']}+{counts['negative_test']}, "
+        f"skipped {counts['skipped']}")
+    log("run `forge.py build` (or the UI's Build) to retrain with the new data")
+
+
+# ---------------------------------------------------------------- test & eval
 
 def cmd_test(args) -> None:
-    import numpy as np
-    import soundfile as sf
     from openwakeword.model import Model
 
     model_path = MODELS / f"{args.name}.onnx"
@@ -985,21 +1225,12 @@ def cmd_test(args) -> None:
         sys.exit("no wav files found")
 
     for wav in wavs:
-        audio, sr = sf.read(wav, dtype="int16")
-        if sr != 16000:
-            f = audio.astype("float32") / 32768.0
-            import librosa
-
-            f = librosa.resample(f.T if f.ndim > 1 else f, orig_sr=sr, target_sr=16000)
-            audio = (np.clip(f if f.ndim == 1 else f.mean(axis=0), -1, 1) * 32767).astype("int16")
-        if audio.ndim > 1:
-            audio = audio.mean(axis=1).astype("int16")
-        oww.reset()
-        peak = 0.0
-        for i in range(0, len(audio) - 1280, 1280):
-            scores = oww.predict(audio[i : i + 1280])
-            peak = max(peak, max(scores.values()))
+        peak = score_wav_file(oww, wav)
         print(f"{wav}: peak score {peak:.3f}")
+
+
+def cmd_eval(args) -> None:
+    evaluate_model(args.name)
 
 
 # ---------------------------------------------------------------- ui
@@ -1068,6 +1299,13 @@ def main() -> None:
                     help="comma-separated exact Chirp 3 voice names; empty selects all matching voices")
     p.add_argument("--yes", action="store_true", help="skip the cost-estimate confirmation")
     p.set_defaults(func=cmd_google_tts)
+
+    p = sub.add_parser("import",
+                       help="import a labelled dataset ZIP (positive/ negative/) exported "
+                            "from the EchoMuse dashboard, then build to retrain")
+    p.add_argument("name")
+    p.add_argument("--zip", required=True, help="dataset .zip from the dashboard's Training tab")
+    p.set_defaults(func=cmd_import)
 
     p = sub.add_parser("ui", help="serve the web frontend")
     p.add_argument("--host", default="0.0.0.0")

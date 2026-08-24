@@ -273,6 +273,30 @@ async def _save_uploads(request, field_name: str) -> list:
     return paths
 
 
+async def api_import_dataset(request):
+    """A labelled dataset ZIP (positive/ negative/) exported from the EchoMuse
+    dashboard → the wake word's train/test dirs, split TEST_FRACTION for test.
+    Convert + split live in forge.import_labeled_dataset so the CLI and the UI
+    behave identically."""
+    name = request.match_info["name"]
+    _require_wakeword(name)
+    if _job and _job.poll() is None:
+        raise web.HTTPConflict(text="cannot import while a job is running")
+    uploads = await _save_uploads(request, "dataset")
+    if not uploads:
+        raise web.HTTPBadRequest(text="no dataset zip uploaded")
+    try:
+        counts = forge.import_labeled_dataset(name, uploads[0])
+    except FileNotFoundError as e:
+        raise web.HTTPNotFound(text=str(e))
+    except Exception as e:
+        raise web.HTTPBadRequest(text=f"import failed: {e}")
+    finally:
+        for p in uploads:
+            p.unlink(missing_ok=True)
+    return web.json_response({"ok": True, "counts": counts})
+
+
 async def api_add_samples(request):
     """Real recordings (you, the kids) → the positive training set. The
     generate step counts existing clips toward n_samples, so these displace
@@ -419,6 +443,16 @@ async def api_test(request):
             p.unlink(missing_ok=True)
 
 
+async def api_evaluate(request):
+    name = request.match_info["name"]
+    _require_wakeword(name)
+    model_path = forge.MODELS / f"{name}.onnx"
+    if not model_path.exists():
+        raise web.HTTPConflict(text=f"model {name}.onnx does not exist yet (build first)")
+    _start_job("eval", f"evaluating '{name}'", ["eval", name])
+    return web.json_response({"ok": True})
+
+
 async def api_delete(request):
     name = request.match_info["name"]
     _require_wakeword(name)
@@ -456,7 +490,9 @@ def make_app() -> web.Application:
     app.router.add_post("/api/wakewords/{name}/google-tts", api_google_tts)
     app.router.add_get("/api/google-tts/voices", api_google_tts_voices)
     app.router.add_post("/api/wakewords/{name}/test", api_test)
+    app.router.add_post("/api/wakewords/{name}/evaluate", api_evaluate)
     app.router.add_post("/api/wakewords/{name}/samples", api_add_samples)
+    app.router.add_post("/api/wakewords/{name}/import-dataset", api_import_dataset)
     app.router.add_delete("/api/wakewords/{name}", api_delete)
     app.router.add_get("/api/models/{name}.onnx", api_model_download)
     return app

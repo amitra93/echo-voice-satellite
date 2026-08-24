@@ -198,6 +198,27 @@ US vowel, not a British "clar-ra". Three levers, in increasing strength:
    voices that matter. They're augmented with reverb/noise like everything
    else, and displace synthetic clips rather than growing the set.
 
+### Import labelled captures from EchoMuse
+
+The EchoMuse controller can record the audio around real wake **activations**
+and **near-misses** and let an admin label each clip in the dashboard
+(Settings → Training): "should have activated" (positive) or "should have
+ignored" (negative). Download the finished dataset there as a `.zip` and bring
+it here:
+
+- **UI:** on the wake word's card, **+ Import labeled dataset…** and pick the
+  `.zip`, then **Retrain**.
+- **CLI:** `docker compose run --rm forge import hey_biscuit --zip /data/hey_biscuit-dataset.zip`
+
+The ZIP is `positive/…` + `negative/…`; Forge converts every clip to 16kHz
+mono, names them `custom_*`, and splits **10% of each polarity into the test
+set** (the same `TEST_FRACTION` as Google-TTS positives) so the held-out
+evaluation stays honest. Positives labelled from near-misses teach the model
+the voices/pronunciations it is currently missing; negatives labelled from
+false activations are the cheapest fix for false wakes — the real-world
+equivalent of `custom_negative_phrases`. Imported clips displace synthetic ones
+at generate time, exactly like family recordings.
+
 ### Testing a built model
 
 Three ways: the UI's **🎤 Record test** (browser mic → score; needs
@@ -260,7 +281,7 @@ scores (`em_oww_models.prediction_key`), so keep filenames unique.
 oww_forge/
   Dockerfile           pinned training environment (openWakeWord + piper + deps)
   docker-compose.yml   forge-ui (web) + forge/forge-cpu (CLI) services
-  forge.py             CLI: assets | new | google-tts | build | test | ui
+  forge.py             CLI: assets | new | google-tts | import | build | test | ui
   forge_web.py         aiohttp web UI (port 8769) — thin layer over forge.py
   static/index.html    the web frontend (single file, no build step)
   google_tts.py        Google Cloud TTS positive-sample generator

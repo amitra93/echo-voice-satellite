@@ -335,6 +335,31 @@ function render() {
   $('dlOptional').disabled = busy() || optionalSelection.size === 0;
 
   // wake words
+  //
+  // refresh() polls every 2.5s and always reaches this innerHTML replace, so
+  // without the capture/restore below, ANY field inside a wake-word card that
+  // hasn't been explicitly SAVED yet (Samples per voice, Locales, Voice
+  // names, Confusable phrases) gets silently snapped back to the last-saved
+  // server value and loses focus mid-edit — typing feels broken, and a native
+  // number input's spinner only *appears* to work because a few clicks can
+  // land inside one 2.5s window before the next poll erases them. Remember
+  // whichever field the user is actively editing, and put it back afterwards.
+  const wwRoot = $('wakewords');
+  const editing = document.activeElement;
+  let pendingEdit = null;
+  if (editing && wwRoot.contains(editing) && (editing.tagName === 'INPUT' || editing.tagName === 'TEXTAREA')) {
+    const card = editing.closest('.card.ww');
+    // Every editable field in a card carries its own data-* attribute as a
+    // stable identifier (data-gtts-samples, data-gtts-languages, …) — reuse
+    // whichever one is present rather than hardcoding the field list twice.
+    const dataAttr = card && [...editing.attributes].find(a => a.name.startsWith('data-'));
+    if (card && dataAttr) {
+      pendingEdit = {
+        cardName: card.dataset.name, selector: `[${dataAttr.name}]`,
+        value: editing.value, selStart: editing.selectionStart, selEnd: editing.selectionEnd,
+      };
+    }
+  }
   $('wakewords').innerHTML = state.wakewords.length ? state.wakewords.map(w => {
     const stages = [
       ['Created', true],
@@ -363,9 +388,11 @@ function render() {
         ${w.model_built ? `
           <button data-act="mic">🎤 Try it</button>
           <button data-act="test">Test a recording…</button>
+          <button data-act="eval" ${busy() ? 'disabled' : ''} title="Score all test clips and generate a full accuracy report">📊 Evaluation report</button>
           <a href="/api/models/${esc(w.name)}.onnx"><button>Download model</button></a>` : ''}
         <button class="danger" data-act="del" style="margin-left:auto">remove</button>
         <input type="file" accept="audio/*" multiple style="display:none">
+        <input type="file" accept=".zip,application/zip" data-zip style="display:none">
       </div>
       <div class="actiongroup">
         <div class="microlabel" style="margin-bottom:6px">Improve accuracy</div>
@@ -375,6 +402,8 @@ function render() {
             + Family recordings…</button>
           <button class="small" data-act="gtts" ${busy() ? 'disabled' : ''}
             title="Adds Chirp 3 positive samples for every selected locale and voice">+ Google Chirp 3 voices</button>
+          <button class="small" data-act="import" ${busy() ? 'disabled' : ''}
+            title="Import a labelled dataset (.zip) exported from the EchoMuse dashboard's Training tab">+ Import labeled dataset…</button>
           <span class="hint" style="margin:0">then retrain to apply</span>
         </div>
         <div class="dataset-options" style="margin-top:10px">
@@ -414,6 +443,19 @@ function render() {
   }).join('') : `<div class="card empty">No wake words yet.<br>
       Download the voice data (step 1), then create your first wake word on the left —
       after training you can try it with the microphone right here.</div>`;
+
+  if (pendingEdit) {
+    const revived = wwRoot.querySelector(
+      `.card.ww[data-name="${CSS.escape(pendingEdit.cardName)}"] ${pendingEdit.selector}`);
+    if (revived) {
+      revived.value = pendingEdit.value;
+      revived.focus();
+      // type=number inputs throw on setSelectionRange in every major
+      // browser; text fields get their cursor position back so a poll
+      // landing mid-sentence doesn't jump it to the end.
+      try { revived.setSelectionRange(pendingEdit.selStart, pendingEdit.selEnd); } catch {}
+    }
+  }
 }
 
 function renderJob() {
@@ -546,6 +588,9 @@ $('wakewords').addEventListener('click', async e => {
   if (act === 'build') {
     await api(`/api/wakewords/${name}/build`, {method: 'POST',
       headers: {'Content-Type': 'application/json'}, body: '{}'});
+  } else if (act === 'eval') {
+    await api(`/api/wakewords/${name}/evaluate`, {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: '{}'});
   } else if (act === 'gtts') {
     const n = +card.querySelector('[data-gtts-samples]').value;
     const langs = card.querySelector('[data-gtts-languages]').value.trim();
@@ -577,6 +622,32 @@ $('wakewords').addEventListener('click', async e => {
           (r.errors.length ? ` (${r.errors.length} failed)` : '');
         refresh();
       }
+    };
+    input.click();
+    return;
+  } else if (act === 'import') {
+    const input = card.querySelector('input[data-zip]');
+    input.onchange = async () => {
+      if (!input.files.length) return;
+      const fd = new FormData();
+      fd.append('dataset', input.files[0]);
+      const v = card.querySelector('.verdict');
+      v.style.display = ''; v.className = 'verdict info';
+      v.textContent = 'Importing dataset…';
+      try {
+        const r = await api(`/api/wakewords/${name}/import-dataset`, {method: 'POST', body: fd});
+        const c = r.counts;
+        v.className = 'verdict ok';
+        v.textContent = `✓ Imported ${c.positive_train + c.positive_test} positive, ` +
+          `${c.negative_train + c.negative_test} negative clip(s)` +
+          (c.skipped ? ` (${c.skipped} skipped)` : '') +
+          ' — press Retrain to apply';
+        refresh();
+      } catch (e) {
+        v.className = 'verdict no';
+        v.textContent = `✗ Import failed: ${e.message || e}`;
+      }
+      input.value = '';
     };
     input.click();
     return;
