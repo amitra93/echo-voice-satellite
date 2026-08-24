@@ -1,6 +1,7 @@
 package als
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
@@ -196,4 +197,36 @@ func TestStatusRefreshesAcrossScans(t *testing.T) {
 	if got := Report(); got.Code != StatusNoChip {
 		t.Fatalf("second scan: code = %q, want %q", got.Code, StatusNoChip)
 	}
+}
+
+func TestLuxReadsValidValueAndReturnsNilForBadReads(t *testing.T) {
+	fakeBus(t, map[string]bool{"tsl2540": true})
+	p := Report().Path
+	if got := Lux(); got == nil || *got != 42 {
+		t.Fatalf("valid Lux() = %v, want 42", got)
+	}
+	if err := os.WriteFile(p, []byte("not-a-number\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := Lux(); got != nil {
+		t.Fatalf("malformed Lux() = %d, want nil", *got)
+	}
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if got := Lux(); got != nil {
+		t.Fatalf("missing Lux() = %d, want nil", *got)
+	}
+}
+
+func TestLuxIsNilWithoutSensor(t *testing.T) {
+	fakeBus(t, map[string]bool{"tsl2540": false})
+	if got := Lux(); got != nil {
+		t.Fatalf("Lux() without a readable sensor = %d, want nil", *got)
+	}
+}
+
+func TestWatchReturnsWithoutSensor(t *testing.T) {
+	fakeBus(t, map[string]bool{"tsl2540": false})
+	Watch(context.Background(), func(int) { t.Fatal("callback fired without a sensor") })
 }

@@ -295,6 +295,16 @@ Bluedroid package commands, and watchdog/retry timing remain outside host tests.
 `internal/bluetooth` increased from **28.9% to 57.5%**. The Bluetooth race
 suite and full host-testable device suite pass.
 
+### Device workstream execution: ALS read/report slice (completed 2026-08-23)
+Expanded `device/internal/bindings/als/als_test.go` to cover valid lux reads,
+malformed and missing sysfs readings, absent-sensor reads, and the watcher
+no-sensor return path. Existing fixtures already cover sensor resolution and
+status refresh behavior; real sysfs/I2C polling and timed change delivery remain
+outside host tests.
+
+`internal/bindings/als` increased from **60.2% to 73.9%**. The ALS race suite
+and full host-testable device suite pass.
+
 ### Phase 3 — controller quick/medium wins
 `em_auth.py` (session/bcrypt/role logic), `em_db.py`
 (query and migration-fixup logic), `em_oww_assets.py` (LRU eviction,
