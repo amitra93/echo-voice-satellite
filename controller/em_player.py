@@ -45,6 +45,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections import deque
 
 import em_eq
 
@@ -134,6 +135,16 @@ SEEK_STALL_S    = 5.0
 # 500ms is well inside the ~4s lead, so a stall this size is not yet audible —
 # which is the point of catching it here.
 SOURCE_STALL_MS = 500.0
+
+# Keep enough decoder diagnostics to explain a refused or failed source without
+# allowing ffmpeg's stderr pipe to block the process or grow without bound.
+STDERR_TAIL_LINES = 5
+DRAIN_GRACE_S = 0.5
+
+# A source that has remained silent this long is dead, not merely stalled.
+# A flow stream cannot be resumed at its old position, so end it honestly
+# rather than leaving Home Assistant reporting playing against silence.
+SOURCE_DEAD_S = 30.0
 
 
 IDLE, PLAYING, PAUSED = "idle", "playing", "paused"
@@ -405,6 +416,19 @@ class MediaSession:
     # ── decoder (stubbed in tests) ────────────────────────────────────────
 
     @staticmethod
+    async def _drain_stderr(proc, tail: deque) -> None:
+        """Retain a bounded tail of ffmpeg diagnostics without blocking it."""
+        try:
+            async for raw in proc.stderr:
+                line = raw.decode("utf-8", "replace").strip()
+                if line:
+                    tail.append(line)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+    @staticmethod
     async def _kill_decoder(proc) -> None:
         if proc is None or proc.returncode is not None:
             return
@@ -417,6 +441,11 @@ class MediaSession:
     async def _spawn_decoder(self, url: str, position_s: float):
         """ffmpeg → s16le/48k/mono on stdout. Returns the process."""
         args = ["ffmpeg", "-nostdin", "-loglevel", "error"]
+        # ffmpeg defaults to accepting any HTTPS peer certificate. Restrict
+        # verification to HTTPS inputs; em_start installs EM_EXTRA_CA_CERT in
+        # the system store that this GnuTLS build reads when needed.
+        if url.lower().startswith("https:"):
+            args += ["-tls_verify", "1"]
         if position_s > 0.5:
             args += ["-ss", f"{position_s:.2f}"]
         args += ["-i", url, "-f", "s16le", "-acodec", "pcm_s16le",
@@ -424,7 +453,7 @@ class MediaSession:
         return await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
         )
 
     # ── controls ──────────────────────────────────────────────────────────
@@ -561,6 +590,9 @@ class MediaSession:
         eos_sent = False
         src_max_ms = 0.0
         src_stalls = 0
+        src_dead = False
+        stderr_tail = deque(maxlen=STDERR_TAIL_LINES)
+        stderr_drain = None
 
         # Arm the data-plane reconnect grace for this feed: a Wi-Fi blip
         # mid-song should cost a pause, not the rest of the track.
@@ -584,6 +616,7 @@ class MediaSession:
         try:
             proc = await self._spawn_decoder(self.url, start_pos)
             self._proc = proc
+            stderr_drain = asyncio.create_task(self._drain_stderr(proc, stderr_tail))
             t_spawned = loop.time()
 
             # A seek we cannot actually perform produces no audio at all
@@ -607,8 +640,13 @@ class MediaSession:
                     await self._kill_decoder(proc)
                     self._seekable = False
                     start_pos = self._pos = 0.0
+                    if stderr_drain is not None:
+                        stderr_drain.cancel()
+                        stderr_drain = None
                     proc = await self._spawn_decoder(self.url, 0.0)
                     self._proc = proc
+                    stderr_drain = asyncio.create_task(
+                        self._drain_stderr(proc, stderr_tail))
                 except asyncio.IncompleteReadError as e:
                     pending = (e.partial + bytes(SPEAKER_BYTES - len(e.partial))
                                ) if e.partial else None
@@ -624,7 +662,14 @@ class MediaSession:
                         # Only the READ is timed. The pacing sleep below is
                         # deliberate and must not read as a stall.
                         _t0 = loop.time()
-                        chunk = await proc.stdout.readexactly(SPEAKER_BYTES)
+                        try:
+                            chunk = await asyncio.wait_for(
+                                proc.stdout.readexactly(SPEAKER_BYTES),
+                                SOURCE_DEAD_S)
+                        except asyncio.TimeoutError:
+                            src_dead = True
+                            await self._kill_decoder(proc)
+                            break
                         _read_ms = (loop.time() - _t0) * 1000.0
                         if t_first_pcm is None:
                             t_first_pcm = loop.time()
@@ -682,8 +727,15 @@ class MediaSession:
             self.state = IDLE
             self.url = None
             self._pos = 0.0
-            log.info(f"[{self.device_id}] Media finished "
-                     f"({sent // SPEAKER_BYTES} periods)")
+            if src_dead:
+                log.error(
+                    f"[{self.device_id}] Media source produced nothing for "
+                    f"{SOURCE_DEAD_S:.0f}s — ending stream after "
+                    f"{sent // SPEAKER_BYTES} periods. HA reports idle; a "
+                    f"flow stream cannot resume where it died.")
+            else:
+                log.info(f"[{self.device_id}] Media finished "
+                         f"({sent // SPEAKER_BYTES} periods)")
             await self._push_state()
             # Media ran to its natural end — the device is free again, so let a
             # yielded Sendspin session reconnect (not a rejoin of old audio).
@@ -724,4 +776,26 @@ class MediaSession:
                     proc.kill()
                 except ProcessLookupError:
                     pass
+            rc = proc.returncode if proc is not None else None
+            abnormal = rc is not None and rc not in (0, -9)
+            if stderr_drain is not None:
+                if abnormal:
+                    try:
+                        await asyncio.wait_for(
+                            asyncio.shield(stderr_drain), DRAIN_GRACE_S)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception:
+                        pass
+                stderr_drain.cancel()
+            if abnormal:
+                detail = " | ".join(stderr_tail) or "(no stderr output)"
+                log.error(f"[{self.device_id}] ffmpeg exited {rc} "
+                          f"after {sent // SPEAKER_BYTES} periods: {detail}")
+                if any("certificate" in line.lower() for line in stderr_tail):
+                    log.error(
+                        f"[{self.device_id}] Media URL failed certificate "
+                        f"verification. For a private CA, point "
+                        f"EM_EXTRA_CA_CERT at the CA file (see "
+                        f"docs/configuration.md).")
             self._proc = None

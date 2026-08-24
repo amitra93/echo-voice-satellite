@@ -37,6 +37,7 @@ the operational architecture and hardware-troubleshooting reference.
 ## Project Direction
 
 - [Project roadmap](../../ROADMAP.md)
+- [Main into new_impl integration plan](main-into-new-impl-integration-plan.md) — approved
 
 ## Related References
 

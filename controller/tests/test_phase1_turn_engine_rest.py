@@ -469,11 +469,24 @@ def test_cancel_voice_turn_only_touches_turns_for_the_named_device(fresh_engine)
     assert not turn_b.cancelled.is_set()
 
 
-def test_abort_ha_run_delegates_to_cancel_voice_turn(fresh_engine):
+def test_abort_ha_run_records_barge_without_claiming_to_abort_assist(fresh_engine):
     device = FakeDevice()
     turn = engine.Turn(1, device, None, None)
     engine.ENGINE.turns = {1: turn}
 
     engine.abort_ha_run("device-1")
 
+    assert not turn.cancelled.is_set()
+    assert turn.end_reason == "barged"
+
+
+def test_cancel_voice_turn_preserves_the_requested_cause(fresh_engine):
+    device = FakeDevice()
+    turn = engine.Turn(1, device, None, None)
+    engine.ENGINE.turns = {1: turn}
+
+    engine.cancel_voice_turn("device-1", reason="muted")
+    engine.cancel_voice_turn("device-1", reason="cancelled")
+
     assert turn.cancelled.is_set()
+    assert turn.end_reason == "muted"

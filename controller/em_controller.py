@@ -73,6 +73,8 @@ import em_linkauth
 import em_eq
 import em_scenes
 import em_shadow
+import em_oww_warmup
+import em_barge
 import em_arbiter
 import em_button
 import em_tap_burst
@@ -183,6 +185,11 @@ SPEAKER_BYTES  = SPEAKER_PERIOD * 2       # 4096 bytes/period (mono S16)
 # must allow for the delayed start.
 SPEAKER_PRIME_SECONDS = 1.1
 
+OWW_PAUSE_STUCK_S = 180.0
+WAKE_RESTART_BACKOFF_S = 1.0
+WAKE_RESTART_MAX_BACKOFF_S = 60.0
+WAKE_RESTART_HEALTHY_S = 60.0
+
 # Control-plane RTT probing. 5s rather than the old 30s keepalive cadence:
 # characterising jitter needs samples, and one tiny JSON message per device
 # per 5s is negligible next to the 256 kbps continuous mic upload each
@@ -254,6 +261,14 @@ _ha_volume_to_device = em_volume.ha_volume_to_device
 # ~5.5s, so a blip inside this window is inaudible.
 DATA_RECONNECT_GRACE_S = 3.0
 
+# A paused wake stream is expected while a turn owns voice_lock. The same flag
+# with no owner is a silent-deaf state, so the listener repairs it after a
+# generous bound rather than standing down indefinitely.
+OWW_PAUSE_STUCK_S = 180.0
+WAKE_RESTART_BACKOFF_S = 1.0
+WAKE_RESTART_MAX_BACKOFF_S = 60.0
+WAKE_RESTART_HEALTHY_S = 60.0
+
 
 class Device:
     def __init__(
@@ -280,6 +295,8 @@ class Device:
         self.mic_queue:   asyncio.Queue[bytes] = asyncio.Queue(maxsize=64)
         self.voice_queue: asyncio.Queue[bytes] = asyncio.Queue(maxsize=256)
         self.oww_paused   = asyncio.Event()  # set during voice turn
+        self.oww_paused_since: float | None = None
+        self.oww_task: asyncio.Task | None = None
 
         # Transient state — read by em_api._merge_device()
         self.speaking  = False
@@ -479,6 +496,8 @@ class Device:
         # playback_send_ms, which only times writing into the socket and
         # completes almost instantly however slow the link is.
         self.playback_send_t0: float | None = None
+        self.playback_send_ms: int = -1
+        self.playback_eq_ms: int = -1
         # Set when the device reports playback_stats for the stream being
         # played. This is the authoritative "the audio has finished" signal
         # — the device emits it once its audio channel has drained after
@@ -565,8 +584,6 @@ class Device:
         self.rtt_excursions = self.rtt_excursions_idle = 0
         self.rtt_samples_idle = 0
         return out
-        self.playback_send_ms: int = -1
-        self.playback_eq_ms:   int = -1
 
     async def send_control(self, msg: dict):
         try:
@@ -1048,7 +1065,8 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
     aborts stream_speaker and the drain sleep, plus a device speaker_flush
     so the interruption is audible immediately (not after ~1.4s of queued
     TTS). During thinking there's no audio to flush — instead the in-flight
-    HA pipeline is cancelled (local-only; any late HA result is discarded).
+    local turn is cancelled. `abort_ha_run` does not yet abort Assist's
+    pipeline, so late HA results remain a documented native-backend gap.
     """
     loop = asyncio.get_event_loop()
     if device._barge_model is None or device._barge_model_key != device.oww_model:
@@ -1084,6 +1102,7 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
     threshold = device.barge_threshold  # refined per-frame by phase below
     prev_score = 0.0  # previous frame's score — two-frame low tier (thinking)
     buf = bytearray()
+    warmup = em_oww_warmup.WarmupGate()
     # Observability: the watcher used to log only on detection, which made a
     # failed barge-in attempt indistinguishable from "no frames arrived at
     # all" (mic not streaming) or "frames arrived but scored ~0" (AEC residual
@@ -1117,28 +1136,22 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                 score = prediction.get(barge_pred_key, 0.0)
                 frames += 1
                 in_playback = playback_started.is_set()
-                if in_playback:
-                    threshold = device.barge_threshold
-                    fired     = score >= threshold
-                    fire_note = f"score={score:.3f} >= {threshold:.2f}"
-                else:
-                    # Two-tier thinking detection (see docstring): full wake
-                    # threshold on a single frame, OR two consecutive frames
-                    # at the low tier.
-                    threshold = device.oww_threshold
-                    low_tier  = max(0.2, 0.4 * device.oww_threshold)
-                    if score >= threshold:
-                        fired     = True
-                        fire_note = f"score={score:.3f} >= {threshold:.2f}"
-                    elif score >= low_tier and prev_score >= low_tier:
-                        fired     = True
-                        fire_note = (
-                            f"scores {prev_score:.3f}/{score:.3f} — two "
-                            f"consecutive frames >= low tier {low_tier:.2f}"
-                        )
-                    else:
-                        fired = False
-                prev_score = score
+                trusted = warmup.feed()
+                threshold = (
+                    device.barge_threshold if in_playback else device.oww_threshold
+                )
+                decision = em_barge.decide(
+                    score=score,
+                    prev_score=prev_score,
+                    in_playback=in_playback,
+                    barge_threshold=device.barge_threshold,
+                    wake_threshold=device.oww_threshold,
+                )
+                # Both playback frames must come from real audio, not the
+                # random embeddings openWakeWord seeds after reset.
+                fired = trusted and decision.fired
+                fire_note = decision.note
+                prev_score = score if trusted else 0.0
                 if score > peak:
                     peak = score
                     if score >= 0.1:
@@ -1182,7 +1195,9 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                         # old run MUST be aborted upstream first or its tail
                         # events land on the new turn and kill it
                         # (pipeline_refused, 5 of 5 attempts, 2026-08-17).
-                        turn_engine.cancel_voice_turn(device.device_id, abort_ha=True)
+                        turn_engine.cancel_voice_turn(
+                            device.device_id, abort_ha=True, reason="barged"
+                        )
                     return
     finally:
         rms_mean = rms_sum / frames if frames else 0.0
@@ -1779,6 +1794,7 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                 f"{_drained} stale frames cleared before routing flip"
             )
         device.oww_paused.clear()
+        device.oww_paused_since = None
         log.info(f"[{device.device_id}] oww_paused cleared")
         # Release the arbitration claim so another device answering a
         # genuinely new utterance isn't suppressed by a stale window.
@@ -1788,6 +1804,43 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
 
 
 # ─── Wake word listener ───────────────────────────────────────────────────────
+
+def _supervise_wake_listener(device: "Device", failures: int = 0) -> asyncio.Task:
+    """Restart a failed listener without an immediate crash loop."""
+    started = asyncio.get_event_loop().time()
+
+    def _restart(task: asyncio.Task) -> None:
+        if task.cancelled():
+            return
+        ran_for = asyncio.get_event_loop().time() - started
+        exc = task.exception()
+        log.error(
+            f"[{device.device_id}] wake word listener "
+            f"{'crashed' if exc else 'returned unexpectedly'} after "
+            f"{ran_for:.0f}s — restarting. The device was deaf until now.",
+            exc_info=exc,
+        )
+        if _devices.get(device.device_id) is not device:
+            return
+        count = 1 if ran_for >= WAKE_RESTART_HEALTHY_S else failures + 1
+        delay = min(WAKE_RESTART_BACKOFF_S * (2 ** (count - 1)),
+                    WAKE_RESTART_MAX_BACKOFF_S)
+
+        async def _later() -> None:
+            await asyncio.sleep(delay)
+            if _devices.get(device.device_id) is device:
+                device.oww_task = _supervise_wake_listener(device, count)
+
+        if count > 1:
+            log.error(
+                f"[{device.device_id}] wake word listener has failed {count} "
+                f"times in a row — retrying in {delay:.0f}s"
+            )
+        asyncio.get_event_loop().create_task(_later())
+
+    task = asyncio.create_task(wake_word_listener(device))
+    task.add_done_callback(_restart)
+    return task
 
 def _maybe_capture_wake(device: Device, model_key: str, score: float,
                         kind: str, loop) -> None:
@@ -1816,6 +1869,40 @@ def _maybe_capture_wake(device: Device, model_key: str, score: float,
     )
 
 
+def _supervise_wake_listener(device: Device, failures: int = 0) -> asyncio.Task:
+    """Restart a crashed wake listener without turning a repeat fault into a hot loop."""
+    started = asyncio.get_event_loop().time()
+
+    def restart(task: asyncio.Task) -> None:
+        if task.cancelled() or _devices.get(device.device_id) is not device:
+            return
+        ran_for = asyncio.get_event_loop().time() - started
+        try:
+            exc = task.exception()
+        except asyncio.CancelledError:
+            return
+        log.error(
+            "[%s] wake listener %s after %.0fs; restarting",
+            device.device_id,
+            "crashed" if exc else "returned unexpectedly",
+            ran_for,
+            exc_info=exc,
+        )
+        count = 1 if ran_for >= WAKE_RESTART_HEALTHY_S else failures + 1
+        delay = min(WAKE_RESTART_BACKOFF_S * (2 ** (count - 1)), WAKE_RESTART_MAX_BACKOFF_S)
+
+        async def later() -> None:
+            await asyncio.sleep(delay)
+            if _devices.get(device.device_id) is device:
+                device.oww_task = _supervise_wake_listener(device, count)
+
+        asyncio.create_task(later())
+
+    task = asyncio.create_task(wake_word_listener(device))
+    task.add_done_callback(restart)
+    return task
+
+
 async def wake_word_listener(device: Device):
     loop = asyncio.get_event_loop()
 
@@ -1840,6 +1927,7 @@ async def wake_word_listener(device: Device):
     await device.mic_start()
 
     buf = bytearray()
+    warmup = em_oww_warmup.WarmupGate()
     last_near_miss_log_ts = 0.0  # Q4: rate-limit near-miss INFO logging to 1/2s
     nm_pending = 0    # near-misses buffered since the last hourly-rollup flush
     nm_max     = 0.0  # highest buffered near-miss score
@@ -1869,6 +1957,7 @@ async def wake_word_listener(device: Device):
                     current_model_name = new_name
                     current_speex_ns  = new_speex
                     buf.clear()
+                    warmup.reset()
                     log.info(f"[{device.device_id}] OWW: model reloaded → {new_name} (speex_ns={new_speex})")
                 except Exception as e:
                     log.error(
@@ -1891,6 +1980,19 @@ async def wake_word_listener(device: Device):
                 # voice turn frames route to voice_queue instead, so an idle
                 # mic_queue is expected while oww_paused is set.
                 if device.oww_paused.is_set():
+                    stuck_for = (
+                        loop.time() - device.oww_paused_since
+                        if device.oww_paused_since is not None else 0.0
+                    )
+                    if (not device.voice_lock.locked()
+                            and stuck_for > OWW_PAUSE_STUCK_S):
+                        log.error(
+                            f"[{device.device_id}] oww_paused stuck for "
+                            f"{stuck_for:.0f}s with no voice turn holding the "
+                            "lock — clearing"
+                        )
+                        device.oww_paused.clear()
+                        device.oww_paused_since = None
                     continue
                 if device.muted:
                     # Hardware mute is device-sovereign: the device rejects
@@ -1986,6 +2088,7 @@ async def wake_word_listener(device: Device):
                     None, model.predict, samples
                 )
                 score = prediction.get(model_key, 0.0)
+                trusted = warmup.feed()
 
                 # Log any score above noise floor so we can see near-misses
                 # and understand whether failed wakes are "close but below
@@ -2016,7 +2119,7 @@ async def wake_word_listener(device: Device):
                     eff_threshold = min(eff_threshold, device.barge_threshold)
                 near_miss_floor = float(getattr(device, "wake_near_miss_floor", 0.05))
 
-                if near_miss_floor < score < eff_threshold:
+                if trusted and near_miss_floor < score < eff_threshold:
                     device.oww_near_misses += 1
                     nm_pending += 1
                     nm_max = max(nm_max, float(score))
@@ -2056,7 +2159,13 @@ async def wake_word_listener(device: Device):
                 # this controller's own crossing is demoted to a measurement —
                 # see em_shadow.decide_wake_source for why it keeps scoring at
                 # all. In every other mode this is exactly the old condition.
-                ctrl_hit = score >= eff_threshold
+                if not trusted and score >= eff_threshold:
+                    log.info(
+                        f"[{device.device_id}] Wake score {score:.3f} >= "
+                        f"{eff_threshold:.3f} ignored — openwakeword warm-up, "
+                        f"{warmup.progress()} chunks since reset"
+                    )
+                ctrl_hit = trusted and score >= eff_threshold
                 dev_wake, dev_age = device.pending_wake.take()
                 if dev_wake is None and dev_age is not None:
                     # Expired before anything could act on it. Worth a warning
@@ -2137,6 +2246,7 @@ async def wake_word_listener(device: Device):
                         # TTS mic_stop/mic_start remains untouched — that
                         # acoustic-feedback guard is load-bearing.
                         model.reset()
+                        warmup.reset()
                         buf.clear()
                         device.cancel_event.clear()
                         # Wake detail for the turn's persistent record —
@@ -2179,6 +2289,7 @@ async def wake_word_listener(device: Device):
                             "noise_floor": round(device.noise_floor, 5),
                         }
                         device.oww_paused.set()
+                        device.oww_paused_since = loop.time()
                         log.debug(
                             f"[{device.device_id}] OWW: oww_paused set, "
                             f"routing to voice_queue (no mic_stop/mic_start_turn)"
@@ -2209,6 +2320,7 @@ async def wake_word_listener(device: Device):
                             )
                         if won_by != device.device_id:
                             device.oww_paused.clear()
+                            device.oww_paused_since = None
                             device.last_wake = None
                             await device.beam_unlock()
                             ceded = 0
@@ -2256,6 +2368,7 @@ async def wake_word_listener(device: Device):
                                 f"drained {drained} stale frames post-turn"
                             )
                         model.reset()
+                        warmup.reset()
                         buf.clear()
                         # mic_start without lock_mic — device stays on ch6 omni
                         # (beamforming=off), same stream as OWW listening.
@@ -2270,6 +2383,7 @@ async def wake_word_listener(device: Device):
                             f"ignoring wake"
                         )
                         model.reset()
+                        warmup.reset()
 
     except asyncio.CancelledError:
         await device.mic_stop()
@@ -2339,7 +2453,7 @@ async def handle_button_event(device: Device, event: dict):
         if action == em_button.CANCEL:
             log.info(f"[{device.device_id}] Dot button — cancelling voice turn")
             device.cancel_event.set()
-            turn_engine.cancel_voice_turn(device.device_id)
+            turn_engine.cancel_voice_turn(device.device_id, reason="cancelled")
             # Flush the device's speaker too, or cancelling DURING the spoken
             # response only stops the controller feeding it: the ring clears
             # while up to ~5.5s already in audioChanDepth plays out, and the
@@ -2354,6 +2468,7 @@ async def handle_button_event(device: Device, event: dict):
             log.info(f"[{device.device_id}] Dot button → voice turn")
             device.cancel_event.clear()
             device.oww_paused.set()
+            device.oww_paused_since = asyncio.get_event_loop().time()
             async def _button_voice_turn():
                 # Button is a deliberate act with no dead zone cost — nothing
                 # is being said at the moment of press, so stop/start RTT is
@@ -2616,9 +2731,17 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             config.get("owwOnDevice"), device.oww_trigger_capable,
             device.oww_model_ready,
         )
+        asyncio.create_task(
+            api.reconcile_oww_assets(device_id, device)
+        ).add_done_callback(_log_task_exception)
         device.eq_bands      = config.get("eqBands", [0.0] * 8)
         device.eq_loudness   = bool(config.get("eqLoudness", False))
         device.led_scene     = em_scenes.resolve(config)
+        if device.led_anim_capable and device.led_scene.get("listening_anim"):
+            await device.send_control({
+                "type": "config",
+                "listeningAnim": device.led_scene["listening_anim"],
+            })
         # Initialise volume from stored config — device will report its real
         # value via volume_state on connect, but this seeds a sane default
         # in the window before that first message arrives.
@@ -2717,7 +2840,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 })
 
         ping_task = asyncio.create_task(ping_loop())
-        oww_task  = asyncio.create_task(wake_word_listener(device))
+        oww_task = _supervise_wake_listener(device)
+        device.oww_task = oww_task
 
         try:
             async for raw in ws:
@@ -2758,7 +2882,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                             f"cancelling"
                         )
                         device.cancel_event.set()
-                        turn_engine.cancel_voice_turn(device_id)
+                        turn_engine.cancel_voice_turn(device_id, reason="muted")
                         await device.send_control({"type": "speaker_flush"})
                     await api._push_event({
                         "type":      "device_update",
@@ -3148,7 +3272,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
 
         finally:
             ping_task.cancel()
-            oww_task.cancel()
+            (device.oww_task or oww_task).cancel()
 
     except asyncio.TimeoutError:
         log.warning(f"[control] Registration timeout from {remote}")
@@ -3230,45 +3354,74 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
         device.data_ready.set()
         log.info(f"[data] Data connection established: {device_id}")
 
+        _frame_err_last = float("-inf")
+        _frame_err_suppressed = 0
         async for raw in ws:
-            if not isinstance(raw, bytes):
-                continue
-            if len(raw) <= MIC_HEADER_LEN:
-                continue
-            if raw[0] != MIC_FRAME_TYPE:
-                continue
-            if len(raw) == MIC_HEADER_LEN + 1 and raw[MIC_HEADER_LEN] in (VAD_END_TYPE, VAD_NO_SPEECH_TIMEOUT_TYPE):
-                sentinel = (
-                    turn_engine.VAD_SENTINEL_TIMEOUT
-                    if raw[MIC_HEADER_LEN] == VAD_NO_SPEECH_TIMEOUT_TYPE
-                    else turn_engine.VAD_SENTINEL_END
-                )
-                q = device.voice_queue if device.oww_paused.is_set() else device.mic_queue
-                if q.full():
+            try:
+                if not isinstance(raw, bytes):
+                    continue
+                if len(raw) <= MIC_HEADER_LEN:
+                    continue
+                if raw[0] != MIC_FRAME_TYPE:
+                    continue
+                if (len(raw) == MIC_HEADER_LEN + 1
+                        and raw[MIC_HEADER_LEN] in (
+                            VAD_END_TYPE, VAD_NO_SPEECH_TIMEOUT_TYPE)):
+                    sentinel = (
+                        turn_engine.VAD_SENTINEL_TIMEOUT
+                        if raw[MIC_HEADER_LEN] == VAD_NO_SPEECH_TIMEOUT_TYPE
+                        else turn_engine.VAD_SENTINEL_END
+                    )
+                    q = (device.voice_queue if device.oww_paused.is_set()
+                         else device.mic_queue)
+                    if q.full():
+                        try:
+                            q.get_nowait()
+                            log.warning(
+                                f"[{device.device_id}] queue full — dropped one "
+                                "frame to deliver VAD sentinel"
+                            )
+                        except asyncio.QueueEmpty:
+                            pass
+                    try:
+                        q.put_nowait(sentinel)
+                    except asyncio.QueueFull:
+                        log.error(
+                            f"[{device.device_id}] VAD sentinel lost — queue "
+                            "still full after drain"
+                        )
+                    continue
+                payload = raw[MIC_HEADER_LEN:]
+                q = (device.voice_queue if device.oww_paused.is_set()
+                     else device.mic_queue)
+                try:
+                    q.put_nowait(payload)
+                except asyncio.QueueFull:
+                    # Drop the OLDEST frame, not the newest — keeps the tail
+                    # contiguous with real time for OWW and STT.
                     try:
                         q.get_nowait()
-                        log.warning(f"[{device.device_id}] queue full — dropped one frame to deliver VAD sentinel")
-                    except asyncio.QueueEmpty:
+                        q.put_nowait(payload)
+                    except (asyncio.QueueEmpty, asyncio.QueueFull):
                         pass
-                try:
-                    q.put_nowait(sentinel)
-                except asyncio.QueueFull:
-                    log.error(f"[{device.device_id}] VAD sentinel lost — queue still full after drain")
-                continue
-            payload = raw[MIC_HEADER_LEN:]
-            q = device.voice_queue if device.oww_paused.is_set() else device.mic_queue
-            try:
-                q.put_nowait(payload)
-            except asyncio.QueueFull:
-                # Drop the OLDEST frame, not the newest — keeps the tail of
-                # the audio contiguous with real time, which is what OWW and
-                # STT care about. Dropping the newest froze the queue at a
-                # stale snapshot while fresh speech was discarded.
-                try:
-                    q.get_nowait()
-                    q.put_nowait(payload)
-                except (asyncio.QueueEmpty, asyncio.QueueFull):
-                    pass
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                now = asyncio.get_event_loop().time()
+                if now - _frame_err_last >= 5.0:
+                    suffix = (
+                        f"; {_frame_err_suppressed} similar frame errors "
+                        "suppressed"
+                        if _frame_err_suppressed else ""
+                    )
+                    _frame_err_last = now
+                    _frame_err_suppressed = 0
+                    log.exception(
+                        f"[{device.device_id}] Data frame handler failed — "
+                        f"frame dropped, connection kept{suffix}"
+                    )
+                else:
+                    _frame_err_suppressed += 1
 
     except asyncio.TimeoutError:
         log.warning(f"[data] Identify timeout from {remote}")

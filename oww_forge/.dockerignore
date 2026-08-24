@@ -1,0 +1,8 @@
+# /data is the training volume — assets alone are ~25GB, and it is MOUNTED at
+# run time, never copied in. Without this the daemon is handed the whole lot
+# as build context on every local build, which reads as the build hanging
+# before it has run a single instruction.
+data/
+
+__pycache__/
+*.pyc

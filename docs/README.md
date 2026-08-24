@@ -23,6 +23,11 @@ Deeper technical references live elsewhere:
 - [rooting.md](rooting.md) — what a device needs before EchoMuse can use it.
   The exploit itself is R0rt1z2's work on XDA Forums and that thread is canon;
   this covers where EchoMuse picks up, and what the wizard does for you.
+- [audio-states.md](audio-states.md) — who owns the speaker and what is on the
+  wire: the two audio planes, ducking, flush semantics, and the open questions
+  about how voice, music, announcements and alarms interact.
+- [led-ring-states.md](led-ring-states.md) — the ring's state model: owner
+  priority, link availability, and the button/audio event tables.
 - [SETUP.md](../SETUP.md) — architecture reference: how the mic array, the
   audio pipeline and the device/controller protocol actually work, plus
   troubleshooting. Not an onboarding guide.

@@ -1205,6 +1205,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const [pushing, setPushing] = useState(false);
   const [release, setRelease] = useState(null);
   const [checkingRelease, setCheckingRelease] = useState(false);
+  const [autoChecks, setAutoChecks] = useState(true);
   const [approveLabel, setApproveLabel] = useState(device.label || '');
   const [approving, setApproving] = useState(false);
   const [localFile, setLocalFile] = useState(null);
@@ -1246,6 +1247,9 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     }
     if (tab === 'updates') {
       API.get('/api/releases/latest').then(setRelease).catch(() => {});
+      API.get('/api/system/status')
+        .then(s => setAutoChecks(s.update_checks_enabled !== false))
+        .catch(() => {});
       // Asset state costs a device shell round trip, so it is fetched on tab
       // entry rather than polled — unlike a release, it only changes when
       // someone acts on it here.
@@ -1424,7 +1428,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     try {
       const res = await API.post(`/api/devices/${device.device_id}/update`, {});
       setPushLog(l => [...l, `Deploying ${res.version} — waiting for reconnect…`]);
-      _pollReconnect(res.version);
+      _pollReconnect(res.version, device.firmware_ver);
     } catch(e) {
       setPushLog([`Error: ${e.error || 'Update failed'}`]);
       setPushing(false);
@@ -1441,7 +1445,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
       setPushLog(l => [...l, '✓ Upload complete — deploying…']);
       const res = await API.post(`/api/devices/${device.device_id}/update`, { upload_token: up.upload_token });
       setPushLog(l => [...l, `Deploying ${res.version} — waiting for reconnect…`]);
-      _pollReconnect(res.version);
+      _pollReconnect(res.version, device.firmware_ver);
     } catch(e) {
       setUploading(false);
       setPushLog(l => [...l, `Error: ${e.error || 'Deploy failed'}`]);
@@ -1449,7 +1453,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     }
   }
 
-  function _pollReconnect(targetVersion) {
+  function _pollReconnect(targetVersion, priorVersion) {
     let attempts = 0;
     let wasDisconnected = false;
     const poll = setInterval(async () => {
@@ -1472,7 +1476,13 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
           setPushLog(l => [...l, `✗ ${d.update_error}`]);
           clearInterval(poll); setPushing(false);
         } else if (wasDisconnected && d?.connected && d?.firmware_ver && d.firmware_ver !== targetVersion) {
-          setPushLog(l => [...l, `⚠ Device reconnected on ${d.firmware_ver} — auto-rolled back`]);
+          const rolledBack = priorVersion && d.firmware_ver === priorVersion;
+          setPushLog(l => [...l, rolledBack
+            ? `⚠ Device reconnected on ${d.firmware_ver} — auto-rolled back`
+            : `Device reconnected on ${d.firmware_ver} (expected ${targetVersion})`
+              + (String(targetVersion).startsWith('local-')
+                  ? ' — the binary carried no readable version label; if this is the build you pushed, it succeeded'
+                  : '')]);
           clearInterval(poll); setPushing(false);
         } else if (attempts > 40) {
           setPushLog(l => [...l, 'Timed out — check device logs']);
@@ -1486,7 +1496,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     setPushing(true); setPushLog([`Rolling back to ${device.firmware_previous}…`]);
     try {
       await API.post(`/api/devices/${device.device_id}/rollback`, {});
-      _pollReconnect(device.firmware_previous);
+      _pollReconnect(device.firmware_previous, device.firmware_ver);
     } catch(e) {
       setPushLog([`Error: ${e.error || 'Rollback failed'}`]);
       setPushing(false);
@@ -1922,6 +1932,12 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     <span style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color: needsUpdate ? 'var(--warn)' : 'var(--ok)' }}>
                       {release?.version ? (needsUpdate ? `Update ${release.version} available` : 'Up to date') : 'No release info'}
                     </span>
+                    {!autoChecks && (
+                      <span style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color:'var(--lcd-dim)' }}
+                            title="update_check_interval is 0: the controller makes no background GitHub requests. Check now still works.">
+                        Auto-checks off
+                      </span>
+                    )}
                     <Pill small onClick={doCheckRelease} disabled={checkingRelease}>
                       {checkingRelease ? 'Checking…' : 'Check now'}
                     </Pill>
@@ -5873,6 +5889,8 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
   const [bundling, setBundling]   = useState(false);
   const [bundle, setBundle]       = useState(null);  // {url, name, bytes}
   const [bundleErr, setBundleErr] = useState(null);
+  const [users, setUsers]         = useState(null);
+  const [usersMsg, setUsersMsg]   = useState(null);
 
   const [apiKey, setApiKey] = useState(null);
   const [showApiKey, setShowApiKey] = useState(false);
@@ -5893,6 +5911,24 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
       .then(r => setTrainingBacklog((r.models || []).reduce((n, m) => n + (m.counts.untriaged || 0), 0)))
       .catch(() => {});
   }, [isAdmin]);
+
+  function loadUsers() {
+    API.get('/api/users').then(setUsers)
+      .catch(e => setUsersMsg({ ok: false, text: e.error || 'Failed to load users' }));
+  }
+
+  useEffect(() => { if (tab === 'users') loadUsers(); }, [tab]);
+
+  async function setUserRole(id, role) {
+    setUsersMsg(null);
+    try {
+      await API.patch(`/api/users/${id}`, { role });
+      setUsers(prev => prev.map(u => u.id === id ? { ...u, role } : u));
+      setUsersMsg({ ok: true, text: 'Role updated.' });
+    } catch (e) {
+      setUsersMsg({ ok: false, text: e.error || 'Refused.' });
+    }
+  }
 
   // Object URLs pin their blob in memory until revoked; the panel closing is
   // the last moment we can still reach this one.
@@ -6005,8 +6041,8 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
 
   // Support is admin-only because the endpoint is: the bundle spans the whole
   // fleet, so a tab a non-admin can only be refused by is worse than no tab.
-  const TABS = isAdmin ? ['fleet', 'account', 'integration', 'music', 'training', 'support'] : ['fleet', 'account'];
-  const TAB_LABELS = { fleet: 'Config', account: 'Account', integration: 'HA Integration', music: 'Music', training: 'Training', support: 'Support' };
+  const TABS = isAdmin ? ['fleet', 'users', 'account', 'integration', 'music', 'training', 'support'] : ['fleet', 'account'];
+  const TAB_LABELS = { fleet: 'Config', users: 'Users', account: 'Account', integration: 'HA Integration', music: 'Music', training: 'Training', support: 'Support' };
 
   return (
     <div style={{ position:'fixed', inset:0, background:'rgba(180,176,168,0.5)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:200, backdropFilter:'blur(8px)' }}
@@ -6057,6 +6093,35 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                 </div>
               )}
             </>
+          )}
+
+          {tab === 'users' && isAdmin && (
+            <div style={{ maxWidth: 640 }}>
+              <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', marginBottom:20, lineHeight:1.6 }}>
+                Admins approve devices, change config, and can open a root shell to any device.
+                Read-only accounts see status only. HA-linked accounts sign in through Home Assistant,
+                but their role is managed here. The last admin cannot be demoted.
+              </div>
+              {(users || []).map(u => (
+                <div key={u.id} style={{ display:'flex', alignItems:'center', gap:12, padding:'10px 0', borderBottom:'1px solid var(--border)' }}>
+                  <div style={{ flex:1 }}>
+                    <div style={{ fontFamily:"'DM Sans',sans-serif", fontSize:14 }}>{u.username}</div>
+                    <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)' }}>
+                      {u.role}{u.ha_linked ? ' · HA-linked' : ''}
+                    </div>
+                  </div>
+                  {u.role === 'admin'
+                    ? <Pill onClick={() => setUserRole(u.id, 'readonly')}>Demote to read-only</Pill>
+                    : <Pill accent onClick={() => setUserRole(u.id, 'admin')}>Promote to admin</Pill>}
+                </div>
+              ))}
+              {!users && !usersMsg && <div className="help">Loading…</div>}
+              {usersMsg && (
+                <div style={{ marginTop:14, fontFamily:"'DM Mono',monospace", fontSize:11, color:usersMsg.ok ? 'var(--ok)' : 'var(--error)' }}>
+                  {usersMsg.ok ? '✓ ' : ''}{usersMsg.text}
+                </div>
+              )}
+            </div>
           )}
 
           {tab === 'account' && (
@@ -6241,6 +6306,17 @@ function App() {
 
   // Restore token on mount
   useEffect(() => { if (token) API.token = token; }, []);
+
+  // A role can change server-side while an ingress session remains active;
+  // refresh the cached localStorage value so newly promoted users see controls.
+  useEffect(() => {
+    if (!token) return;
+    API.get('/api/auth/me').then(me => {
+      if (!me?.role || me.role === role) return;
+      setRole(me.role);
+      localStorage.setItem('em_role', me.role);
+    }).catch(() => {});
+  }, [token]);
 
   // Load initial data
   useEffect(() => {

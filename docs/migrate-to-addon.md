@@ -233,13 +233,14 @@ signing out would sign you straight back in.
 **The first person to open the dashboard becomes the admin.** Everyone else in
 your household who opens it gets read-only access.
 
-**Open it yourself, first, before telling anyone it exists.** There is
-currently no screen for changing who is an admin — the capability exists only
-as an API call (`PATCH /api/users/{id}`,
-[#197](https://github.com/wilbowes/EchoMuse/issues/197)), so if someone else
-opens the sidebar entry before you do, putting it right is fiddly. Home
-Assistant shows the entry to admin users, so anyone with an admin Home
-Assistant account can trip this.
+**Open it yourself, first, before telling anyone it exists.** Home Assistant
+shows the sidebar entry to admin users, so anyone with an admin Home Assistant
+account can get there before you.
+
+If someone else does, an admin can put it right under **Settings → Users**,
+which lists every account and promotes or demotes it. The catch is that the
+screen is admin-only, so it has to be *them* doing it, on your behalf. The
+last admin cannot be demoted, so there is no way to lock everyone out.
 
 Your old local accounts are still in the database and are not deleted, but
 they are not used while you are coming in through Home Assistant.

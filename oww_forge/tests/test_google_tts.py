@@ -7,11 +7,17 @@ from pathlib import Path
 import numpy as np
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
-from google_tts import (DEFAULT_QPS, _RequestPacer, _write_wav16k,
-                        plan_prune_clips)
+from google_tts import (DEFAULT_QPS, _RequestPacer, _is_permanent_error, _write_wav16k,
+                         plan_prune_clips)
 
 
 class GoogleTtsAudioTests(unittest.TestCase):
+    def test_only_request_or_auth_errors_retire_a_voice(self):
+        permanent = type("InvalidArgument", (Exception,), {})()
+        transient = type("ResourceExhausted", (Exception,), {})()
+        self.assertTrue(_is_permanent_error(permanent))
+        self.assertFalse(_is_permanent_error(transient))
+
     def test_default_qps_is_two_and_pacer_interval_is_inverse_qps(self):
         self.assertEqual(DEFAULT_QPS, 2.0)
         self.assertAlmostEqual(_RequestPacer(1 / 4).interval, 0.25)

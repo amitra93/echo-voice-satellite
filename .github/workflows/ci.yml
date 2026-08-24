@@ -10,8 +10,8 @@ jobs:
     name: Controller unit tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       # The tests cover pure-logic modules only — numpy/scipy for the EQ
@@ -62,8 +62,8 @@ jobs:
     name: Controller lint (undefined names)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install pyflakes
@@ -100,7 +100,7 @@ jobs:
     name: Dashboard logic tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       # No setup-node step: ubuntu-latest ships a node, and this test needs
       # nothing beyond the standard library. The dashboard is otherwise
       # untested by construction — it compiles to a single classic script
@@ -126,10 +126,10 @@ jobs:
     name: Device Go tests
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true  # GoTinyAlsa replace directive in device/go.mod
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: device/go.mod
           cache-dependency-path: device/go.sum
@@ -152,8 +152,8 @@ jobs:
     name: Python dependency audit
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
       - name: Install pip-audit
@@ -182,10 +182,10 @@ jobs:
     name: Device Go vulnerability check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: device/go.mod
           cache-dependency-path: device/go.sum
@@ -222,14 +222,260 @@ jobs:
         working-directory: device
         run: govulncheck ./internal/... ./pkg/... || true
 
+  controller-image:
+    name: Controller image builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0  # the diff below needs the base commit
+      # Plain git rather than a paths-filter action: this decides whether a
+      # build runs, so it is not worth a third-party action holding repo
+      # credentials. On push to main there is nothing to diff against and
+      # controller-build.yml builds anyway, so this only ever runs on a PR.
+      - name: Did the image inputs change?
+        id: changed
+        run: |
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "not a pull request — controller-build.yml covers main"
+            exit 0
+          fi
+          base="${{ github.event.pull_request.base.sha }}"
+          files=$(git diff --name-only "$base"...HEAD -- \
+                    controller/Dockerfile controller/requirements.txt)
+          if [ -n "$files" ]; then
+            echo "build=true" >> "$GITHUB_OUTPUT"
+            echo "$files"
+          else
+            echo "build=false" >> "$GITHUB_OUTPUT"
+            echo "Dockerfile and requirements.txt unchanged"
+          fi
+      - name: Set up Docker Buildx
+        if: steps.changed.outputs.build == 'true'
+        uses: docker/setup-buildx-action@v4
+      # Why this job exists: NOTHING else builds this image on a PR.
+      # controller-build.yml runs on push to main only, and the test jobs
+      # above pin themselves to python-version 3.12 regardless of what the
+      # Dockerfile says — so a base-image or dependency bump arrives with
+      # seven green checks and no evidence behind any of them.
+      #
+      # That is not hypothetical. Dependabot #127 (python:3.12-slim ->
+      # 3.14-slim) was green on every check while speexdsp-ns==0.1.2 has no
+      # wheel past cp312 and onnxruntime==1.20.1 none past cp313, so the
+      # image could not have built at all. The first failure would have been
+      # on main, in the job that publishes.
+      #
+      # Deliberately narrow, because a full image build is minutes:
+      #   - Only when the Dockerfile or requirements.txt actually changed.
+      #     Application code cannot break the build in a way the other jobs
+      #     miss; a missing wheel is exactly what they cannot see.
+      #   - amd64 only. The break this catches is a missing wheel or an apt
+      #     package that moved, both of which show up on either architecture,
+      #     and arm64 under QEMU costs far more than it adds. The release
+      #     path still builds both.
+      #   - No push, no registry login, no GHCR credentials. This answers
+      #     "does it build", nothing more.
+      #
+      # It is a JOB rather than a separate workflow so that it always reports
+      # a result, including when it skips. A workflow-level `paths:` filter
+      # would leave the check simply absent on most PRs, which is the one
+      # state a branch protection rule cannot tell apart from "not finished".
+      - name: Build the controller image
+        if: steps.changed.outputs.build == 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: controller
+          push: false
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+
+  controller-imports:
+    name: Controller modules import and the controller boots
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      # WHY THIS EXISTS: the two largest files in the controller have no
+      # test that so much as imports them. controller/CLAUDE.md records the
+      # constraint honestly — the suite cannot import em_controller or
+      # em_esphome, which is why em_linkauth, em_runbarrier, em_barge and
+      # em_turnclock were split out as pure modules with real coverage.
+      # That split is right and should continue. What it leaves behind is a
+      # blind spot: em_controller.py is ~4000 lines that nothing in CI ever
+      # parses beyond `pyflakes`, and em_api.py is not far behind.
+      #
+      # PR #280 walked straight into it — the control-plane dispatch chain
+      # re-indented inside a try/except, +498/-389, in exactly that file.
+      # A misplaced `except` would have been syntactically valid Python
+      # with the wrong control flow, every test still green, and the first
+      # symptom a device dropping its connection in the field. It was
+      # smoke-tested by hand instead, which is not a control.
+      #
+      # NO BUILD. The published image already carries aiohttp, onnxruntime,
+      # numpy and the rest, so the PR's source is mounted OVER it and the
+      # imports run against real dependencies. A pull is seconds where a
+      # build is minutes, and this has to run on every PR to be worth
+      # anything — application code is precisely what it catches.
+      #
+      # The tradeoff, stated so a later failure is not mysterious: a PR that
+      # ADDS a dependency fails here until the image is rebuilt, because
+      # :latest predates it. That is a true signal (a new dependency IS a
+      # deployment change) and the controller-image job above is what
+      # actually verifies such a PR builds. If it becomes noisy, gate this
+      # on requirements.txt being unchanged rather than deleting the job.
+      # The PR's Python is layered ONTO the published image rather than
+      # bind-mounted over /app. static/dashboard.js is gitignored and built
+      # during the image build, so mounting the source tree over /app hides
+      # the compiled bundle — the controller would still boot and serve a
+      # dashboard that 404s its own JavaScript, which is a worse check than
+      # no check. Overlaying only *.py keeps everything the build produced.
+      # PINNED BY DIGEST, for the reason the compiler image is (device/CLAUDE.md):
+      # a floating tag means this job's baseline can move without a PR, so a
+      # red check stops being evidence about the PR that is red. :latest only
+      # advances on a GA release — EA deliberately never moves it — so the
+      # drift is infrequent and therefore easy to miss when it happens.
+      #
+      # Currently 2.20.2. BUMP IT when a GA release changes dependencies:
+      # the symptom is this job failing on an import of something newly added
+      # to requirements.txt, which is a true signal about a stale pin rather
+      # than about the PR. Get the digest with:
+      #
+      #   docker buildx imagetools inspect ghcr.io/wilbowes/echomuse-controller:latest
+      #
+      # Note pinning does NOT reduce the package's pull count — GHCR counts
+      # fetches by digest the same as by tag. This is about reproducibility
+      # only; do not re-litigate it as a stats change.
+      - name: Layer this PR's controller source onto the published image
+        env:
+          BASE: ghcr.io/wilbowes/echomuse-controller@sha256:3df932996b3c9ac6fc583eaf40aba904b9a86bf5e531169515ce49dd0c5216af
+        run: |
+          docker pull "$BASE"
+          printf 'FROM %s\nCOPY controller/*.py /app/\n' "$BASE" \
+            > /tmp/ci-overlay.Dockerfile
+          docker build -f /tmp/ci-overlay.Dockerfile -t echomuse-controller:ci .
+      # Every module, not a hand-picked list: a new file added to the
+      # controller must import cleanly on the day it lands, and naming them
+      # individually means the next em_*.py is silently exempt.
+      #
+      # em_start is excluded because it is the add-on entrypoint — it reads
+      # /data/options.json and execs the controller, so importing it does
+      # not mean what importing the others means.
+      - name: Import every controller module
+        run: |
+          docker run --rm -w /app --entrypoint python3 \
+            echomuse-controller:ci -c '
+          import importlib, pathlib, sys, traceback
+          mods = sorted(p.stem for p in pathlib.Path(".").glob("*.py"))
+          mods = [m for m in mods if m not in ("em_start",)]
+          print(f"importing {len(mods)} modules")
+          failed = []
+          for m in mods:
+              try:
+                  importlib.import_module(m)
+              except BaseException:
+                  failed.append(m)
+                  print(f"--- {m} ---", file=sys.stderr)
+                  traceback.print_exc()
+          if failed:
+              print("\nFAILED: " + ", ".join(failed), file=sys.stderr)
+              sys.exit(1)
+          print("all modules imported")
+          '
+      # Importing proves the file parses and its module-level code runs.
+      # It does NOT prove the thing starts: the asyncio setup, the mDNS
+      # advertisement, the PKI generation and the ESPHome listeners all
+      # happen after that. Booting to "ready" covers the rest of the path a
+      # user meets first, and a controller that cannot start is the one
+      # failure nobody can work around.
+      - name: Boot the controller and wait for ready
+        run: |
+          mkdir -p /tmp/em-ci-data
+          docker run -d --name em-ci \
+            -e SERVER_IP=127.0.0.1 \
+            -e DB_PATH=/app/data/echomuse.db \
+            -e DEVICE_APPROVAL=strict \
+            -v /tmp/em-ci-data:/app/data \
+            echomuse-controller:ci
+          # 90s: a first start generates the CA and runs every migration on
+          # an empty database, which is the slowest legitimate boot there is.
+          for i in $(seq 1 90); do
+            if docker logs em-ci 2>&1 | grep -q "Controller ready"; then
+              echo "booted in ${i}s"
+              docker logs em-ci
+              # A traceback ANYWHERE in a clean first boot is a fault, even
+              # one something caught — nothing should be recovering from an
+              # error on an empty database with no devices attached.
+              if docker logs em-ci 2>&1 | grep -q "Traceback"; then
+                echo "::error::traceback during a clean first boot"
+                exit 1
+              fi
+              exit 0
+            fi
+            if [ "$(docker inspect -f '{{.State.Status}}' em-ci)" != "running" ]; then
+              echo "::error::controller exited before becoming ready"
+              docker logs em-ci
+              exit 1
+            fi
+            sleep 1
+          done
+          echo "::error::controller did not report ready within 90s"
+          docker logs em-ci
+          exit 1
+      - name: Stop the controller
+        if: always()
+        run: docker rm -f em-ci 2>/dev/null || true
+
+  device-firmware-build:
+    name: Device firmware builds (pinned compiler)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true  # GoTinyAlsa replace directive in device/go.mod
+      # THE ONLY JOB THAT EXERCISES THE COMPILER THE FIRMWARE ACTUALLY SHIPS
+      # FROM. Every other Go job here runs on amd64 with GitHub's toolchain,
+      # which device/CLAUDE.md already notes proves nothing about this image:
+      # it carries the Go version and NDK pinned by digest against a 2015
+      # platform we cannot upgrade.
+      #
+      # Added after #276, where a Dependabot bump raised go.mod's `go`
+      # directive past the pinned toolchain's version and left the firmware
+      # unbuildable for four days. Nothing failed, because the image is
+      # otherwise exercised only by compile.sh and release.yml — so the next
+      # thing to notice would have been a release tag failing at the build
+      # step, which is the worst moment to find out.
+      #
+      # It builds only; it does not verify the binary runs. Moving the
+      # compiler pin still needs a real device in the loop.
+      - name: Build compiler image
+        run: docker build -t echomuse-compiler device/compiler/
+      - name: Build firmware
+        run: |
+          docker run --rm --entrypoint bash \
+            -e CGO_LDFLAGS="-Wl,--hash-style=both" \
+            -e CGO_CFLAGS="-Wno-deprecated-declarations -Wno-null-dereference" \
+            -v "$PWD/device":/sdk \
+            -v "$PWD/GoTinyAlsa":/GoTinyAlsa \
+            echomuse-compiler \
+            -c "cd /sdk && go build -tags server -o build/server ./cmd/"
+      - name: Check it is an ARM binary
+        # A build that silently produced a host binary would pass the step
+        # above and ship something the hardware cannot run.
+        run: |
+          file device/build/server
+          file device/build/server | grep -q "ARM" || {
+            echo "::error::firmware is not an ARM binary"; exit 1; }
+
   device-vet:
     name: Device go vet
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           submodules: true
-      - uses: actions/setup-go@v5
+      - uses: actions/setup-go@v7
         with:
           go-version-file: device/go.mod
           cache-dependency-path: device/go.sum

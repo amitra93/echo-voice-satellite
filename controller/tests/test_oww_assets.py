@@ -89,8 +89,9 @@ def test_extra_classifiers_are_evicted_oldest_first():
     actual["ancient.onnx"] = ("d", NOW - 900_000)
 
     p = A.plan_sync(desired, actual, slots=4)
-    # 1 desired + 3 extras fills four slots; the oldest falls off.
-    assert sorted(p.prune) == ["ancient.onnx"]
+    # Stock classifiers are always resident and do not consume the custom
+    # classifier budget. Four former custom models therefore all fit.
+    assert p.prune == []
     assert "newest.onnx" in p.keep and "middle.onnx" in p.keep
 
 
@@ -297,3 +298,30 @@ def test_desired_assets_reports_missing_sources_and_deduplicates(tmp_path):
     assets, problems = A.desired_assets([], runtime_dir=tmp_path / "no-runtime", resources=None, models_dir=None)
     assert not assets
     assert len(problems) >= 3
+
+
+def test_desired_assets_plans_every_stock_classifier(tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    resources = tmp_path / "resources"
+    runtime_dir.mkdir()
+    resources.mkdir()
+    (runtime_dir / A.RUNTIME_NAME).write_bytes(b"rt")
+    for name in A.SHARED_NAMES:
+        (resources / name).write_bytes(name.encode())
+    for model in A.STOCK_MODELS:
+        (resources / f"{model}.onnx").write_bytes(model.encode())
+
+    assets, problems = A.desired_assets(
+        ["alexa_v0.1"], runtime_dir=runtime_dir, resources=resources, models_dir=tmp_path
+    )
+    classifiers = [asset.name for asset in assets if asset.kind == "classifier"]
+    assert classifiers[0] == "alexa_v0.1.onnx"
+    assert set(classifiers) == {f"{model}.onnx" for model in A.STOCK_MODELS}
+    assert not problems
+
+
+def test_missing_selected_classifier_requires_matching_md5():
+    desired = _base() + [_asset("selected.onnx", "new", "classifier")]
+    actual = {asset.name: (asset.md5, NOW) for asset in _base()}
+    actual["selected.onnx"] = ("old", NOW)
+    assert A.missing_selected_classifier(desired, actual) == "selected.onnx"

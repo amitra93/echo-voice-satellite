@@ -209,6 +209,26 @@ def test_turn_terminal_for_active_turn_cancels_tts_and_closes_channel():
     assert closed == [True]
 
 
+@pytest.mark.parametrize("outcome", ["cancelled", "muted", "barged"])
+def test_turn_terminal_ends_the_active_hacs_turn_for_each_early_end_cause(outcome):
+    entity, _client, _coord = _make_satellite()
+    entity._active_turn_id = 5
+    closed = []
+
+    class FakeChannel:
+        async def close(self):
+            closed.append(True)
+
+    entity._active_channel = FakeChannel()
+    asyncio.run(entity._async_gateway_event({
+        "type": "turn.terminal", "turn_id": 5, "device_id": "A", "outcome": outcome,
+    }))
+
+    assert entity._active_turn_id is None
+    assert entity._active_channel is None
+    assert closed == [True]
+
+
 def test_turn_terminal_for_a_different_turn_is_ignored():
     entity, client, _coord = _make_satellite()
     entity._active_turn_id = 5

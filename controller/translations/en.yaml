@@ -56,3 +56,9 @@ configuration:
     description: >-
       Music Assistant host and Sendspin port in one field, for example
       192.168.1.10:8927. Leave empty to discover it over mDNS.
+  extra_ca_cert:
+    name: Private CA certificate
+    description: >-
+      Only needed for HTTPS media served with an internal certificate
+      authority. Put the PEM CA certificate in Home Assistant's ssl folder
+      and enter its path as /ssl/<filename>.

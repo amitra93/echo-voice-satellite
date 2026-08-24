@@ -1,5 +1,649 @@
 # Changelog
 
+## 2.21.0-ea.5 (Early Access)
+
+One change on ea.4, to what the Activity tab tells you.
+
+### An interrupted answer now says how it was interrupted
+
+Three different things stop a response, and until now they all recorded the
+same way. They are now distinct:
+
+| Outcome | What happened |
+|---|---|
+| **barged** | You said the wake word over it — a new turn followed |
+| **cancelled** | You pressed the action button |
+| **muted** | You muted the device, which also turns the microphone off |
+
+ea.4 already recorded a wake word spoken over a *response* as **barged**. One
+spoken while the Echo was still thinking recorded as **cancelled**, because
+the two travel different paths internally and only one had been covered. Both
+are barges and both now say so.
+
+Recording all three the same way made a person talking over the assistant
+indistinguishable from a button press. It also hid the fault this was built to
+find: a device triggering on its own speech shows up as a barge followed by a
+turn the barge started, and half of those were invisible.
+
+**Expect your numbers to move.** Turns you interrupted on earlier builds were
+counted as answered, and mutes during a response were counted as cancels.
+Nothing about the fleet changed — only the counting. Older rows keep whatever
+they were recorded as; nothing is rewritten, because a cause that was never
+captured should not be invented later.
+
+## 2.21.0-ea.4 (Early Access)
+
+One fix on ea.3, for anyone who builds their own firmware.
+
+### Deploying your own build no longer reports a rollback that did not happen
+
+Uploading a locally compiled binary from **Updates → Local Build** worked, and
+then said it had not:
+
+```
+⚠ Device reconnected on v2.12.0-63-g99628d3 — auto-rolled back
+```
+
+The device in that message is running exactly what was pushed. Nothing rolled
+back.
+
+Two causes. The controller reads the version out of the uploaded binary to
+know what to expect on reboot, and it only recognised the older date-style
+version string — so a build made from a clean checkout was labelled with a
+placeholder the device could never report. And the dashboard treated any
+mismatch as a rollback, when a rollback specifically means the device came
+back on the firmware it had **before**.
+
+Both fixed. A genuine rollback still says so. Anything else reports what the
+device came back on and what was expected, without guessing, and explains the
+placeholder when that was the cause.
+
+Nothing here affects updating from a published release, which reads its
+version from the release rather than from the binary.
+
+## 2.21.0-ea.3 (Early Access)
+
+One fix on ea.2, to a number you would otherwise have trusted.
+
+### An answer you interrupt is recorded as interrupted
+
+Cutting a response off mid-sentence — by saying the wake word over it — was
+still recorded in the activity statistics as a completed answer.
+
+2.21.0-ea.1 fixed this for an interruption during **thinking**, before the Echo
+had started speaking. It missed the case it was actually written for: an
+interruption during **playback**, once a response had begun. The two travel
+different paths internally and only one was covered.
+
+Measured here today: a response cut off mid-sentence, recorded as answered.
+
+Both now record as **barged**. If you were reading the Activity tab across
+earlier builds, turns you interrupted while the Echo was speaking were counted
+as successful, and the totals will change once this is running — the fleet did
+not change, the counting did.
+
+## 2.21.0-ea.2 (Early Access)
+
+Two fixes on top of 2.21.0-ea.1.
+
+### Deploying a locally built firmware works again
+
+Uploading your own compiled binary from the Updates tab failed with "an
+internal error occurred". The controller was capping uploads at 1 MB against
+a firmware roughly ten times that, so the file never reached the code meant
+to handle it.
+
+This broke on 2026-08-18 in 2.20.2, when a routine dependency update changed
+how the web framework applies its size limit. Nothing else was affected —
+updating from a published release goes by a different path and has worked
+throughout. Only a locally built binary was blocked.
+
+The limit is now 50 MB, and a file over it says so, with its size, instead of
+reporting an internal error.
+
+### Automatic update checks say when they are off
+
+Setting `update_check_interval` to `0` stops the controller contacting GitHub
+in the background. The Updates tab showed "No release info", which looks
+exactly like GitHub being unreachable — so the tab you would open to find out
+what was wrong could not tell you.
+
+It now reads **Auto-checks off** beside the release line. **Check now** still
+works and is unaffected: pressing it is a deliberate request, not background
+traffic, and the result stays on screen until you press it again.
+
+## 2.21.0-ea.1 (Early Access)
+
+An Early Access build on top of 2.20.2. It supersedes 2.20.3-ea.1 and includes
+everything in it — those notes are below.
+
+Seven fixes, almost all of them things that failed quietly rather than
+visibly. No database migration. One change needs new firmware and says so.
+
+### A single bad message no longer drops the device
+
+One malformed or unexpected control message could take a device's whole
+connection down with it — the voice satellite, the Bluetooth proxy and the
+audio channel together — and it reconnected every time it happened. The
+message that triggered it in practice was a **playback statistics report**,
+which is pure telemetry: the least important thing the device sends was able
+to disconnect it.
+
+Each message is now handled on its own. One that fails is logged with what it
+was, and everything else carries on.
+
+### Turning update checks off actually turns them off
+
+Setting **Update check interval** to `0` was the obvious way to stop the
+controller contacting GitHub, and it did the opposite: it removed the wait
+between checks entirely, so the controller polled continuously until GitHub
+rate-limited it. `0` now means off. A value that is not a number falls back to
+the hourly default instead of silently killing update checking altogether.
+
+### A dead music stream ends instead of hanging forever
+
+If a Music Assistant stream stopped producing audio — an upstream failure
+rather than the end of a track — playback waited indefinitely. Home Assistant
+kept showing **playing** against silence, and nothing in the log said
+otherwise.
+
+A source that produces nothing for 30 seconds now ends the stream, tells Home
+Assistant it is idle, and logs what happened. A stream that is merely slow
+still recovers; the clock resets on every chunk that arrives.
+
+### Media URLs are checked over HTTPS
+
+Audio fetched over `https` did not verify the server's certificate. It does
+now. If you stream from a server with a private or self-signed certificate,
+point `EM_EXTRA_CA_CERT` at your CA and it will work as before. Playback
+failures also now include the decoder's own error message, which previously
+went nowhere.
+
+### Interrupted answers are recorded as interrupted
+
+A response cut off partway — by the button, or by the Echo hearing a wake word
+mid-sentence — was recorded in the activity statistics as a completed answer.
+A fleet interrupting a third of its responses read as a fleet answering
+everything, which is how a real fault stayed hidden for two days. Those turns
+now show as **barged**.
+
+### The limiter's clipping counter reads correctly when it is off
+
+Clipping caught while the limiter is switched off is the backstop doing its
+job on a boosted EQ, not a fault. It was counted alongside genuine faults, so
+a working setup looked broken. The two are now counted separately.
+
+### The listening ring lights immediately — needs firmware v2.13.0
+
+On an Echo doing its own wake word detection, the ring waited for a round trip
+to the controller before lighting: measured at half a second, and longer on a
+busy network. It now lights the moment the device hears you.
+
+This one needs device firmware **v2.13.0** or later. On earlier firmware
+everything behaves exactly as it does today, and the dashboard will offer the
+update when it is published.
+
+### Also
+
+The command-line tools in `controller/tools/` now find the database under the
+Home Assistant add-on as well as the standalone container.
+
+## 2.20.3-ea.1 (Early Access)
+
+An Early Access build on top of 2.20.2. The 2.20.2 notes below are the release
+this builds on — you already have them if you were running an earlier build.
+
+Two changes, both about the Echo hearing you. No database migration, no
+firmware requirement, and nothing to do on your devices.
+
+### Noise suppression no longer swallows quiet words
+
+**Noise suppression** could cut speech to complete silence rather than just
+turning it down. Measured on real turns: with it on, 8–15% of samples at a
+healthy speaking level were digital silence, against 0.3% with it off. That is
+the difference between a word sounding muffled and a word not being there at
+all, and it lands hardest on exactly the quiet speech the setting is meant to
+rescue.
+
+Suppression is now limited to 20 dB. A passage the denoiser judges to be noise
+is pushed well down instead of removed, and where it judges speech to be clean
+it passes through completely untouched — so nothing that was working gets
+quieter. Speech recognition stops improving well before 20 dB of noise
+reduction, so the limit costs nothing that was being collected.
+
+If you turned **Noise suppression** off because transcripts came back with
+words missing, it is worth another try.
+
+### Every Echo now knows all four wake words
+
+Your Dot was given the recogniser for whichever wake word was selected when it
+was provisioned. Choose a different one later and it needed that recogniser
+copied across first — which normally happened, but left a gap: a device that
+was **offline** when you changed the wake word was told to listen for a word it
+did not have.
+
+On a device doing its own wake word detection, that is a Dot that hears
+nothing. Nothing warned, and the dashboard showed it as healthy.
+
+All four stock wake words (Hey Jarvis, Alexa, Hey Mycroft, Hey Rhasspy) are now
+installed on every device — 3 MB in total — so switching between them is
+instant and cannot fail. Devices you provisioned earlier collect the missing
+ones automatically the next time they connect, and any device found without the
+recogniser it was told to use falls back to the controller listening on its
+behalf, rather than going quietly deaf.
+
+Custom wake words you have trained yourself are untouched and are still copied
+across on selection.
+
+## 2.20.2
+
+**Better sound, and a long run of fixes.** Your Echo gets a speaker protection
+stage that clears up the midrange and stops the equaliser distorting what it
+boosts. Long answers no longer cut themselves off, wake words no longer fire at
+nobody, interrupting a response no longer disconnects the device, Home
+Assistant sidebar sign-in works again, and adding a second Echo no longer
+overwrites the first.
+
+**Two things to know before updating.** Your speaker will sound different —
+the new protection stage is on by default. And the database migrates on first
+start (a backup is taken automatically); for a small number of people that also
+gives a device a new identity in Home Assistant, which is the last item here.
+No firmware update is required and there is nothing to do on your devices.
+
+### Your Echo sounds different, and it should sound better
+
+Turning any equaliser band up used to push the audio past full scale, where it
+was hard-clipped — measured at 4.7% of samples on a normal signal with a modest
+bass boost, and 18% at the top of the sliders. A flat equaliser was unaffected,
+so this only ever hit people who reached for the controls to improve their
+sound.
+
+There is now a limiter on the output, and a dynamic bass guard in front of it
+that drops the low frequencies this driver physically cannot produce. The
+second sounds backwards and is the bigger of the two: frequencies below about
+115 Hz still move the cone even though you cannot hear them, and that movement
+muddies everything above it — which is what "tin-can" actually is. Removing
+them makes the midrange clearer and measurably *louder*, because the limiter no
+longer has to hold the whole signal down to contain bass peaks nobody was going
+to hear.
+
+Both are on by default, as a single **Speaker protection** toggle under
+Advanced → Playback. Leave it on. It was five separate controls during Early
+Access and is now one, because none of the five could be judged by ear: the two
+stages cancel out each other's most obvious effect, and the depth slider moves
+the overall level by 0.14 dB across its entire range. Nothing was lost —
+every setting still exists and still applies, and any value you had set is
+still in force; the controls to change them again have gone from the dashboard.
+
+Speaker settings also now take effect the moment you save them, mid-track,
+rather than at the next track or the next restart.
+
+### Long answers no longer cut themselves off
+
+Ask for something lengthy — a story, a detailed explanation — and EchoMuse
+would stop partway, sit with the ring lit, and end without finishing. It was
+hearing its own voice as a wake word and cancelling itself. Measured on a real
+device, a short reply peaked at 0.03 against the bar while a story reached
+0.18 against a bar of 0.05.
+
+Interrupting now needs two consecutive frames, and the default bar has moved
+from 0.05 to 0.25. Talking over a response still works — real speech scores far
+higher than the response does. **If you raised this setting yourself to stop
+responses cutting out, you can put it back to the default.**
+
+### Wake words no longer fire at nobody
+
+The wake-word engine fills its buffer with random noise whenever it is reset,
+and we scored that noise as if it were sound for the next 1.28 seconds. On one
+device in one day that produced 19 wake events with nobody speaking, some
+scoring higher than real speech. Raising your threshold would not have helped —
+two of them cleared 0.80. Found, measured and fixed by @dmndru.
+
+One consequence: interrupting a response is ignored for its first 1.28 seconds.
+
+### Interrupting a response no longer disconnects the Echo
+
+Saying the wake word mid-answer dropped the device off Home Assistant and
+reconnected it a few seconds later — so the media player and voice assistant
+flicked to unavailable each time. The cause was two lines of bookkeeping
+sitting in an unreachable spot in the code, which only mattered when playback
+was interrupted rather than finishing normally.
+
+Also here: if the wake-word listener ever fails, it now restarts itself and
+writes a loud error first, rather than leaving a device that hears you, lights
+its ring, and never answers. A stuck "turn in progress" flag recovers the same
+way. **We do not yet know what triggers that**, so if you see a device go deaf,
+the log now contains the answer and we would like it.
+
+### Home Assistant sign-in and admin rights
+
+Opening EchoMuse from the Home Assistant sidebar failed and fell back to the
+setup-token page — the lookup matching your HA account to an EchoMuse one
+crashed on every request. Reported and diagnosed by @lennart24, fixed by
+@finik.
+
+Separately, if you had created a local EchoMuse account before ever opening the
+panel through Home Assistant — including by copying `/data` across when moving
+from the container, which the migration guide tells you to do — every Home
+Assistant user was made read-only, permanently, with no way back but editing
+the database by hand. Fixed, and existing installs in that state recover.
+
+### Home Assistant behind your own certificate authority
+
+If Home Assistant is served over HTTPS with a certificate from your own
+internal CA, EchoMuse could not fetch the spoken response: the Echo woke up and
+every turn ended silently. There is a new **Private CA certificate** option —
+put the certificate (PEM) in Home Assistant's `ssl` folder and set the option
+to `/ssl/<filename>`. On the standalone container, mount it and set
+`EM_EXTRA_CA_CERT`. A missing or malformed file now stops the add-on starting
+and says why.
+
+Worth trying first, because it needs no certificate at all: if Home Assistant
+itself still listens on plain HTTP behind something that terminates TLS, set
+its *internal URL* to `http://<its-address>:8123`.
+
+### Adding a second Echo no longer overwrites the first
+
+Home Assistant identifies each satellite by a MAC address we derive from the
+Echo's serial number. That derivation stripped letters out of the serial, so
+two Echoes from the same batch differing only in their trailing characters
+collapsed onto the same address and Home Assistant concluded they were one
+device. Found and diagnosed by @lennart24.
+
+That identity is now assigned once and stored, so a fix reaches only the
+devices that need it. **On upgrade, every device keeps the identity it has
+today unless it is in a colliding pair** — in which case the older device keeps
+it and the other takes a new one, appearing in Home Assistant as a new device.
+That device's entity IDs change and any automation naming them needs
+repointing; it is the device that was being overwritten, so it had no working
+entities to lose.
+
+Also in this release: EchoMuse now carries a LICENSE and a contributing guide.
+
+## 2.20.2-ea.7 (Early Access)
+
+One addition, for people running Home Assistant over HTTPS with their own
+certificate authority.
+
+### Private certificate authorities are now supported
+
+If Home Assistant is served over HTTPS using a certificate from your own
+internal CA, EchoMuse could not fetch the spoken response. The controller
+started normally and the Echo woke up, but every turn ended silently — the
+audio fetch failed certificate verification, and nothing on screen said so.
+
+There is a new **Private CA certificate** option. Put your CA certificate (PEM
+format) in Home Assistant's `ssl` folder and set the option to
+`/ssl/<filename>`. On the standalone container, mount the certificate and set
+`EM_EXTRA_CA_CERT` to its path inside the container.
+
+If the file is missing, unreadable, or not in PEM format, the add-on now
+**fails to start and says why**, rather than starting and failing on every
+voice turn afterwards with an error nothing connects back to the setting.
+
+**Worth trying first, because it needs no certificate at all:** if Home
+Assistant itself still listens on plain HTTP and something in front of it
+handles TLS, setting Home Assistant's *internal URL* to
+`http://<its-address>:8123` avoids the problem entirely — EchoMuse is on your
+network, and the audio fetch is a local hop.
+
+Nothing else changed, and nobody who is not using a private CA is affected. No
+database migration, no firmware requirement, nothing to do on your devices.
+
+## 2.20.2-ea.6 (Early Access)
+
+One fix: interrupting a long answer dropped the device off Home Assistant.
+
+### Barging in during a response disconnected the Echo
+
+Say the wake word while EchoMuse is answering and the device would drop its
+connection and reconnect a few seconds later. Everything came back on its own,
+but Home Assistant lost the satellite briefly each time — so the media player
+and the voice assistant flicked to unavailable, and anything mid-flight was
+lost.
+
+The cause was two lines of internal bookkeeping that had been sitting in an
+unreachable spot in the code for months, so a value the controller expected
+after playback was never set up. It only mattered when playback was
+*interrupted* rather than finishing normally, which is why it surfaced now that
+interrupting works properly.
+
+Interrupting a response is now what it should be: the answer stops, your new
+request is heard, and the device stays connected throughout.
+
+Also in this release, a guard against the same class of mistake anywhere in the
+controller, and a limit on how fast the wake-word listener may restart itself
+if it ever fails repeatedly — that recovery was added in 2.20.2-ea.5 and could
+have monopolised the controller in the worst case.
+
+Nothing required of you: no database migration, no firmware requirement, and
+nothing to do on your devices.
+
+## 2.20.2-ea.5 (Early Access)
+
+One fix, and it is for the fault that showed up while testing 2.20.2-ea.4.
+
+### A device could stop responding to the wake word until the add-on restarted
+
+It went quiet with nothing in the log to say so, and — the confusing part —
+the Echo itself carried on detecting the wake word perfectly. On devices doing
+their own wake word detection, the Echo hears you, decides it heard you, and
+tells the controller; the part of the controller that acts on that had stopped
+running. So the device looked healthy from every angle and simply never
+answered.
+
+Two things could leave it in that state and neither said anything. The loop
+that listens for wake words could end on an unexpected error and nothing
+restarted it or noticed. Separately, the flag that says "a voice turn is in
+progress" could be left on after something went wrong mid-turn, and while it
+is on the device deliberately ignores the microphone.
+
+Both now recover on their own, and both write a loud error to the log first,
+so a recurrence explains itself instead of looking like the device has gone
+deaf for no reason. **If you saw this on 2.20.2-ea.4, please still send the
+log if you have it** — the fix makes it survivable, but we do not yet know
+what triggered it.
+
+Nothing else changed. No database migration, no firmware requirement, nothing
+to do on your devices.
+
+## 2.20.2-ea.4 (Early Access)
+
+Four fixes. Two change what you hear, one unblocks Home Assistant users who
+could not administer the add-on, and one is a change to the dashboard's
+speaker controls.
+
+### Long answers no longer interrupt themselves
+
+Ask for something lengthy — a story, a detailed explanation — and EchoMuse
+would stop partway, sit with the ring lit, and then end without finishing.
+It was hearing its own voice as a wake word and cancelling itself.
+
+The detector that listens for you interrupting a response used to act on a
+single 80ms fragment, at a deliberately low confidence bar. That was fine for
+short replies, which never got near it, and wrong for long ones: continuous
+speech offers far more chances to sound briefly like a wake word. Measured on
+a real device, a short reply peaked at 0.03 while a story reached 0.18 against
+a 0.05 bar.
+
+Two frames in a row are now required, and the default bar has moved from 0.05
+to 0.25. Interrupting still works — talking over a response scores far higher
+than the response itself does. **If you had raised this setting yourself to
+stop responses cutting out, you can put it back to the default.**
+
+### The speaker settings are now one switch
+
+The bass guard and limiter were five controls. None of them could be judged by
+ear: the two stages cancel out each other's most obvious effect, and the depth
+slider moves the overall level by 0.14dB across its entire range. They are now
+a single **Speaker protection** toggle under Advanced, in the Playback section,
+and it should be left on.
+
+Nothing is lost — every setting still exists and still applies, and anything
+you had set is still in force. If you tuned the limiter ceiling or the guard
+depth, those values are unchanged; the controls to change them again have gone
+from the dashboard.
+
+The bass guard's default depth also moved from −20dB to −30dB. You will not
+hear the difference, and it is not meant to be heard: it puts the default in
+the middle of the range so there is room to adjust either way.
+
+### Home Assistant users could be locked out of administering the add-on
+
+If you set up a local EchoMuse account before opening the panel through Home
+Assistant — including by copying your existing `/data` across when moving from
+the container, which the migration guide tells you to do — every Home
+Assistant user was created read-only, permanently. The only way back was
+editing the database by hand.
+
+The rule was counting accounts rather than accounts that can actually sign in
+through Home Assistant, and a local password account cannot: the panel signs
+you in through Home Assistant before it ever offers a login form. Fixed, and
+the dashboard now takes your role from the server on load rather than
+remembering it, so a role that is corrected or promoted takes effect on the
+next page load instead of the next sign-in.
+
+**If you are currently stuck read-only, updating should be enough.** No
+database editing and no cache clearing.
+
+### Speaker processing now says what it is doing
+
+The add-on log records what the output chain is set to, whenever a stream
+starts and whenever you change a setting, and how much work each stage
+actually did. This is diagnostic only and changes nothing about playback — it
+exists because "is this setting doing anything?" was not answerable from
+outside, which cost four separate listening tests.
+
+## 2.20.2-ea.3 (Early Access)
+
+One fix, and it is the one that makes the previous release's headline feature
+actually work.
+
+### Speaker settings now take effect when you save them
+
+Saving a limiter or bass guard setting updated the stored configuration but
+never reached the running controller — those settings are applied by the
+controller rather than by the Echo, and only a device reconnect picked them
+up. So they appeared to do nothing, and would then quietly start working after
+a restart, which is the point at which most people would stop investigating.
+
+If you tried tuning the speaker and heard no difference, that was correct: the
+settings were not reaching the audio. Together with the live updating added in
+2.20.2-ea.2, moving the bass guard depth or the limiter ceiling is now audible
+immediately, on the track you are already playing.
+
+Worth re-doing any tuning you did before this release — you were listening to
+unchanged sound.
+
+## 2.20.2-ea.2 (Early Access)
+
+Two changes, both about being able to tell what your system is doing. No new
+database migration, no firmware requirement.
+
+### Speaker settings now change while the music is playing
+
+The limiter and bass guard settings only took effect when the next track
+started, so changing one while listening appeared to do nothing at all. That
+made them very hard to judge: by the time a new track began, the sound you
+were comparing against was gone.
+
+They now apply immediately, mid-track. Turning the bass guard on or off, or
+moving its depth, is audible straight away and does not click or interrupt
+playback. The equaliser behaves the same way.
+
+If you have been trying to tune the speaker and concluded the settings made no
+difference, this is why — it is worth another listen.
+
+### Early Access uses its own ports
+
+The Early Access and stable add-ons keep completely separate data, including
+their own list of devices — but both handed out the same port numbers to the
+Home Assistant satellites they create. Switching between them could therefore
+leave Home Assistant talking to the wrong device, which showed up as devices
+sitting unavailable, wake words lighting the ring, and every request ending
+immediately with no answer.
+
+Early Access now uses a separate range, so a leftover Home Assistant entry
+from the other channel simply shows as unavailable instead of reaching
+something unexpected. Existing devices keep the ports they already have;
+nothing is renumbered.
+
+**Switching channels is still a migration.** Each add-on has its own database
+and its own certificate authority, so your devices will not connect to the
+other channel until you copy `/data` across — see the Documentation tab.
+
+## 2.20.2-ea.1 (Early Access)
+
+Two fixes that stop the controller doing something wrong, and the first two
+steps of making the speaker sound better. No new database migration, no
+firmware requirement.
+
+### Home Assistant sign-in through the sidebar works again
+
+Opening EchoMuse from the Home Assistant sidebar failed and fell back to the
+setup-token page. The lookup that matches your Home Assistant account to an
+EchoMuse one crashed on every request, so automatic sign-in — the main reason
+to run the add-on rather than the standalone container — has been unusable for
+several releases. Reported and diagnosed by @lennart24, fixed by @finik.
+
+### Wake words no longer fire at nobody
+
+The wake-word engine fills its buffer with random noise whenever it is reset,
+and we scored that noise as if it were sound for the next 1.28 seconds. On one
+device in one day that produced **19 wake events with nobody speaking**, all of
+them just under a second after a turn ended, some scoring higher than real
+speech does. Worse, it could fire the barge-in detector and cancel an answer
+you were waiting for.
+
+Raising the wake-word threshold would not have helped — these score higher than
+real speech, and two of the recorded events cleared 0.80. Found, measured and
+fixed by @dmndru.
+
+One consequence worth knowing: interrupting a response is now ignored for the
+first 1.28 seconds of it. That is the right trade against turns being cancelled
+by nobody.
+
+### The equalizer no longer distorts what it boosts
+
+Turning any EQ band up could push the audio past full scale, and it was being
+hard-clipped — measured at **4.7% of samples** on a normal signal with a modest
+bass boost, and 18% at the top of the sliders. Flat EQ was unaffected, so this
+only ever hit people who reached for the controls to improve their sound.
+
+There is now a limiter on the output. Same test signal, same settings, no
+clipping at all, for 1–6 dB of gain reduction rather than the 12 dB a simple
+volume trim would have cost. **Limiter** and its ceiling and release are in
+Playback; leave it on.
+
+### New: Bass guard
+
+A dynamic control that drops bass the speaker physically cannot produce.
+
+It sounds backwards, and it is the single biggest thing available for a driver
+this size. Frequencies below about 115 Hz still move the cone even though you
+cannot hear them, and that movement muddies everything above — which is what
+"tin-can" actually is. Removing them makes the midrange clearer, and measurably
+*louder*, because the limiter no longer has to hold the whole signal down to
+contain bass peaks nobody was going to hear. Quiet passages keep their low end;
+only loud content is affected.
+
+The parameters come from measurements of the stock Amazon firmware on the same
+speaker. **Bass guard depth** is in Playback, defaulting to −20 dB where stock
+uses −40 dB — deliberately gentler, because stock pairs its setting with an
+equalizer curve we have not measured.
+
+**This one wants your ears.** Play something with real low end and try the depth
+from 0 to −40. Expect it to sound thinner at first and then clearer; the best
+setting is probably deeper than feels right.
+
+### Also
+
+- Every device now carries all four stock wake word models, so changing wake
+  word no longer requires a device to have been provisioned with it.
+- Security updates to the web server, TLS and mDNS libraries.
+- The rooting guide now says the unlock needs Linux, not macOS. Thanks
+  @StefanOltmann.
+
 ## 2.20.1
 
 Changes since the 2.20.0 prerelease builds. All fixes — no new settings,
@@ -165,6 +809,10 @@ reached the speaker, rather than always reporting success.
   for playback, and says whether the audio actually reached the speaker.
 
 ## 2.20.0-ea.6 — Prerelease
+
+An Early Access build on top of 2.20.0. The 2.20.0 notes below are the
+release this builds on — you already have them if you were running an
+earlier Early Access build.
 
 - **Installing wake word models on a device works again.** Sending a wake
   word model to an Echo failed with an internal error, every time. If you

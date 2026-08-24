@@ -90,7 +90,7 @@ RUN sed -i 's/torch.load(checkpoint_path, map_location=device)/torch.load(checkp
       /usr/local/lib/python3.11/site-packages/dp/model/model.py \
     && grep -q "weights_only=False" /usr/local/lib/python3.11/site-packages/dp/model/model.py
 
-COPY forge.py google_tts.py forge_web.py torch_features.py feature_store.py bench_decode_features.py config.template.yml /opt/forge/
+COPY forge.py google_tts.py piper_voices.py forge_web.py torch_features.py feature_store.py bench_decode_features.py config.template.yml /opt/forge/
 COPY static/ /opt/forge/static/
 COPY tests/ /opt/forge/tests/
 

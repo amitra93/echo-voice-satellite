@@ -30,26 +30,65 @@ updates:
     groups:
       python-dependencies:
         patterns: ["*"]
-    # Major bumps of these two are not routine maintenance and should not
-    # arrive as a weekly PR: numpy majors have broken openwakeword's array
-    # handling before, and an onnxruntime major changes inference behaviour
-    # on every device at once. Both want a deliberate upgrade with a wake
-    # word test behind it.
+    # Bumps of these two are not routine maintenance and should not arrive as
+    # a weekly PR: numpy majors have broken openwakeword's array handling
+    # before, and an onnxruntime bump changes inference behaviour on every
+    # device at once. Both want a deliberate upgrade with a wake word test
+    # behind it.
+    #
+    # onnxruntime is ignored on MINOR too, and that is the whole point rather
+    # than caution: it has never bumped major and shows no sign of doing so,
+    # so a major-only rule can never fire and protects nothing. #129 proposed
+    # 1.20.1 -> 1.28.0 — eight minor versions, exactly the change described
+    # above — as an ordinary weekly PR, alongside bumps that genuinely were
+    # routine. Nothing in CI can catch an inference regression, so the guard
+    # has to be here or it does not exist.
     ignore:
       - dependency-name: numpy
         update-types: ["version-update:semver-major"]
       - dependency-name: onnxruntime
-        update-types: ["version-update:semver-major"]
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
 
   # ── Controller base image ───────────────────────────────────────────────
   # python:3.12-slim is where ffmpeg, curl and the whole Debian layer come
   # from — the majority of what any image scan reports.
+  #
+  # The Python version is NOT ours to choose: it is the highest one every
+  # pinned wheel publishes for, and today that is 3.12. Measured on PyPI
+  # 2026-08-18, for the versions requirements.txt actually pins:
+  #
+  #   speexdsp-ns 0.1.2  cp37 … cp312     <- the binding constraint
+  #   onnxruntime 1.20.1 cp310 … cp313
+  #   numpy       2.4.4  cp311 … cp314
+  #
+  # Neither builds from source in this image, so a bump past the lowest of
+  # those does not degrade — it fails to build. #127 proposed 3.14 and
+  # carried seven green checks, because until ci.yml gained the
+  # controller-image job nothing built the image on a PR at all.
+  #
+  # So majors and minors are ignored and moving Python is a deliberate
+  # upgrade: check the wheels first, then bump this and requirements.txt
+  # together.
+  #
+  # That leaves this ecosystem quiet, which is correct and worth stating so
+  # nobody reads the silence as coverage: `python:3.12-slim` is a FLOATING
+  # tag, so Debian security fixes arrive by rebuilding, not by a PR here.
+  # security-scan.yml is what watches for them — it scans the published
+  # image on a schedule precisely because the digest can go stale while the
+  # tag stands still.
   - package-ecosystem: docker
     directory: /controller
     schedule:
       interval: weekly
       day: monday
     open-pull-requests-limit: 2
+    ignore:
+      - dependency-name: python
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
 
   # ── Device Go modules ───────────────────────────────────────────────────
   # The GoTinyAlsa replace directive points at a submodule path, which
@@ -64,6 +103,35 @@ updates:
     groups:
       go-dependencies:
         patterns: ["*"]
+    # golang.org/x/sys is pinned BELOW its latest on purpose, and the reason
+    # is the compiler rather than the library. The device image carries Go
+    # 1.24 with GOTOOLCHAIN=local baked in — deliberately, since that pin is
+    # what stops a third party's floating tag changing the compiler under
+    # us — and x/sys v0.42.0 declares `go 1.25.0` in its own go.mod, so the
+    # toolchain refuses it whatever directive device/go.mod carries.
+    #
+    # Verified against the module proxy 2026-08-23 rather than asserted:
+    #   v0.40.0 -> go 1.24.0
+    #   v0.41.0 -> go 1.24.0   <- the newest usable version, currently pinned
+    #   v0.42.0 -> go 1.25.0
+    #
+    # #128 raised the module graph past that line and the FIRMWARE WAS
+    # UNBUILDABLE FOR FOUR DAYS with every check green, because at the time
+    # nothing in CI used the pinned image — the other Go jobs run on
+    # GitHub's own toolchain, which silently resolves a newer Go. The
+    # device-firmware-build job in ci.yml now catches it, so this ignore is
+    # not what makes it safe; it is what stops a PR arriving every week that
+    # can only ever be closed.
+    #
+    # LIFT THIS WHEN THE COMPILER PIN MOVES, not before, and note that
+    # moving the compiler needs hardware in the loop: the failure mode is a
+    # binary the Dot refuses to run, which is the one thing not recoverable
+    # from the dashboard.
+    ignore:
+      - dependency-name: golang.org/x/sys
+        update-types:
+          - version-update:semver-major
+          - version-update:semver-minor
 
   # ── GitHub Actions ──────────────────────────────────────────────────────
   # Workflow actions run with repository credentials, so a stale pinned

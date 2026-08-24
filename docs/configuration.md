@@ -68,6 +68,19 @@ kept for 180 days and available via the API
 
 How responses sound.
 
+**Two things to know before you tune anything here.**
+
+**Changes take about four seconds to be heard.** Audio is sent to the device
+several seconds ahead of when you hear it, so what is playing right now was
+processed before you moved the control. Wait five seconds before judging, and
+do not flip a setting back and forth quickly — you will be listening to the
+old audio and conclude nothing happened.
+
+**Change the settings on the device you are listening to.** If a device has
+its own Playback settings (the Fleet/Device switch on that section), editing
+the fleet defaults will not affect it. The save succeeds either way, so the
+symptom is a control that appears to do nothing at all.
+
 ### Equalizer (8 faders + presets)
 Shapes the tone of the voice responses, like the EQ on a stereo. The Dot's
 little speaker is boomy and dull by default.
@@ -81,6 +94,46 @@ little speaker is boomy and dull by default.
 ### Speech boost
 An extra presence bump for spoken responses. Try it if responses sound
 muffled from across the room.
+
+### Speaker protection
+Keeps bass the driver cannot deliver from muddying everything above it. Leave
+it on.
+
+It sounds backwards, and it is the right answer for a speaker this small.
+Frequencies below about 115Hz still move the cone even though you cannot hear
+them, and that movement smears the midrange — which is what people usually
+describe as thin, boxy or "tin-can". Removing them makes the middle clearer,
+and on loud material slightly *louder*, because the limiter no longer has to
+hold everything down to contain bass peaks you were never going to hear.
+
+Quiet passages keep their low end. Only loud content is affected, which is why
+it is a guard rather than a filter.
+
+This one switch covers two stages: the bass guard described above, and a
+limiter that stops the equalizer distorting what it boosts. Turning any EQ
+band up can push the audio past the maximum the hardware can represent, and
+without a limiter that gets clipped — measured at nearly 5% of samples on an
+ordinary response with a modest bass boost, audible as harshness or crackle,
+and it only ever happened to people who touched the EQ to improve their sound.
+
+**It used to be five controls and now it is one, deliberately.** None of the
+five could be judged by ear. The two stages cancel out each other's most
+obvious effect — at a flat EQ, switching the guard on is a 7.7dB change in
+overall level, and with every band at +12dB it is 0.2dB, because the limiter
+simply gives back what the guard takes. The depth slider moved the overall
+level by 0.14dB across its entire range. Controls whose effect ranges from
+"large" to "nothing" depending on where the others sit are not a tuning
+surface; they are a way to conclude the feature is broken, which is what kept
+happening.
+
+The individual values still exist and still apply — if you had tuned the
+ceiling, release or depth, your settings are unchanged. They are reachable
+through the API for anyone who wants them, just not on the dashboard.
+
+The crossover frequency and the shape of the curve come from measurements of
+Amazon's own firmware on this same speaker, so they are not guesses. Our
+default depth is gentler than Amazon's, because theirs sits in front of an
+equalizer curve we have not yet measured — see issue #247.
 
 ### Duck depth
 How far music drops while the assistant is talking over it. Music **keeps
@@ -166,12 +219,17 @@ takes effect immediately on selection. The `×` on an unselected custom tile
 deletes it.
 
 **If the device does its own wake word detection** (see *On-device wake
-word*), the model has to be copied onto it before it can listen for the new
-word. That happens automatically when you select it, and the device carries on
-answering to its **current** wake word until the new one has arrived — usually
-a few seconds. If the copy fails, the device stays on the word it already has
-and the device log says why. It is never left listening for a word it does not
-have.
+word*), it needs the recogniser on it before it can listen for that word.
+
+All four stock words are installed during provisioning, so switching between
+them is instant and needs no copy. A **custom** model is copied across when you
+select it: the device carries on answering to its **current** wake word until
+the new one arrives — usually a few seconds — and if the copy fails it stays on
+the word it already has and the log says why. It is never left listening for a
+word it does not have.
+
+Devices provisioned before this was added get the missing stock recognisers
+automatically the next time they connect.
 
 Changing the wake word updates the controller's live device record. The HACS
 integration reads that record on its normal update path, so the controller does
@@ -209,20 +267,31 @@ near-misses climbing, move one step toward Eager. If it wakes up when nobody
 spoke, move toward Precise.
 
 ### Barge-in
-Lets the wake word **interrupt the assistant mid-turn** — say "Hey
-Rhasspy, stop" while it's reading you a paragraph (or still thinking
-about your last question) and it cuts off and listens. Off by default. **Turn on Echo cancel (AEC) first**: barge-in
-works by leaving the microphones live while the device speaks, and AEC is
-what stops it hearing itself. The **barge threshold** is the wake
-confidence required during playback — and counter-intuitively it should be
-much *lower* than the normal wake threshold (≈0.10 works well): the
-speaker is far louder at the microphones than you are, so your voice
-scores lower over playback than in a quiet room, while the device's own
-(echo-cancelled) voice barely scores at all (0.002–0.003 measured since
-v2.7.8). **0.05 is a good default** — you shouldn't need to raise your
-voice much. Raise it if responses ever cut themselves off. (During the
-silent *thinking* pause the normal wake sensitivity applies instead —
-nothing is playing, so the low barge threshold isn't needed there.)
+Lets the wake word **interrupt the assistant mid-turn** — say the wake word
+while it is reading you a paragraph (or still thinking about your last
+question) and it stops and listens. **Turn on Echo cancel (AEC) first**:
+barge-in works by leaving the microphones live while the device speaks, and
+AEC is what stops it hearing itself.
+
+The **barge threshold** is the wake confidence required during playback, and
+counter-intuitively it sits *lower* than the normal wake threshold. The
+speaker is far louder at the microphones than you are, so your voice scores
+lower over playback than it would in a quiet room — around 0.3 to 0.5
+measured, against 0.5 for an ordinary wake.
+
+**The default is 0.25, raised from 0.05.** The old value was chosen against
+short replies and it did not survive long ones: asking for a story, the
+assistant's own narration scored up to 0.18 and interrupted itself
+mid-sentence. Continuous speech simply offers more chances to briefly sound
+like a wake word. Two consecutive detections are now required as well, which
+is what makes a single stray frame harmless.
+
+If a response ever cuts itself off, raise this. If interrupting stops working,
+lower it — but check whether AEC is on first, since that is the more common
+cause.
+
+(During the silent *thinking* pause the normal wake sensitivity applies
+instead — nothing is playing, so the low threshold is not needed there.)
 
 **What happens after you interrupt.** The device stops talking and listens
 straight away — say the wake word and your new command in one breath and it
@@ -353,6 +422,11 @@ with *steady* noise — fans, air-con, appliance hum — in rooms where
 transcripts come back garbled. It does not remove other people talking or
 the TV; pointing the beamformer away from them is the tool for that. Off by
 default — turn it on per device and compare transcripts.
+
+Suppression is limited to 20 dB, so a passage the denoiser judges to be noise
+is pushed well down rather than removed outright. Before that limit existed it
+could silence quiet speech completely — a word or two vanishing mid-sentence
+rather than sounding muffled.
 
 **Echo cancel (AEC)** — teaches the mics to *subtract the Dot's own voice*
 from what they hear. Benefits: the device can hear you properly during and
@@ -593,6 +667,7 @@ These are set once, on the server, and need a controller restart to change:
 | `MUSIC_ASSISTANT_URL` | Base URL of the Music Assistant server used when Sendspin is enabled. |
 | `SERVER_TLS_PORT` | Encrypted device link (wss) port — default 8770, `0` disables. Devices switch to it automatically once they hold pushed credentials (wizard install, or the **Secure link** button on the device Status tab). |
 | `REQUIRE_DEVICE_TLS` | Set to `1` **only after every device shows "wss (TLS)"** on its Status tab — from then on the controller rejects unencrypted or tokenless device connections. |
+| `EM_EXTRA_CA_CERT` | Path to a PEM CA certificate to trust — only needed if Home Assistant is served over HTTPS with your own internal certificate authority. See below. |
 
 See `.env.example` for the complete list with comments.
 
@@ -607,6 +682,46 @@ link** button on its Status tab. A device with credentials connects
 encrypted from its next reconnect; the Status tab's **Link** row shows
 which mode each device is using. Once the whole fleet shows `wss (TLS)`,
 set `REQUIRE_DEVICE_TLS=1` to lock out unencrypted connections entirely.
+
+### Home Assistant behind a private certificate authority
+
+If media is served over HTTPS with a certificate from your own internal CA,
+EchoMuse refuses it rather than accepting an unverified peer. Give the
+controller that CA so verified playback can proceed.
+
+Give EchoMuse the CA:
+
+- **Add-on** — put the CA certificate (PEM format) in Home Assistant's `ssl`
+  folder, then set the **Private CA certificate** option to
+  `/ssl/<filename>`. The add-on reads that folder read-only.
+- **Container** — mount the certificate and set `EM_EXTRA_CA_CERT` to its path
+  *inside* the container:
+
+  ```yaml
+  volumes:
+    - /path/to/internal-ca.crt:/certs/internal-ca.crt:ro
+  environment:
+    - EM_EXTRA_CA_CERT=/certs/internal-ca.crt
+  ```
+
+It must be a **PEM** file — the `-----BEGIN CERTIFICATE-----` kind. If yours is
+DER, convert it first:
+
+```bash
+openssl x509 -inform der -in ca.der -out ca.crt
+```
+
+If the file is missing, unreadable or not PEM, the controller **refuses to
+start and says which**, rather than running with HTTPS media playback that
+fails certificate verification.
+
+**Media playback verifies too.** The media player fetches its streams —
+Music Assistant, radio, anything handed to `play_media` — through ffmpeg,
+which used to accept *any* certificate on HTTPS URLs (an ffmpeg build
+default nobody would have chosen). Media URLs are now verified like every
+other fetch. A stream served over HTTPS with a private CA needs the same
+setting as above; when a stream is refused, the log says so and points
+here.
 
 ## What leaves your network
 
@@ -635,8 +750,19 @@ in a browser.
 
 Set `update_check_interval` (seconds, default `3600`) in the system config to
 change how often it runs. A long interval, say `86400`, reduces it to once a
-day. Note that `0` does **not** disable checking — it currently makes the
-poll loop spin without pausing, which is worse than leaving it alone.
+day, and `0` turns it off entirely — the controller then makes no outbound
+connection at all, and the dashboard shows whatever it last knew about
+releases rather than nothing.
+
+Re-enabling takes effect without a restart. Turning it off does not disable
+the **Check now** button on the Updates tab: that is a deliberate request, so
+it still asks GitHub when you press it.
+
+> **Before controller 2.21.0, `0` did the opposite** — it removed the pause
+> between checks instead of stopping them, so the controller polled
+> continuously until GitHub rate-limited it. If you set it to `0` on an
+> earlier version and left it there, updating fixes it; there is nothing to
+> undo.
 
 ### What never leaves
 

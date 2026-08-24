@@ -238,6 +238,17 @@
         <button class="accent" id="createBtn">Create</button>
       </div>
     </div>
+
+    <div class="card">
+      <div class="microlabel">Google Cloud TTS</div>
+      <div id="googleCredentialStatus" class="hint" style="margin:0 0 8px">Optional: Chirp 3 samples need a service-account key.</div>
+      <input id="googleCredential" type="file" accept="application/json,.json">
+      <div class="row" style="margin-top:9px">
+        <button id="saveGoogleCredential" class="small">Save service-account key</button>
+        <button id="checkGoogleCredential" class="small" style="display:none">Verify key</button>
+        <button id="deleteGoogleCredential" class="small" style="display:none">Remove key</button>
+      </div>
+    </div>
   </section>
 
   <section>
@@ -248,6 +259,7 @@
         <div class="bar">
           <strong id="jobLabel"></strong>
           <span class="status" id="jobStatus"></span>
+          <button id="cancelJob" class="small" style="display:none">Stop job</button>
         </div>
         <pre id="logPre"></pre>
       </div>
@@ -308,6 +320,13 @@ function render() {
   const mdc = state.credentials?.mdc_api_key;
   $('mdcApiKey').placeholder = mdc ? `Saved: ${mdc}` : 'Required for full Common Voice';
   const commonVoice = state.assets.find(a => a.part === 'common_voice');
+  const google = state.google || {};
+  $('googleCredentialStatus').textContent = google.present && google.valid
+    ? `Google key ready for ${google.project_id || 'an unnamed project'} (${google.client_email || 'service account'})`
+    : google.present ? `Google key needs attention: ${google.error || 'invalid JSON'}`
+    : 'Optional: Chirp 3 samples need a Google service-account JSON key.';
+  $('deleteGoogleCredential').style.display = google.present ? '' : 'none';
+  $('checkGoogleCredential').style.display = google.present && google.valid ? '' : 'none';
   const commonVoiceFeatures = state.assets.find(a => a.part === 'common_voice_features');
   const ami = state.assets.find(a => a.part === 'ami');
   const fleurs = state.assets.find(a => a.part === 'fleurs');
@@ -414,6 +433,10 @@ function render() {
         <div class="row">
           <button class="small" data-act="gtts" ${busy() ? 'disabled' : ''}
             title="Adds Chirp 3 positive samples for every selected locale and voice">+ Google Chirp 3 voices</button>
+          <button class="small" data-act="piper" ${busy() ? 'disabled' : ''}
+            title="Adds local Piper voices in another accent or language">+ Piper language voices</button>
+          <button class="small" data-act="preview-piper" ${busy() ? 'disabled' : ''}
+            title="Hear the first wake phrase in a British Piper voice">Preview Piper</button>
           <button class="small" data-act="import" ${busy() ? 'disabled' : ''}
             title="Import a labelled dataset (.zip) exported from the EchoMuse dashboard's Training tab">+ Import labeled dataset…</button>
           <span class="hint" style="margin:0">then retrain to apply</span>
@@ -436,6 +459,13 @@ function render() {
             <button class="small" data-act="prune-gtts" ${busy() ? 'disabled' : ''}
               title="Preview and remove generated Chirp clips outside the saved locale and voice selection">Preview prune unselected clips</button>
           </div>
+        </div>
+        <div class="dataset-options" style="margin-top:10px">
+          <div class="microlabel">Piper languages</div>
+          <label>Locale <input data-piper-language value="en_GB" placeholder="e.g. en_GB, de_DE"></label>
+          <label>Exact voice names <input data-piper-voices placeholder="Optional comma-separated names; blank = best for locale"></label>
+          <label>Samples <input data-piper-samples type="number" min="1" value="4000"></label>
+          <div class="hint">Local, no account or API cost. Added clips displace the default US Piper set at build time.</div>
         </div>
         <div class="dataset-options" style="margin-top:10px">
           <div class="microlabel">Confusable phrases</div>
@@ -484,6 +514,7 @@ function renderJob() {
     $('jobLabel').textContent = 'Forge log';
     const s = $('jobStatus');
     s.textContent = 'idle'; s.className = 'status';
+    $('cancelJob').style.display = 'none';
     return;
   }
   const key = j.kind + j.started;
@@ -492,9 +523,10 @@ function renderJob() {
   }
   $('jobLabel').textContent = friendlyJob(j.label);
   const s = $('jobStatus');
+  $('cancelJob').style.display = j.running ? '' : 'none';
   if (j.running) { s.textContent = '● working — you can leave this page, it keeps going'; s.className = 'status running'; }
   else if (j.rc === 0) { s.textContent = '✓ finished'; s.className = 'status ok'; }
-  else { s.textContent = `✗ something went wrong (see log)`; s.className = 'status fail'; }
+  else { s.textContent = j.cancelled ? '■ stopped' : '✗ something went wrong (see log)'; s.className = 'status fail'; }
 }
 
 async function pollLog() {
@@ -737,6 +769,33 @@ $('saveMdcApiKey').onclick = async () => {
   refresh();
 };
 
+$('saveGoogleCredential').onclick = async () => {
+  const input = $('googleCredential');
+  if (!input.files.length) return alert('Choose the Google service-account JSON key first.');
+  await api('/api/google', {method: 'PUT', headers: {'Content-Type': 'application/json'},
+    body: await input.files[0].text()});
+  input.value = '';
+  refresh();
+};
+
+$('deleteGoogleCredential').onclick = async () => {
+  if (!confirm('Remove the saved Google service-account key?')) return;
+  await api('/api/google', {method: 'DELETE'});
+  refresh();
+};
+
+$('checkGoogleCredential').onclick = async () => {
+  const result = await api('/api/google/check', {method: 'POST'});
+  alert(result.ok ? `Google Text-to-Speech is ready (${result.voices} voices visible).` :
+    `Google key check failed: ${result.error}`);
+};
+
+$('cancelJob').onclick = async () => {
+  if (!confirm('Stop the running job? Completed clips and assets are kept.')) return;
+  await api('/api/job/cancel', {method: 'POST'});
+  refresh();
+};
+
 $('createBtn').onclick = async () => {
   const phrase = $('newPhrase').value.trim();
   if (!phrase) return alert('Type the wake phrase first, e.g. "hey clara"');
@@ -787,6 +846,20 @@ $('wakewords').addEventListener('click', async e => {
     if (!Number.isInteger(n) || n < 1 || !langs || !(qps > 0)) return alert('Enter locales, a positive sample count, and a positive QPS.');
     await api(`/api/wakewords/${name}/google-tts`, {method: 'POST',
       headers: {'Content-Type': 'application/json'}, body: JSON.stringify({samples: n, languages: langs, voices, qps})});
+  } else if (act === 'piper') {
+    const samples = +card.querySelector('[data-piper-samples]').value;
+    const language = card.querySelector('[data-piper-language]').value.trim();
+    const voices = card.querySelector('[data-piper-voices]').value.trim();
+    if (!Number.isInteger(samples) || samples < 1 || !language) return alert('Enter a locale and positive sample count.');
+    await api(`/api/wakewords/${name}/piper-voices`, {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({samples, language, voices})});
+  } else if (act === 'preview-piper') {
+    const language = card.querySelector('[data-piper-language]').value.trim() || 'en_GB';
+    const voices = card.querySelector('[data-piper-voices]').value.trim().split(',').map(v => v.trim()).filter(Boolean);
+    const response = await fetch('/api/preview', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: wPhrase(card), language, voice: voices[0] || null})});
+    if (!response.ok) return alert(await response.text());
+    new Audio(URL.createObjectURL(await response.blob())).play();
   } else if (act === 'confusables') {
     const phrases = card.querySelector('[data-confusables]').value
       .split(',').map(value => value.trim()).filter(Boolean);
@@ -867,6 +940,11 @@ $('wakewords').addEventListener('click', async e => {
   }
   refresh();
 });
+
+function wPhrase(card) {
+  const phrase = card.querySelector('.phrase').textContent;
+  return phrase.replace(/[“”]/g, '').split(' / ')[0];
+}
 
 $('wakewords').addEventListener('change', async e => {
   const input = e.target.closest('input[data-dataset]');

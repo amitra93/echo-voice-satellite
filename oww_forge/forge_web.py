@@ -10,7 +10,9 @@ No auth: this is a LAN batch tool, same trust model as `docker compose run`.
 
 import asyncio
 import json
+import os
 import shutil
+import signal
 import subprocess
 import sys
 import time
@@ -28,6 +30,18 @@ TMP = forge.DATA / "tmp"
 STATIC = Path(__file__).parent / "static"
 
 FORGE_PY = str(Path(__file__).parent / "forge.py")
+GOOGLE_CREDS = forge.DATA / "google-credentials.json"
+CANCEL_GRACE_S = 10.0
+
+
+def _job_env() -> dict:
+    """Use an uploaded key for new jobs without retaining a stale env value."""
+    env = dict(os.environ)
+    if GOOGLE_CREDS.exists():
+        env["GOOGLE_APPLICATION_CREDENTIALS"] = str(GOOGLE_CREDS)
+    else:
+        env.pop("GOOGLE_APPLICATION_CREDENTIALS", None)
+    return env
 
 
 class Job:
@@ -36,6 +50,7 @@ class Job:
         self.label = label
         self.started = time.time()
         self.rc = None
+        self.cancelled = False
         LOGS.mkdir(parents=True, exist_ok=True)
         self.log_path = LOGS / f"{int(self.started)}_{kind}.log"
         self._logf = open(self.log_path, "wb", buffering=0)
@@ -43,6 +58,10 @@ class Job:
             [sys.executable, "-u", FORGE_PY, *argv],
             stdout=self._logf,
             stderr=subprocess.STDOUT,
+            env=_job_env(),
+            # Builds spawn train.py. A separate process group lets cancellation
+            # stop that child as well rather than leaving it on the GPU.
+            start_new_session=True,
         )
 
     def poll(self):
@@ -53,6 +72,32 @@ class Job:
                 self._logf.close()
         return self.rc
 
+    def _note(self, line: str) -> None:
+        if not self._logf.closed:
+            self._logf.write(line.encode())
+
+    def cancel(self) -> None:
+        """Terminate the entire job group, escalating after a short grace."""
+        if self.poll() is not None:
+            return
+        self.cancelled = True
+        try:
+            pgid = os.getpgid(self.proc.pid)
+            self._note("\n[forge-ui] cancelled by request; sending SIGTERM\n")
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        deadline = time.monotonic() + CANCEL_GRACE_S
+        while self.proc.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.2)
+        if self.proc.poll() is None:
+            self._note(f"[forge-ui] still running after {CANCEL_GRACE_S:.0f}s; sending SIGKILL\n")
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        self.poll()
+
     def as_dict(self):
         self.poll()
         return {
@@ -60,6 +105,7 @@ class Job:
             "label": self.label,
             "running": self.rc is None,
             "rc": self.rc,
+            "cancelled": self.cancelled,
             "started": self.started,
         }
 
@@ -188,6 +234,7 @@ def _wakewords_state() -> list:
 async def api_state(request):
     return web.json_response({
         "gpu": _gpu(),
+        "google": _google_state(),
         "assets": _assets_state(),
         "credentials": {"mdc_api_key": forge.masked_mdc_api_key()},
         "wakewords": _wakewords_state(),
@@ -204,6 +251,81 @@ async def api_log(request):
         data = f.read(65536)
     return web.json_response({"offset": offset + len(data),
                               "data": data.decode("utf-8", "replace")})
+
+
+async def api_job_cancel(request):
+    if _job is None or _job.poll() is not None:
+        raise web.HTTPConflict(text="no job is running")
+    label = _job.label
+    await asyncio.to_thread(_job.cancel)
+    return web.json_response({"ok": True, "cancelled": label})
+
+
+def _google_state() -> dict:
+    """Expose key metadata only; a private key never returns to the browser."""
+    if not GOOGLE_CREDS.exists():
+        return {"present": False}
+    try:
+        key = json.loads(GOOGLE_CREDS.read_text())
+    except Exception as error:
+        return {"present": True, "valid": False, "error": f"not readable as JSON: {error}"}
+    return {"present": True, "valid": True, "project_id": key.get("project_id"),
+            "client_email": key.get("client_email")}
+
+
+def _validate_service_account(raw: bytes) -> None:
+    try:
+        key = json.loads(raw.decode("utf-8"))
+    except Exception as error:
+        raise web.HTTPBadRequest(text=f"not valid JSON: {error}")
+    if not isinstance(key, dict) or key.get("type") != "service_account":
+        raise web.HTTPBadRequest(text="expected a Google service-account JSON key")
+    missing = [field for field in ("project_id", "client_email", "private_key") if not key.get(field)]
+    if missing:
+        raise web.HTTPBadRequest(text="service-account key is missing: " + ", ".join(missing))
+
+
+async def api_google_get(request):
+    return web.json_response(_google_state())
+
+
+async def api_google_put(request):
+    raw = await request.read()
+    _validate_service_account(raw)
+    GOOGLE_CREDS.parent.mkdir(parents=True, exist_ok=True)
+    part = GOOGLE_CREDS.with_suffix(".part")
+    fd = os.open(part, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        with os.fdopen(fd, "wb") as output:
+            output.write(raw)
+        part.replace(GOOGLE_CREDS)
+        os.chmod(GOOGLE_CREDS, 0o600)
+    except Exception:
+        part.unlink(missing_ok=True)
+        raise
+    return web.json_response(_google_state())
+
+
+async def api_google_delete(request):
+    GOOGLE_CREDS.unlink(missing_ok=True)
+    return web.json_response({"ok": True, "present": False})
+
+
+async def api_google_check(request):
+    """Verify the saved key against the API, not just its JSON shape."""
+    if not GOOGLE_CREDS.exists():
+        raise web.HTTPBadRequest(text="no Google service-account key is saved")
+    probe = (
+        "from google.cloud import texttospeech\n"
+        "print(len(texttospeech.TextToSpeechClient().list_voices().voices))\n"
+    )
+    result = await asyncio.to_thread(
+        subprocess.run, [sys.executable, "-c", probe], capture_output=True,
+        text=True, timeout=60, env=_job_env())
+    if result.returncode:
+        lines = (result.stderr or result.stdout).strip().splitlines()
+        return web.json_response({"ok": False, "error": lines[-1] if lines else "unknown error"})
+    return web.json_response({"ok": True, "voices": int(result.stdout.strip())})
 
 
 async def api_assets_download(request):
@@ -468,6 +590,56 @@ async def api_google_tts_voices(request):
     return web.json_response({"voices": voices})
 
 
+async def api_piper_voices(request):
+    name = request.match_info["name"]
+    _require_wakeword(name)
+    body = await request.json() if request.can_read_body else {}
+    try:
+        samples = int(body.get("samples") or 4000)
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(text="samples must be an integer")
+    if samples < 1:
+        raise web.HTTPBadRequest(text="samples must be positive")
+    language = (body.get("language") or "en_GB").strip()
+    argv = ["piper-voices", name, "--samples", str(samples), "--language", language]
+    if body.get("voices"):
+        argv += ["--voices", body["voices"]]
+    _start_job("piper-voices", f"Piper {language} voices × {samples} for '{name}'", argv)
+    return web.json_response({"ok": True})
+
+
+async def api_voices(request):
+    """Read Piper's cached catalogue without blocking other Forge requests."""
+    import piper_voices
+
+    language = request.query.get("language")
+    try:
+        catalogue = await asyncio.to_thread(piper_voices.catalogue, forge.ASSETS)
+    except Exception as error:
+        raise web.HTTPBadGateway(text=f"could not fetch Piper voices: {error}")
+    if language:
+        return web.json_response([voice for voice in catalogue if voice["language"] == language])
+    return web.json_response(piper_voices.languages(forge.ASSETS))
+
+
+async def api_preview(request):
+    body = await request.json()
+    text = (body.get("text") or "").strip()
+    if not text:
+        raise web.HTTPBadRequest(text="nothing to preview")
+    if len(text) > 200:
+        raise web.HTTPBadRequest(text="preview phrase is too long")
+    import piper_voices
+
+    try:
+        wav = await asyncio.to_thread(
+            piper_voices.preview, text, forge.ASSETS, body.get("voice") or None,
+            int(body.get("speaker") or 0), body.get("language") or None)
+    except Exception as error:
+        raise web.HTTPBadGateway(text=f"could not synthesize preview: {error}")
+    return web.Response(body=wav, content_type="audio/wav")
+
+
 async def api_test(request):
     name = request.match_info["name"]
     if not (forge.MODELS / f"{name}.onnx").exists():
@@ -576,6 +748,11 @@ def make_app() -> web.Application:
     app.router.add_get("/live-mic-worklet.js", live_mic_worklet)
     app.router.add_get("/api/state", api_state)
     app.router.add_get("/api/log", api_log)
+    app.router.add_post("/api/job/cancel", api_job_cancel)
+    app.router.add_get("/api/google", api_google_get)
+    app.router.add_put("/api/google", api_google_put)
+    app.router.add_post("/api/google/check", api_google_check)
+    app.router.add_delete("/api/google", api_google_delete)
     app.router.add_post("/api/assets/download", api_assets_download)
     app.router.add_post("/api/settings/mdc-api-key", api_mdc_api_key)
     app.router.add_post("/api/wakewords", api_wakeword_create)
@@ -586,6 +763,9 @@ def make_app() -> web.Application:
     app.router.add_post("/api/wakewords/{name}/google-tts", api_google_tts)
     app.router.add_post("/api/wakewords/{name}/google-tts-prune", api_prune_google_tts)
     app.router.add_get("/api/google-tts/voices", api_google_tts_voices)
+    app.router.add_post("/api/wakewords/{name}/piper-voices", api_piper_voices)
+    app.router.add_get("/api/voices", api_voices)
+    app.router.add_post("/api/preview", api_preview)
     app.router.add_post("/api/wakewords/{name}/test", api_test)
     app.router.add_get("/api/wakewords/{name}/live-score", ws_live_score)
     app.router.add_post("/api/wakewords/{name}/evaluate", api_evaluate)

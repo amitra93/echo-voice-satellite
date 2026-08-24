@@ -41,6 +41,7 @@ import platform
 import re
 import shutil
 import sqlite3 as _sqlite3
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -184,6 +185,10 @@ _update_errors: dict[str, str] = {}
 # Pending local binary uploads — keyed by UUID token, expire after 10 minutes.
 _pending_uploads: dict[str, bytes] = {}
 
+# Keep the application-specific ceiling below aiohttp's transport limit so the
+# handler can return a useful size error for a real firmware upload.
+UPLOAD_MAX_BYTES = 50 * 1024 * 1024
+
 # WiFi change state per device_id — {"pending": {...}|None, "last_result":
 # {...}|None}. Deliberately NOT on the live Device object: the connection
 # (and with it the Device) dies when the network switches, and the outcome
@@ -260,7 +265,10 @@ async def create_app() -> web.Application:
     Routes are registered here. The app is not started — the caller
     creates an AppRunner and TCPSite.
     """
-    app = web.Application(middlewares=[_ingress_only_middleware, _error_middleware])
+    app = web.Application(
+        middlewares=[_ingress_only_middleware, _error_middleware],
+        client_max_size=UPLOAD_MAX_BYTES + 8 * 1024 * 1024,
+    )
 
     # Static / setup
     app.router.add_get("/",           _serve_spa)
@@ -1228,6 +1236,14 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         # this flag, checked per ble_adverts batch in em_controller.py.
         live.ble_proxy_enabled = bool(effective["bleProxyEnabled"])
     live.led_scene = em_scenes.resolve(effective)
+    if live.led_anim_capable and live.led_scene.get("listening_anim"):
+        try:
+            await live.send_control({
+                "type": "config",
+                "listeningAnim": live.led_scene["listening_anim"],
+            })
+        except Exception:
+            pass  # The registration push refreshes an offline device.
 
 
 @auth.require_auth
@@ -1584,8 +1600,13 @@ async def _post_upload_binary(request: web.Request) -> web.Response:
         binary = await field.read()
         if not binary:
             return _error("empty_upload", "Uploaded binary is empty", 400)
-        if len(binary) > 50 * 1024 * 1024:
-            return _error("too_large", "Binary exceeds 50 MB limit", 413)
+        if len(binary) > UPLOAD_MAX_BYTES:
+            return _error(
+                "too_large",
+                f"Binary is {len(binary) / 1024 / 1024:.1f} MB, over the "
+                f"{UPLOAD_MAX_BYTES // 1024 // 1024} MB limit",
+                413,
+            )
 
         token = str(_uuid.uuid4())
         _pending_uploads[token] = binary
@@ -1597,6 +1618,8 @@ async def _post_upload_binary(request: web.Request) -> web.Response:
         asyncio.create_task(_expire())
 
         return _ok({"upload_token": token, "size": len(binary)})
+    except web.HTTPException:
+        raise
     except Exception as e:
         log.error(f"[api] Upload error: {e}")
         return _error("upload_failed", str(e), 500)
@@ -1779,14 +1802,21 @@ async def _delete_oww_model(request: web.Request) -> web.Response:
 
 def _extract_binary_version(binary: bytes) -> str | None:
     """
-    Scan a compiled Go binary for its embedded EchoMuse version string.
-    The version is compiled in via -ldflags "-X ...Version=YYYYMMDD-HHMM-suffix".
-    Pattern matches e.g. 20260614-1152-dev, 20260614-0513-release, etc.
-    Falls back to None if not found, caller generates a local-YYYYMMDD-HHMM label.
+    Scan a compiled Go binary for a uniquely identifiable EchoMuse version.
+
+    Clean trees use git describe (vX.Y.Z-N-gSHA); dirty trees retain the
+    date-based format. Bare vX.Y.Z is deliberately not accepted because Go
+    binaries embed indistinguishable dependency module versions.
     """
     import re as _re
-    match = _re.search(rb'20\d{6}-\d{4}-[a-z][a-z0-9]*', binary)
-    return match.group(0).decode("ascii") if match else None
+    for pattern in (
+        rb'v\d+\.\d+\.\d+-\d+-g[0-9a-f]{7,40}',
+        rb'20\d{6}-\d{4}-[a-z][a-z0-9]*',
+    ):
+        match = _re.search(pattern, binary)
+        if match:
+            return match.group(0).decode("ascii")
+    return None
 
 
 async def _update_failed(device_id: str, reason: str) -> None:
@@ -3161,8 +3191,7 @@ async def _get_system_status(request: web.Request) -> web.Response:
     all_rows = await loop.run_in_executor(None, db.get_all_devices)
     release = await _get_cached_release()
 
-    # Lazy import — em_controller imports em_api at module level.
-    import em_controller as _ctrl
+    _ctrl = _running_controller_module()
     sendspin_status = em_sendspin.runtime_status()
 
     return _ok({
@@ -3183,11 +3212,12 @@ async def _get_system_status(request: web.Request) -> web.Response:
         "ha_ingress": INGRESS_ONLY,
         # Peak asyncio event-loop stall since start (ms). Non-trivial values
         # mean the controller itself delayed speaker frames and LED updates.
-        "loop_lag_peak_ms": round(_ctrl._loop_lag_peak_ms, 1),
+        "loop_lag_peak_ms": round(getattr(_ctrl, "_loop_lag_peak_ms", 0.0), 1),
         "connected":      len(_devices),
         "total_devices":  len(all_rows),
         "pending":        sum(1 for r in all_rows if not r["approved"]),
         "approval_mode":  db.get_config("device_approval", "strict"),
+        "update_checks_enabled": _update_check_interval() > 0,
         "latest_release": release["version"] if release else None,
         # Controller update, surfaced alongside the firmware one so the header
         # can badge it without a second round trip. Read-only by design: the
@@ -3202,6 +3232,14 @@ async def _get_system_status(request: web.Request) -> web.Response:
             and r["firmware_ver"] != release["version"]
         ),
     })
+
+
+def _running_controller_module():
+    """Return the live controller module, which runs as __main__ in production."""
+    main = sys.modules.get("__main__")
+    if main is not None and hasattr(main, "_loop_lag_peak_ms"):
+        return main
+    return sys.modules.get("em_controller")
 
 
 @auth.require_admin
@@ -3506,6 +3544,15 @@ async def _push_log_event(
 
 # ─── GitHub release fetching ──────────────────────────────────────────────────
 
+def _update_check_interval() -> int:
+    """Parse the update polling interval; non-positive values disable polling."""
+    raw = (db.get_config("update_check_interval", "3600") or "3600").strip()
+    try:
+        return int(raw)
+    except ValueError:
+        log.warning("[api] update_check_interval %r is not a number; using 3600", raw)
+        return 3600
+
 async def _get_cached_release() -> Optional[dict]:
     """
     Return the latest release info, using the in-memory cache if fresh.
@@ -3548,15 +3595,19 @@ async def _get_cached_release() -> Optional[dict]:
         # interval lapses — release_poll_loop normally refreshes ahead of any
         # caller. A failed refresh falls through to the stale cache, which is
         # better than no answer.
-        interval = int(db.get_config("update_check_interval", "3600") or 3600)
-        if not last_check or (time.time() - float(last_check)) > interval:
+        interval = _update_check_interval()
+        if (interval > 0
+                and (not last_check or (time.time() - float(last_check)) > interval)):
             fresh = await _fetch_latest_release()
             if fresh:
                 return fresh
 
         return _release_cache
 
-    # No cache at all — fetch synchronously
+    # With automatic checks disabled, a fresh install must not fetch on every
+    # dashboard visit. Explicit "Check now" still calls the fetch directly.
+    if _update_check_interval() <= 0:
+        return None
     return await _fetch_latest_release()
 
 
@@ -3801,11 +3852,13 @@ async def _oww_device_state(live) -> dict:
         f'for f in {d}/*.so {d}/*.onnx; do '
         f'[ -f "$f" ] && echo "$(busybox md5sum "$f" | busybox cut -d\" \" -f1) '
         f'$(busybox stat -c %Y "$f") $f"; done; '
-        f'echo "FREE $(busybox df -m /data | busybox tail -1)"'
+        f'echo "FREE $(busybox df -m /data | busybox tail -1)"; '
+        f'echo INVENTORY_OK'
     ), timeout=120.0)
 
     free_mb = None
     lines = []
+    inventory_ok = False
     for line in out.splitlines():
         if line.startswith("FREE "):
             # The whole df row, parsed in Python: the available column's INDEX
@@ -3813,11 +3866,14 @@ async def _oww_device_state(live) -> dict:
             # line) and an awk field number silently yielded "65%" here, which
             # read as no measurement and quietly disabled the space check.
             free_mb = em_oww_assets.parse_free_mb(line[5:])
+        elif line == "INVENTORY_OK":
+            inventory_ok = True
         else:
             lines.append(line)
     return {
         "installed": em_oww_assets.parse_device_listing("\n".join(lines)),
         "free_mb": free_mb,
+        "inventory_ok": inventory_ok,
     }
 
 
@@ -3945,6 +4001,72 @@ async def _install_then_switch(device_id: str, model: str) -> None:
         f"Wake word model {model} installed — device switched"
     )
     log.info(f"[api] [{device_id}] wake word switched to {model} after install")
+
+
+async def reconcile_oww_assets(device_id: str, live) -> None:
+    """Repair a known-missing selected classifier after a device reconnects."""
+    effective = await asyncio.get_running_loop().run_in_executor(
+        None, db.get_effective_device_config, device_id
+    )
+    if em_shadow.normalise_mode(effective.get("owwOnDevice")) == em_shadow.MODE_OFF:
+        return
+    if not live.oww_shadow_capable:
+        return
+
+    desired, _ = em_oww_assets.desired_assets(_oww_wanted_models(device_id))
+    try:
+        state = await _oww_device_state(live)
+    except Exception as exc:
+        log.info("[api] [%s] oww reconcile: inventory unavailable (%s)", device_id, exc)
+        return
+    if not state.get("inventory_ok", False):
+        log.info("[api] [%s] oww reconcile: incomplete inventory; leaving mode unchanged", device_id)
+        return
+
+    missing = em_oww_assets.missing_selected_classifier(desired, state["installed"])
+    if missing is None:
+        live.oww_model_ready = True
+        live.oww_on_device = em_shadow.effective_mode(
+            effective.get("owwOnDevice"), live.oww_trigger_capable, model_ready=True,
+        )
+        return
+
+    # The configured classifier is known absent or stale. Let the controller
+    # trigger wakes while the background repair puts the device back in service.
+    live.oww_model_ready = False
+    live.oww_on_device = em_shadow.effective_mode(
+        effective.get("owwOnDevice"), live.oww_trigger_capable, model_ready=False,
+    )
+    await _push_log_event(
+        device_id, "warn", "controller",
+        f"Wake word model {missing} is missing — scoring on the controller while it installs",
+    )
+    try:
+        result = await _sync_oww_assets(live, device_id)
+    except Exception as exc:
+        result = {"ok": False, "error": str(exc)}
+
+    live = _devices.get(device_id)
+    if live is None:
+        return
+    if not result.get("ok"):
+        await _push_log_event(
+            device_id, "error", "controller",
+            f"Could not install {missing} ({result.get('error')}) — scoring remains controller-side",
+        )
+        return
+
+    # A device creates its local scorer from a config push. Re-send only after
+    # the verified asset sync succeeds, never after a failed inventory or repair.
+    live.oww_model_ready = True
+    live.oww_on_device = em_shadow.effective_mode(
+        effective.get("owwOnDevice"), live.oww_trigger_capable, model_ready=True,
+    )
+    await live.send_control({"type": "config", **effective})
+    await _push_log_event(
+        device_id, "info", "controller",
+        f"Wake word model {missing} installed — scoring locally again",
+    )
 
 
 async def _sync_oww_assets(live, device_id: str, progress=None) -> dict:
@@ -4166,8 +4288,9 @@ def _controller_stats() -> dict:
     """
     stats: dict[str, Any] = {}
     try:
-        import em_controller as _ctrl
-        stats["loop_lag_peak_ms"] = round(_ctrl._loop_lag_peak_ms, 1)
+        _ctrl = _running_controller_module()
+        if _ctrl is not None:
+            stats["loop_lag_peak_ms"] = round(_ctrl._loop_lag_peak_ms, 1)
     except Exception:
         pass
 
@@ -4443,6 +4566,10 @@ async def release_poll_loop() -> None:
     await asyncio.sleep(30)
 
     while True:
+        interval = _update_check_interval()
+        if interval <= 0:
+            await asyncio.sleep(60)
+            continue
         try:
             await _fetch_latest_release()
         except Exception as e:
@@ -4455,8 +4582,7 @@ async def release_poll_loop() -> None:
         except Exception as e:
             log.error(f"[api] Controller release poll error: {e}")
 
-        interval = int(db.get_config("update_check_interval", "3600") or 3600)
-        await asyncio.sleep(interval)
+        await asyncio.sleep(max(interval, 1))
 
 
 async def session_prune_loop() -> None:

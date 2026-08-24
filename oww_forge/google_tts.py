@@ -38,6 +38,18 @@ def log(msg: str) -> None:
     print(f"[google-tts] {msg}", flush=True)
 
 
+def _is_permanent_error(error: Exception) -> bool:
+    """Whether retrying the same Google request cannot change its result.
+
+    Quota and transport errors must leave a voice eligible for later clips.
+    Class names keep this decision testable without importing Google's optional
+    client package at module import time.
+    """
+    return type(error).__name__ in {
+        "InvalidArgument", "PermissionDenied", "Unauthenticated", "NotFound",
+    }
+
+
 def _list_voices_with_retry(client):
     """Wait through transient per-minute TTS quota exhaustion."""
     from google.api_core.exceptions import ResourceExhausted
@@ -229,13 +241,15 @@ def synthesize(phrases, samples_per_voice, train_dir: Path, test_dir: Path,
             dest = out_dir / f"google_{locale}_{safe_voice}_{sample_index:06d}.wav"
             jobs.append((phrase, locale, voice, dest))
 
-    bad_voices = set()
+    bad_voices = {}
+    bad_voices_lock = threading.Lock()
     request_pacer = _RequestPacer(1.0 / qps)
 
     def synth_one(job):
         phrase, locale, voice, dest = job
-        if voice.name in bad_voices:
-            return 0
+        with bad_voices_lock:
+            if voice.name in bad_voices:
+                return 0
         if dest.exists():
             return 1
         req = dict(
@@ -247,10 +261,9 @@ def synthesize(phrases, samples_per_voice, train_dir: Path, test_dir: Path,
             ),
         )
         try:
-            from google.api_core.exceptions import ResourceExhausted
-
             for attempt, delay in enumerate((0, *TTS_RETRIES)):
                 if delay:
+                    log(f"{voice.name}: transient error; retrying in {delay}s")
                     time.sleep(delay)
                 try:
                     request_pacer.wait()
@@ -262,7 +275,11 @@ def synthesize(phrases, samples_per_voice, train_dir: Path, test_dir: Path,
                         ),
                     )
                     break
-                except ResourceExhausted:
+                except Exception as error:
+                    if _is_permanent_error(error):
+                        with bad_voices_lock:
+                            bad_voices[voice.name] = str(error)[:160]
+                        return 0
                     if attempt == len(TTS_RETRIES):
                         raise
             # The service may return Chirp audio at 24kHz despite the requested
@@ -270,8 +287,10 @@ def synthesize(phrases, samples_per_voice, train_dir: Path, test_dir: Path,
             # the request parameter.
             _write_wav16k(resp.audio_content, dest)
             return 1
-        except Exception:
-            bad_voices.add(voice.name)
+        except Exception as error:
+            # A transient failure is a property of this request or the service,
+            # not a reason to retire every remaining clip for this voice.
+            log(f"{voice.name}: gave up after retries: {type(error).__name__}: {error}")
             return 0
 
     done = 0
@@ -281,7 +300,9 @@ def synthesize(phrases, samples_per_voice, train_dir: Path, test_dir: Path,
             if done and done % 200 == 0:
                 log(f"…{done}/{n_samples}")
     if bad_voices:
-        log(f"skipped {len(bad_voices)} incompatible voices: {sorted(bad_voices)[:10]}…")
+        log(f"skipped {len(bad_voices)} permanently rejected voices:")
+        for voice, reason in sorted(bad_voices.items())[:10]:
+            log(f"  {voice}: {reason}")
     log(f"wrote {done} clips → {train_dir.parent}")
     if done < n_samples * 0.5:
         log("WARNING: more than half the requests failed — check API quota/credentials")

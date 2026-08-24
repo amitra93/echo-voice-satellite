@@ -23,6 +23,14 @@ class Request:
         return self._body
 
 
+class RawRequest:
+    def __init__(self, body):
+        self._body = body
+
+    async def read(self):
+        return self._body
+
+
 class ForgeWebGoogleTtsTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
@@ -117,6 +125,32 @@ class ForgeWebGoogleTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(kept.exists())
         self.assertTrue(custom.exists())
         self.assertFalse(removed.exists())
+
+
+class ForgeWebCredentialsTests(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self.directory = tempfile.TemporaryDirectory()
+        self.path = Path(self.directory.name) / "google-credentials.json"
+        self.patch = patch.object(forge_web, "GOOGLE_CREDS", self.path)
+        self.patch.start()
+
+    def tearDown(self):
+        self.patch.stop()
+        self.directory.cleanup()
+
+    async def test_service_account_key_is_saved_private_and_never_returned(self):
+        raw = json.dumps({"type": "service_account", "project_id": "project",
+                          "client_email": "forge@example.test", "private_key": "secret"}).encode()
+        response = await forge_web.api_google_put(RawRequest(raw))
+        state = json.loads(response.body)
+        self.assertEqual(state["project_id"], "project")
+        self.assertNotIn("private_key", state)
+        self.assertEqual(self.path.stat().st_mode & 0o777, 0o600)
+
+    async def test_oauth_client_secret_is_rejected(self):
+        raw = json.dumps({"installed": {"client_id": "not-a-service-account"}}).encode()
+        with self.assertRaises(forge_web.web.HTTPBadRequest):
+            await forge_web.api_google_put(RawRequest(raw))
 
 
 if __name__ == "__main__":

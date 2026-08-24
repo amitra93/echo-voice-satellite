@@ -802,6 +802,15 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '21' WHERE key = 'schema_version';
     """,
+
+    # ── v22 — compatibility with the retired main-line v19 ────────────────
+    # main's v19 used this list slot for an obsolete ESPHome column. A database
+    # upgraded there therefore skips new_impl's turn state migration when it
+    # later advances through v20-v21. Leave the obsolete column untouched, but
+    # restore the turn-engine column if it is absent in the Python fixup below.
+    """
+    UPDATE system_config SET value = '22' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -827,7 +836,14 @@ def _fixup_v11(conn) -> None:
             )
 
 
-_MIGRATION_FIXUPS = {11: _fixup_v11}
+def _fixup_v22(conn) -> None:
+    """Add turn state only for databases whose v19 was main's ESPHome v19."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(turns)")}
+    if "state" not in columns:
+        conn.execute("ALTER TABLE turns ADD COLUMN state TEXT NOT NULL DEFAULT 'done'")
+
+
+_MIGRATION_FIXUPS = {11: _fixup_v11, 22: _fixup_v22}
 
 # ─── Connection management ────────────────────────────────────────────────────
 
@@ -2092,10 +2108,16 @@ def create_user(username: str, password_hash: str, role: str = "readonly") -> in
 
 def get_user_by_ha_id(ha_user_id: str) -> Optional[sqlite3.Row]:
     """Return the user linked to a Home Assistant user id, or None."""
-    with _conn() as conn:
-        return conn.execute(
-            "SELECT * FROM users WHERE ha_user_id = ?", (ha_user_id,)
-        ).fetchone()
+    return _q1("SELECT * FROM users WHERE ha_user_id = ?", (ha_user_id,))
+
+
+def ha_admin_count() -> int:
+    """Count admins who can authenticate through Home Assistant ingress."""
+    row = _q1(
+        "SELECT COUNT(*) AS count FROM users "
+        "WHERE role = 'admin' AND ha_user_id IS NOT NULL"
+    )
+    return int(row["count"])
 
 
 def create_ha_user(ha_user_id: str, username: str, role: str) -> int:

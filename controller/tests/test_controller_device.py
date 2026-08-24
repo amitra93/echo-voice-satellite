@@ -265,7 +265,10 @@ def test_stream_speaker_chunks_preserves_partial_data_and_reports_metrics():
 def test_button_handler_routes_hold_tap_mute_and_cancel(monkeypatch):
     events = []
     monkeypatch.setattr(em_controller.ha_sidechannels, "button_event", lambda *args: events.append(args))
-    monkeypatch.setattr(em_controller.turn_engine, "cancel_voice_turn", lambda device_id: events.append(("cancel", device_id)))
+    monkeypatch.setattr(
+        em_controller.turn_engine, "cancel_voice_turn",
+        lambda device_id, **kwargs: events.append(("cancel", device_id, kwargs)),
+    )
 
     async def run():
         device = new_device(["button_hold"])
@@ -283,6 +286,7 @@ def test_button_handler_routes_hold_tap_mute_and_cancel(monkeypatch):
         device.send_control = lambda message: asyncio.sleep(0, result=events.append(message))
         await em_controller.handle_button_event(device, {"clickType": 138, "down": False, "heldMs": 100})
         assert device.cancel_event.is_set()
+        assert ("cancel", "dev", {"reason": "cancelled"}) in events
         assert {"type": "speaker_flush"} in events
         device.voice_lock.release()
 
@@ -758,9 +762,9 @@ def test_barge_watcher_detects_thinking_and_playback_wakes(monkeypatch):
         device._barge_model_key = "hey"
         device.oww_threshold = 0.5
         device.barge_threshold = 0.1
-        payload = b"\x00" * em_controller.CHUNK_BYTES * 2
+        payload = b"\x00" * em_controller.CHUNK_BYTES * 17
 
-        device._barge_model = Model([0.25, 0.26])
+        device._barge_model = Model([0.0] * 15 + [0.25, 0.26])
         thinking_task = asyncio.create_task(em_controller._barge_watcher(device, asyncio.Event()))
         await asyncio.sleep(0)
         await device.voice_queue.put(payload)
@@ -772,7 +776,7 @@ def test_barge_watcher_detects_thinking_and_playback_wakes(monkeypatch):
 
         flushed = []
         device.send_control = lambda message: asyncio.sleep(0, result=flushed.append(message))
-        device._barge_model = Model([0.2])
+        device._barge_model = Model([0.0] * 15 + [0.2, 0.2])
         playback = asyncio.Event()
         playback.set()
         playback_task = asyncio.create_task(em_controller._barge_watcher(device, playback))
@@ -836,7 +840,10 @@ def test_wake_listener_triggers_controller_turn_and_restores_listening(monkeypat
         task = asyncio.create_task(em_controller.wake_word_listener(device))
         await asyncio.sleep(0)
         await asyncio.sleep(0)
-        await device.mic_queue.put(b"\x01\x00" * (em_controller.CHUNK_BYTES // 2))
+        # New and reset OWW models are gated until their seeded feature window
+        # has been replaced by real audio.
+        for _ in range(em_controller.em_oww_warmup.FEATURE_WINDOW):
+            await device.mic_queue.put(b"\x01\x00" * (em_controller.CHUNK_BYTES // 2))
         with pytest.raises(StopListener):
             await task
         assert calls[:4] == ["mic_start", "beam_lock", "turn", "beam_unlock"]

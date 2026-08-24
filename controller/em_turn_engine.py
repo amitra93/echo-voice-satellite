@@ -48,6 +48,7 @@ from aiohttp import web
 import em_announce
 import em_audio_frame as audio
 import em_db as db
+import em_ns
 import em_recordings
 
 log = logging.getLogger("echomuse.turn_engine")
@@ -102,6 +103,10 @@ class Turn:
     socket_ready: asyncio.Event = field(default_factory=asyncio.Event)
     endpoint: asyncio.Event = field(default_factory=asyncio.Event)
     cancelled: asyncio.Event = field(default_factory=asyncio.Event)
+    # The cause of an early end is diagnostic; cancellation itself still gates
+    # control flow. A playback barge records its cause without cancelling a
+    # pipeline that this native integration cannot abort yet.
+    end_reason: str | None = None
     tts_end: asyncio.Event = field(default_factory=asyncio.Event)
     tts_queue: asyncio.Queue = field(default_factory=asyncio.Queue)
     socket: web.WebSocketResponse | None = None
@@ -284,8 +289,7 @@ async def turn_action(request: web.Request) -> web.Response:
             "turn_id": turn_id, "state": "processing",
         })
     elif action == "cancel":
-        turn.cancelled.set()
-        turn.tts_queue.put_nowait(None)
+        _end_turn(turn, "cancelled")
     elif action == "tts/end":
         turn.tts_ended_mono = turn.tts_ended_mono or time.monotonic()
         turn.tts_end.set()
@@ -316,40 +320,75 @@ async def turn_action(request: web.Request) -> web.Response:
 
 async def _send_mic(turn: Turn) -> None:
     """Forward the controller's voice queue as fixed-size PCM frames."""
-    while not turn.cancelled.is_set():
+    denoiser = None
+    ns_reporter = None
+    ns_debug_raw = bytearray()
+    ns_debug_out = bytearray()
+    if getattr(turn.device, "ns_asr", False):
         try:
-            payload = await asyncio.wait_for(turn.device.voice_queue.get(), 1.0)
-        except asyncio.TimeoutError:
-            continue
-        if payload is None or isinstance(payload, str):
-            if payload == VAD_SENTINEL_TIMEOUT:
-                # No speech was ever detected — mirrors em_esphome's old
-                # _no_speech_timeout shortcut: nothing was streamed for HA to
-                # respond to, so _run_turn skips the TTS round-trip entirely
-                # rather than waiting out a response that isn't coming.
-                turn.no_speech = True
-            turn.endpoint.set()
-            break
-        if turn.socket is None:
-            turn.endpoint.set()
-            return
-        if len(payload) != audio.MIC_FRAME_BYTES:
-            log.warning("[%s] dropping non-80ms mic payload (%d bytes)",
-                        getattr(turn.device, "device_id", "?"), len(payload))
-            continue
-        if turn.preroll_remaining > 0:
-            turn.preroll_remaining -= 1
-            continue
-        if turn.capture_audio:
-            remaining = em_recordings.MAX_UTTERANCE_BYTES - len(turn.mic_audio)
-            if remaining > 0:
-                turn.mic_audio.extend(payload[:remaining])
-        await turn.socket.send_bytes(
-            audio.encode_frame(audio.MIC_PCM, turn.mic_sequence, payload)
-        )
-        turn.mic_sequence += 1
-    if turn.socket is not None and not turn.cancelled.is_set():
-        await turn.socket.send_bytes(audio.encode_frame(audio.MIC_EOS, turn.mic_sequence))
+            denoiser = em_ns.StreamingDenoiser()
+            ns_reporter = denoiser
+        except Exception as exc:
+            log.warning("[%s] nsAsr enabled but DTLN is unavailable (%s) — streaming raw audio",
+                        getattr(turn.device, "device_id", "?"), exc)
+    try:
+        while not turn.cancelled.is_set():
+            try:
+                payload = await asyncio.wait_for(turn.device.voice_queue.get(), 1.0)
+            except asyncio.TimeoutError:
+                continue
+            if payload is None or isinstance(payload, str):
+                if payload == VAD_SENTINEL_TIMEOUT:
+                    # No speech was ever detected — mirrors em_esphome's old
+                    # _no_speech_timeout shortcut: nothing was streamed for HA to
+                    # respond to, so _run_turn skips the TTS round-trip entirely
+                    # rather than waiting out a response that isn't coming.
+                    turn.no_speech = True
+                turn.endpoint.set()
+                break
+            if turn.socket is None:
+                turn.endpoint.set()
+                return
+            if len(payload) != audio.MIC_FRAME_BYTES:
+                log.warning("[%s] dropping non-80ms mic payload (%d bytes)",
+                            getattr(turn.device, "device_id", "?"), len(payload))
+                continue
+            if turn.preroll_remaining > 0:
+                turn.preroll_remaining -= 1
+                continue
+
+            raw_payload = payload
+            if denoiser is not None:
+                try:
+                    payload = denoiser.process(raw_payload)
+                    if len(payload) != len(raw_payload):
+                        raise RuntimeError(f"DTLN produced {len(payload)} bytes")
+                except Exception as exc:
+                    ns_reporter = denoiser
+                    denoiser = None
+                    payload = raw_payload
+                    log.warning("[%s] NS failed mid-turn (%s) — streaming raw audio",
+                                getattr(turn.device, "device_id", "?"), exc)
+            if em_ns.DEBUG_DIR:
+                ns_debug_raw.extend(raw_payload)
+                ns_debug_out.extend(payload)
+            if turn.capture_audio:
+                remaining = em_recordings.MAX_UTTERANCE_BYTES - len(turn.mic_audio)
+                if remaining > 0:
+                    # This is exactly the MIC_PCM payload sent to HA, after NS.
+                    turn.mic_audio.extend(payload[:remaining])
+            await turn.socket.send_bytes(
+                audio.encode_frame(audio.MIC_PCM, turn.mic_sequence, payload)
+            )
+            turn.mic_sequence += 1
+        if turn.socket is not None and not turn.cancelled.is_set():
+            await turn.socket.send_bytes(audio.encode_frame(audio.MIC_EOS, turn.mic_sequence))
+    finally:
+        if ns_reporter is not None:
+            log.info("[%s] NS: %s", getattr(turn.device, "device_id", "?"),
+                     ns_reporter.zero_report())
+        em_ns.dump_debug_pair(getattr(turn.device, "device_id", "turn"),
+                              bytes(ns_debug_raw), bytes(ns_debug_out))
 
 
 def _upsample_24_to_48(payload: bytes) -> bytes:
@@ -404,6 +443,8 @@ async def _run_turn(turn: Turn) -> bool:
 
 
 def _outcome_for(turn: Turn, result: bool) -> str:
+    if turn.end_reason is not None:
+        return turn.end_reason
     if turn.no_speech:
         return "no_speech"
     return "ok" if result else "cancelled"
@@ -559,16 +600,30 @@ async def trigger_voice_turn(
         ENGINE.audio_sockets.pop(turn_id, None)
 
 
-def cancel_voice_turn(device_id: str, abort_ha: bool = False) -> None:
+def _end_turn(turn: Turn, reason: str, *, cancel: bool = True) -> None:
+    """Record the first cause and optionally unblock local turn work."""
+    if turn.end_reason is None:
+        turn.end_reason = reason
+    if cancel:
+        turn.cancelled.set()
+        turn.tts_queue.put_nowait(None)
+
+
+def cancel_voice_turn(
+    device_id: str, abort_ha: bool = False, reason: str = "cancelled"
+) -> None:
     del abort_ha
     for turn in ENGINE.turns.values():
         if turn.device.device_id == device_id:
-            turn.cancelled.set()
-            turn.tts_queue.put_nowait(None)
+            _end_turn(turn, reason)
 
 
 def abort_ha_run(device_id: str) -> None:
-    cancel_voice_turn(device_id, abort_ha=True)
+    # This cannot yet abort AssistSatelliteEntity's running pipeline. Preserve
+    # that limitation while recording why the locally interrupted turn ended.
+    for turn in ENGINE.turns.values():
+        if turn.device.device_id == device_id:
+            _end_turn(turn, "barged", cancel=False)
 
 
 def start_device_test_turn(device) -> asyncio.Task:

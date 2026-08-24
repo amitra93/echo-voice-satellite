@@ -28,6 +28,7 @@ class FakeDevice:
     def __init__(self):
         self.voice_queue = asyncio.Queue()
         self.turn_history = collections.deque(maxlen=50)
+        self.ns_asr = False
 
 
 def test_mic_queue_is_forwarded_as_pcm_and_eos():
@@ -56,6 +57,58 @@ def test_mic_queue_captures_exact_asr_pcm_when_enabled():
         assert bytes(turn.mic_audio) == payload
 
     asyncio.run(run())
+
+
+def test_mic_queue_uses_denoised_pcm_for_the_wire_and_recording(monkeypatch):
+    class Denoiser:
+        def process(self, payload):
+            return b"\x78\x56" * (len(payload) // 2)
+
+        def zero_report(self):
+            return "zeros out=0.0% in=0.0% floor=-20dB"
+
+    async def run():
+        device = FakeDevice()
+        device.ns_asr = True
+        turn = engine.Turn(1, device, None, None, capture_audio=True)
+        turn.socket = FakeSocket()
+        raw = b"\x34\x12" * (MIC_FRAME_BYTES // 2)
+        denoised = b"\x78\x56" * (MIC_FRAME_BYTES // 2)
+        await device.voice_queue.put(raw)
+        await device.voice_queue.put("vad_end")
+        await engine._send_mic(turn)
+        assert turn.socket.frames[0].payload == denoised
+        assert bytes(turn.mic_audio) == denoised
+
+    monkeypatch.setattr(engine.em_ns, "StreamingDenoiser", Denoiser)
+    asyncio.run(run())
+
+
+def test_mic_queue_falls_back_to_raw_after_denoiser_failure(monkeypatch):
+    reporters = []
+
+    class Denoiser:
+        def process(self, _payload):
+            raise RuntimeError("model error")
+
+        def zero_report(self):
+            reporters.append(True)
+            return "zeros out=0.0% in=0.0% floor=-20dB"
+
+    async def run():
+        device = FakeDevice()
+        device.ns_asr = True
+        turn = engine.Turn(1, device, None, None)
+        turn.socket = FakeSocket()
+        raw = b"\x34\x12" * (MIC_FRAME_BYTES // 2)
+        await device.voice_queue.put(raw)
+        await device.voice_queue.put("vad_end")
+        await engine._send_mic(turn)
+        assert turn.socket.frames[0].payload == raw
+
+    monkeypatch.setattr(engine.em_ns, "StreamingDenoiser", Denoiser)
+    asyncio.run(run())
+    assert reporters == [True]
 
 
 def test_tts_pcm_is_upsampled_to_48khz_s16():
@@ -117,6 +170,7 @@ def test_turn_action_cancel_sets_cancelled_and_unblocks_tts(monkeypatch):
             response = await engine.turn_action(Request())
             assert response.status == 200
             assert turn.cancelled.is_set()
+            assert turn.end_reason == "cancelled"
             assert await asyncio.wait_for(turn.tts_queue.get(), 0.1) is None
         finally:
             engine.ENGINE.turns.pop(10, None)
@@ -403,6 +457,38 @@ def test_trigger_voice_turn_persists_cancelled_outcome_and_cleans_registry(monke
         assert 21 not in engine.ENGINE.turns
 
     asyncio.run(run())
+
+
+def test_turn_outcome_uses_the_first_cancellation_reason():
+    turn = engine.Turn(12, FakeDevice(), None, None)
+    engine._end_turn(turn, "barged")
+    engine._end_turn(turn, "muted")
+
+    assert turn.cancelled.is_set()
+    assert turn.end_reason == "barged"
+    assert engine._outcome_for(turn, False) == "barged"
+
+
+def test_trigger_voice_turn_persists_the_exact_cancellation_cause(monkeypatch):
+    async def run():
+        device = FakeDevice()
+        device.last_wake = None
+        updates = []
+        monkeypatch.setattr(engine.db, "create_turn", lambda *args: 23)
+        monkeypatch.setattr(engine.db, "update_turn", lambda *args: updates.append(args))
+        monkeypatch.setattr(engine.db, "get_turn", lambda *args: None)
+        monkeypatch.setattr(engine, "_push_event", lambda _event: asyncio.sleep(0))
+
+        async def cancelled_by_mute(turn):
+            engine._end_turn(turn, "muted")
+            return False
+
+        monkeypatch.setattr(engine, "_run_turn", cancelled_by_mute)
+        await engine.trigger_voice_turn(device, None, None)
+        return updates
+
+    updates = asyncio.run(run())
+    assert updates[0][1]["outcome"] == "muted"
 
 
 def test_trigger_voice_turn_handles_audio_timeout_and_cleanup(monkeypatch):

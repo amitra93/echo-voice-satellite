@@ -204,7 +204,10 @@ Controller satellite:
     supported_formats) → ffmpeg decode → 48kHz mono S16_LE PCM (v2.9.4;
     was 22050Hz + numpy resample)
   → t_tts_fetched_ms, tts_bytes logged
-  → EQ at 48kHz (mono end-to-end — no resample, no stereo)
+  → EQ → bass guard → limiter at 48kHz (mono end-to-end — no resample,
+    no stereo). Guard before limiter: limiting first spends reduction
+    on bass about to be discarded. See controller/CLAUDE.md, "The output
+    chain"
   → mic_stop → device stream stops BEFORE playback starts (v2.6.5 —
     previously only in the post-turn finally, so the device processed
     63–65 frames of its own TTS echo per turn, contended the Wi-Fi radio
@@ -320,8 +323,8 @@ used to open with was removed 2026-07-12.
     → controller: fetch TTS (one retry on transient failure; the satellite
       declares supported_formats 48kHz/mono/FLAC so recent HA transcodes at
       source) → ffmpeg decode straight to 48kHz mono S16_LE (cap 15s)
-    → controller: EQ at 48kHz (no resample step since v2.9.4) → stream to
-      device ALSA as mono 0x02 frames
+    → controller: EQ → bass guard → limiter at 48kHz (no resample step
+      since v2.9.4) → stream to device ALSA as mono 0x02 frames
     → controller: MediaPlayerState ANNOUNCING → AnnounceFinished → IDLE
     → if HA set continue_conversation: mic_start → next turn immediately
       (preroll_discard=0), no wake word needed (v2.6.5 C2)
@@ -607,7 +610,7 @@ Controller detects dead connections within 30s via WebSocket protocol keepalives
 | `boot_patched.img` | SELinux-patched boot image |
 | `magisk.db` | Pre-seeded root grant database |
 | `Magisk-v17.3.zip` | Magisk installer |
-| `f1r30s.zip` | ADB enablement patch |
+| `f1r30s.zip` | R0rt1z2's patch: ADB + UART console, blocks OTA domains, disables dm-verity. Flash it after any stock firmware image or the OS will not boot |
 | `update-kindle-csm_biscuit-272.6.8.0_user_680767620.bin` | FireOS 5 firmware |
 | `server` | Compiled EchoMuse binary (ARM, API 22) — or fetch from GitHub releases |
 
@@ -733,6 +736,63 @@ One consequence worth knowing: with mediaserver alive, Android still reacts to j
 **Audio processing pipeline.** Each 160ms mic batch of raw beamformed audio passes through: (1) speexdsp AEC (v2.7.3, when enabled) — subtracts the speaker's own output, whole mic path including the wake stream. (2) AGC (button/lock_mic turns only; never the wake stream) — targets -22dBFS RMS with fast attack (0.05) and slow release (0.005); release frozen during silence to prevent noise floor amplification. VAD decisions are made on pre-AGC audio to keep the threshold stable. Device-side RNNoise was removed 2026-07-12 — noise suppression is controller-side DTLN on the speech-to-text stream (`nsAsr` flag).
 
 **Acoustic feedback prevention.** `stream_speaker` completes well ahead of actual playback (the WS write runs ~2× realtime and the device buffers ~5.5s). Without compensation, the mic would restart while the speaker is still playing, and the assistant would hear itself and trigger another turn. The controller sleeps for the remaining playback duration (plus the ~1s prime allowance) after streaming, racing `cancel_event` so barge-in cuts the wait instantly. With barge-in enabled the mic never stops at all — AEC is what keeps the live mic usable during playback.
+
+**Stock's playback processing, measured off a device (2026-08-20).** Amazon's
+own chain for the speaker path, from `/system/vendor/etc/audio-algorithms/`:
+
+```
+UserEQ  ->  Equalizer FIR  ->  MBCL
+(taste)     (driver correction)  (excursion protection)
+```
+
+Our chain is the same order — EQ, bass guard, limiter — with the middle stage
+missing entirely (#247).
+
+`AFE.cfg` selects among six FIR files by volume (`"Volume Boundary": [50, 60,
+70, 80, 90, 100]`), but all six are one curve at six gains (`EQ_100` is
+`EQ_50` x 5.334838 exactly), so **tone is constant across volume and only the
+level is banded**. `EQ_50.cfg` is 1024 FIR taps at 48kHz. Its response,
+normalised to 0dB at 1kHz because the absolute level is that volume banding
+rather than tone:
+
+| Hz | dB | Hz | dB | Hz | dB |
+|---|---|---|---|---|---|
+| 100 | +20.1 | 500 | +2.7 | 2800 | **-14.7** |
+| 125 | +24.8 | 700 | +0.1 | 3500 | -11.9 |
+| 150 | **+26.2** | 1000 | 0.0 | 5000 | -3.5 |
+| 200 | +25.6 | 1400 | -2.1 | 8000 | +3.1 |
+| 250 | +19.9 | 2000 | -7.9 | 10000 | +3.1 |
+| 350 | +12.3 | | | | |
+
+**The design is coherent and the two halves belong together**: boost the
+lowest region the driver *can* radiate (150-250Hz, ~+25dB), and let MBCL band
+1 delete everything below 115Hz that it *cannot* (20:1 from -50dB, floor
+-40dB). Boost what works, remove what does not. Implementing only the removal
+half — which is what `em_mbc` is — protects the driver correctly and leaves
+the output thin, because nothing puts energy back where the driver works.
+
+Two caveats on the numbers. **Below ~100Hz they are not trustworthy**: 1024
+taps at 48kHz is ~47Hz of resolution, so treat the sub-100Hz end as undefined
+rather than as a measurement. And **this is a correction curve, not a driver
+response** — it says what Amazon decided this speaker needed, which is strong
+evidence about the driver but not the same thing. A measured driver response
+is still the open item, and it needs hardware.
+
+The table is recorded here because the same coefficients were read off a
+device on 2026-08-19 and only the *conclusion* was written down, so they had
+to be fetched a second time. The vendor `.cfg` files themselves are Amazon's
+and are deliberately not committed; this derived response is a fact about the
+hardware.
+
+**Stock knows whether something is in the jack, and retunes for it.**
+`AFE.cfg` declares `"Num Max Speakers": 2` with `"Num Internal Speakers": 1`,
+`"default speaker mode": "internal"`, and keys the residual-echo suppressor's
+tuning tables by that mode (only the `internal` block is populated on this
+unit). The second speaker is the 3.5mm line out, and the reason the front end
+cares is echo cancellation: headphones present no acoustic echo path at all,
+and an external speaker presents a completely different one. **EchoMuse has no
+speaker-mode concept** — our AEC assumes the internal speaker always. Worth
+knowing for #117/#141 and before any line-out work.
 
 **Turn timeouts.** The mic-streaming phase of a turn carries a 20s hard cap, and a turn where speech never starts closes locally after 5s (controller-side SNR-relative timeout on wake turns, device `0x05` sentinel on button turns) instead of round-tripping to HA for an empty transcription.
 

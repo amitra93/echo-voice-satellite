@@ -63,7 +63,7 @@ def test_ingress_login_provisions_first_user_and_preserves_existing_role(monkeyp
     monkeypatch.setattr(em_auth.db, "get_config", lambda name, default=None: default)
     monkeypatch.setattr(em_auth.db, "create_session", lambda *args: created.append(args))
     monkeypatch.setattr(em_auth.db, "get_user_by_ha_id", lambda user_id: None)
-    monkeypatch.setattr(em_auth.db, "user_count", lambda: 0)
+    monkeypatch.setattr(em_auth.db, "ha_admin_count", lambda: 0)
     monkeypatch.setattr(em_auth.db, "create_ha_user", lambda *args: 9)
     monkeypatch.setattr(em_auth.db, "get_user_by_id", lambda user_id: {"id": 9, "username": "Alice", "role": "admin"})
     assert run(em_auth.login_via_ingress(identity)) == ("ingress-token", "admin")

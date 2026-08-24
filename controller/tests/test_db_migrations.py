@@ -147,3 +147,19 @@ def test_the_downgrade_message_names_both_versions(tmp_path, monkeypatch):
     msg = str(e.value)
     assert f"v{latest}" in msg and f"v{latest - 2}" in msg
     assert ".bak" in msg, "should point at the backup it can be restored from"
+
+
+def test_main_line_v19_gets_turn_state_compatibility_fix(tmp_path):
+    """main used v19 for a retired column; new_impl needs turns.state there."""
+    p = _legacy_db(tmp_path, upto=18)
+    conn = sqlite3.connect(p)
+    conn.executescript("""
+        ALTER TABLE devices ADD COLUMN esphome_mac TEXT;
+        UPDATE system_config SET value = '19' WHERE key = 'schema_version';
+    """)
+    conn.commit()
+    conn.close()
+
+    em_db.init(p)
+    columns = {row[1] for row in sqlite3.connect(p).execute("PRAGMA table_info(turns)")}
+    assert "state" in columns

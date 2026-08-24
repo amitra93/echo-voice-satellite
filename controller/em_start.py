@@ -15,7 +15,10 @@ missing.
 
 import json
 import os
+import sys
 from pathlib import Path
+
+import em_cacerts
 
 OPTIONS_PATH = Path("/data/options.json")
 
@@ -37,6 +40,7 @@ OPTION_ENV_VARS = {
     "debug": "DEBUG",
     "sendspin_enabled": "SENDSPIN_ENABLED",
     "music_assistant_url": "MUSIC_ASSISTANT_URL",
+    "extra_ca_cert": "EM_EXTRA_CA_CERT",
 }
 
 def apply_options(options: dict) -> None:
@@ -67,6 +71,13 @@ def apply_options(options: dict) -> None:
 def main() -> None:
     if OPTIONS_PATH.is_file():
         apply_options(json.loads(OPTIONS_PATH.read_text(encoding="utf-8")))
+    extra_ca = os.environ.get("EM_EXTRA_CA_CERT", "").strip()
+    if extra_ca:
+        try:
+            print(f"em_start: {em_cacerts.install(extra_ca)}", flush=True)
+        except em_cacerts.CATrustError as err:
+            print(f"em_start: EM_EXTRA_CA_CERT: {err}", flush=True)
+            sys.exit(1)
     os.execvp("python3", ["python3", "-u", "em_controller.py"])
 
 

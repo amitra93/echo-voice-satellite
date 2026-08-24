@@ -9,6 +9,11 @@ class FakeDevice:
         self.device_id = device_id
         self.eq_bands = [0.0] * 8
         self.eq_loudness = False
+        self.bass_guard_enabled = True
+        self.bass_guard_db = -30.0
+        self.limiter_enabled = True
+        self.limiter_threshold = -1.0
+        self.limiter_release = 150.0
         self.data_frames: list[bytes] = []
         self.control_msgs: list[dict] = []
 
@@ -882,3 +887,213 @@ def test_a_pausing_device_does_not_change_its_lead():
         await s.stop()
         return during
     assert asyncio.run(main()) == em_player.LEAD_S
+
+
+# ── #258: media over HTTPS is verified, and a refused decoder explains itself ──
+
+
+def test_https_media_is_fetched_with_certificate_verification(monkeypatch):
+    """
+    ffmpeg's TLS protocol defaults -tls_verify to 0, so every https media URL
+    was fetched accepting ANY certificate — true by accident of an ffmpeg
+    build default rather than a property anyone would choose (#258). The
+    player passes the flag explicitly: input-scoped (before -i), and only for
+    https — other protocols would silently ignore it, and carrying it anyway
+    would misstate what the flag protects.
+    """
+    captured = {}
+
+    async def fake_exec(*args, **kwargs):
+        captured["args"] = list(args)
+
+        class P:
+            stdout = None
+            stderr = None
+            returncode = 0
+        return P()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_exec)
+
+    asyncio.run(MediaSession._spawn_decoder(
+        None, "https://radio.example/stream", 0.0))
+    args = captured["args"]
+    assert "-tls_verify" in args[:args.index("-i")], \
+        "the verify flag must be input-scoped (before -i)"
+    assert args[args.index("-tls_verify") + 1] == "1"
+
+    asyncio.run(MediaSession._spawn_decoder(
+        None, "http://radio.example/stream", 0.0))
+    assert "-tls_verify" not in captured["args"], \
+        "plain http must not carry an option it would silently ignore"
+
+
+class RefusedProc(FakeProc):
+    """A decoder ffmpeg refused outright: no audio, non-zero exit, and its
+    last words on stderr — the shape of a -tls_verify failure."""
+
+    def __init__(self, stderr_lines):
+        super().__init__(periods=0)
+        self.returncode = 1
+        self.stderr = asyncio.StreamReader()
+        for line in stderr_lines:
+            self.stderr.feed_data((line + "\n").encode())
+        self.stderr.feed_eof()
+
+
+def test_a_refused_decoder_explains_itself_in_the_log(caplog):
+    """
+    stderr went to DEVNULL, so an https URL ffmpeg refused looked identical
+    to a stream that simply ended — silence with nothing on the log. An
+    abnormal exit now logs the decoder's last lines, and a certificate
+    failure points at EM_EXTRA_CA_CERT, because -tls_verify turned a
+    working setup's silent accident into a deliberate guarantee.
+    """
+    import logging
+
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+        s = StubSession("office", periods=0)
+
+        async def refused(url, position_s):
+            return RefusedProc([
+                "https protocol error",
+                "Certificate verification failed",
+            ])
+        s._spawn_decoder = refused
+
+        with caplog.at_level(logging.ERROR, logger="player"):
+            await s.play("https://radio.example/stream")
+            await asyncio.wait_for(s._task, 5)
+
+        text = "\n".join(r.message for r in caplog.records)
+        assert "ffmpeg exited 1" in text, \
+            "an abnormal decoder exit must reach the log"
+        assert "Certificate verification failed" in text, \
+            "the decoder's own diagnostic must be preserved"
+        assert "EM_EXTRA_CA_CERT" in text, \
+            "a certificate failure must point at the recovery path"
+    asyncio.run(main())
+
+
+def test_expected_teardowns_stay_quiet(caplog):
+    """
+    pause()/stop() kill the decoder (-9) and a natural end exits 0; neither
+    is a failure, and logging them would bury the abnormal case.
+    """
+    import logging
+
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+        s = StubSession("office", periods=2, endless=True)
+        with caplog.at_level(logging.ERROR, logger="player"):
+            await s.play("http://radio/stream")
+            await asyncio.sleep(0.05)
+            await s.pause()
+            await s.stop()
+        assert not any("ffmpeg exited" in r.message for r in caplog.records), \
+            "a deliberate kill is teardown, not a decoder failure"
+    asyncio.run(main())
+
+
+# ── #150: a source that stops producing ends the stream and reports idle ────
+
+
+class DeadSourceProc(FakeProc):
+    """Delivers a few periods, then hangs forever: no EOF (the decoder is
+    still alive, parked on a dead upstream), no audio. The shape of a
+    starving Music Assistant flow."""
+
+    def __init__(self, periods):
+        super().__init__(periods, endless=True)
+        real_readexactly = self.stdout.readexactly
+
+        served = {"n": 0}
+        total = periods
+
+        async def hang_eventually(n):
+            if served["n"] >= total:
+                await asyncio.sleep(3600)     # never returns
+            served["n"] += 1
+            return await real_readexactly(n)
+
+        self.stdout.readexactly = hang_eventually
+
+
+def test_a_dead_source_ends_the_stream_and_reports_idle(caplog, monkeypatch):
+    """
+    #150: the read had no deadline, so a source that stopped producing left
+    the feed parked forever - player log silent, HA showing `playing`
+    indefinitely, decoder held. A source that produces nothing for
+    SOURCE_DEAD_S must end the stream, send EOS so the device settles, and
+    let HA report idle.
+    """
+    import logging
+    monkeypatch.setattr(em_player, "SOURCE_DEAD_S", 0.2)
+
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+        s = StubSession("office", periods=2)
+        s._spawn_decoder = lambda url, pos: _spawn(url, pos, s)
+
+        async def _spawn(url, pos, s):
+            proc = DeadSourceProc(2)
+            s.procs.append(proc)
+            return proc
+
+        with caplog.at_level(logging.ERROR, logger="player"):
+            await s.play("http://ma/flow/stream")
+            await asyncio.wait_for(s._task, 10)
+        return device, s
+
+    device, s = asyncio.run(main())
+    assert s.state == IDLE, "a dead source must not leave the session playing"
+    assert device.data_frames[-1][0] == 0x03, \
+        "EOS must reach the device so its ring and buffer settle"
+    text = "\n".join(r.message for r in caplog.records)
+    assert "produced nothing" in text, \
+        "the log must say the source died, not that the media finished"
+
+
+def test_a_slow_but_recovering_source_is_not_killed(monkeypatch):
+    """
+    The deadline exists for DEAD sources. One that stalls past the stall
+    warning but returns inside the deadline keeps streaming.
+    """
+    monkeypatch.setattr(em_player, "SOURCE_DEAD_S", 0.5)
+
+    async def main():
+        device = FakeDevice()
+        _wire(device)
+        s = StubSession("office", periods=3)
+
+        class SlowThenFineProc(FakeProc):
+            def __init__(self):
+                super().__init__(3, endless=False)
+                real = self.stdout.readexactly
+                calls = {"n": 0}
+
+                async def slow(n):
+                    calls["n"] += 1
+                    if calls["n"] == 2:
+                        await asyncio.sleep(0.2)   # over SOURCE_STALL_MS,
+                    return await real(n)           # under SOURCE_DEAD_S
+                self.stdout.readexactly = slow
+
+        async def spawn(url, pos):
+            p = SlowThenFineProc()
+            s.procs.append(p)
+            return p
+        s._spawn_decoder = spawn
+
+        await s.play("http://ma/flow/stream")
+        await asyncio.wait_for(s._task, 10)
+        return device, s
+
+    device, s = asyncio.run(main())
+    assert s.state == IDLE
+    types = [f[0] for f in device.data_frames]
+    assert types.count(0x02) == 3 and types[-1] == 0x03, \
+        "every period must have made it out before EOS"

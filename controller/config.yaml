@@ -49,6 +49,10 @@ environment:
   # Supervisor — fixed rather than a user option so the database can't be
   # pointed somewhere that doesn't survive a restart.
   DB_PATH: "/data/echomuse.db"
+# Read-only access to Home Assistant's /ssl folder so a private CA can be
+# installed in the container trust store at startup.
+map:
+  - type: ssl
 options:
   server_host: "0.0.0.0"
   server_ip: ""
@@ -63,6 +67,7 @@ options:
   debug: false
   sendspin_enabled: true
   music_assistant_url: ""
+  extra_ca_cert: ""
 schema:
   server_host: "str"
   server_ip: "str"
@@ -74,3 +79,4 @@ schema:
   debug: "bool"
   sendspin_enabled: "bool"
   music_assistant_url: "str"
+  extra_ca_cert: "str?"
