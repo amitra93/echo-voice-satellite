@@ -180,6 +180,24 @@ Requirements:
 - Event confidence, cooldown, and false-positive controls.
 - Privacy review and evaluation data before enabling any detector by default.
 
+### 10. Evaluate Controller-Side Playback Limiting
+
+**Goal:** Prevent controller-side EQ peaks from hard-clipping before PCM reaches
+the device, without changing the current tonal profile prematurely.
+
+- Keep the existing 85 Hz subsonic high-pass and device codec DRC.
+- Prototype a controller-side float-domain look-ahead limiter after EQ and
+  before S16 conversion.
+- Apply the same policy to HACS TTS, direct media playback, and Sendspin.
+- Handle the limiter's look-ahead tail correctly for scheduled Sendspin audio.
+- Validate on real hardware with boosted TTS and music before shipping.
+- Do not add or stack the upstream dynamic 115 Hz bass guard in the same
+  change; evaluate it separately against the current high-pass.
+
+**Relevant code:** `controller/em_eq.py`, `controller/em_controller.py`,
+`controller/em_player.py`, `controller/em_sendspin.py`,
+`device/internal/bindings/speaker/`
+
 ## Implementation Order
 
 1. Finish HA pipeline abort and turn serialization.
@@ -191,6 +209,8 @@ Requirements:
 7. Build synchronized multi-room announcements and intercom.
 8. Add fast local commands.
 9. Explore room-aware personas and acoustic event detection.
+10. Evaluate a controller-side look-ahead limiter after real-device playback
+    measurements.
 
 ## Explicit Non-Goals
 
