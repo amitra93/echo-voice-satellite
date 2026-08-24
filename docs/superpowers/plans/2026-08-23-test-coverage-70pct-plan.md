@@ -448,8 +448,8 @@ stubbed imports plus `Device` tests for capabilities, RTT/stat draining,
 control/data messages, reconnect grace, speaking transitions, LED helpers,
 speaker framing, and pending registration.
 
-The exact full production-only controller run is **764 passed, 1 skipped,
-58.4% coverage** after the additional provisioning-handler tests. This is an improvement, but it does **not** meet the 70%
+The exact full production-only controller run is **765 passed, 1 skipped,
+59.0% coverage** after the additional provisioning/activity-handler tests. This is an improvement, but it does **not** meet the 70%
 target yet. The remaining work is concentrated in the large OTA/provisioning/
 activity sections of `em_api.py` and the wake/control/message-loop orchestration
 in `em_controller.py`; no hardware or real wake-model paths were counted.
