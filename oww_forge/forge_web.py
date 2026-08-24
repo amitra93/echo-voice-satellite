@@ -8,6 +8,7 @@ stays honest about what actually exists on disk.
 No auth: this is a LAN batch tool, same trust model as `docker compose run`.
 """
 
+import asyncio
 import json
 import shutil
 import subprocess
@@ -418,6 +419,45 @@ async def api_google_tts(request):
     return web.json_response({"ok": True})
 
 
+async def api_prune_google_tts(request):
+    """Preview, then remove, generated Chirp clips outside saved selection."""
+    name = request.match_info["name"]
+    _require_wakeword(name)
+    if _job and _job.poll() is None:
+        raise web.HTTPConflict(text="cannot prune Google TTS clips while a job is running")
+    body = await request.json()
+    cfg = yaml.safe_load((forge.WAKEWORDS / name / "config.yml").read_text())
+    languages = (cfg.get("google_tts_languages") or "").split(",")
+    voices = (cfg.get("google_tts_voices") or "").split(",")
+    import google_tts
+    try:
+        pairs = google_tts.selected_chirp3_pairs(languages, voices)
+    except ValueError as error:
+        raise web.HTTPBadRequest(text=str(error))
+    except Exception as error:
+        raise web.HTTPServiceUnavailable(text=f"could not resolve Chirp 3 voices: {error}")
+    base = Path(cfg["output_dir"]) / cfg["model_name"]
+    plan = google_tts.plan_prune_clips(base, pairs)
+    groups = [
+        {"directory": directory, "locale": locale, "voice": voice, "clips": clips}
+        for (directory, locale, voice), clips in sorted(plan.groups.items())
+    ]
+    if body.get("confirm"):
+        for path in plan.paths:
+            path.unlink(missing_ok=True)
+    return web.json_response({
+        "ok": True,
+        "confirmed": bool(body.get("confirm")),
+        "deleted": len(plan.paths) if body.get("confirm") else 0,
+        "clips": len(plan.paths),
+        "groups": groups,
+        "selection": {
+            "languages": cfg.get("google_tts_languages", ""),
+            "voices": cfg.get("google_tts_voices", "") or "all matching Chirp 3 voices",
+        },
+    })
+
+
 async def api_google_tts_voices(request):
     languages = request.query.get("languages", "en-US,en-GB,en-AU,en-IN,en-PH,en-SG,en-ZA")
     import google_tts
@@ -453,6 +493,41 @@ async def api_test(request):
     finally:
         for p in uploads + wavs:
             p.unlink(missing_ok=True)
+
+
+async def ws_live_score(request):
+    """Score a browser's continuous 16kHz S16 microphone stream."""
+    name = request.match_info["name"]
+    model_path = forge.MODELS / f"{name}.onnx"
+    if not model_path.exists():
+        raise web.HTTPNotFound(text="model not built yet")
+    ws = web.WebSocketResponse(max_msg_size=8192)
+    await ws.prepare(request)
+    try:
+        from openwakeword.model import Model
+        import numpy as np
+
+        loop = asyncio.get_running_loop()
+        model = await loop.run_in_executor(
+            None, lambda: Model(wakeword_models=[str(model_path)], inference_framework="onnx")
+        )
+        prediction_key = model_path.stem
+        async for message in ws:
+            if message.type == web.WSMsgType.BINARY:
+                if not message.data or len(message.data) % 2:
+                    await ws.send_json({"error": "expected non-empty S16_LE PCM"})
+                    continue
+                samples = np.frombuffer(message.data, dtype="<i2")
+                prediction = await loop.run_in_executor(None, model.predict, samples)
+                await ws.send_json({"score": float(prediction.get(prediction_key, 0.0))})
+            elif message.type == web.WSMsgType.ERROR:
+                break
+    except Exception as error:
+        if not ws.closed:
+            await ws.send_json({"error": str(error)})
+    finally:
+        await ws.close()
+    return ws
 
 
 async def api_evaluate(request):
@@ -491,9 +566,14 @@ async def index(request):
     return web.FileResponse(STATIC / "index.html")
 
 
+async def live_mic_worklet(request):
+    return web.FileResponse(STATIC / "live-mic-worklet.js")
+
+
 def make_app() -> web.Application:
     app = web.Application()
     app.router.add_get("/", index)
+    app.router.add_get("/live-mic-worklet.js", live_mic_worklet)
     app.router.add_get("/api/state", api_state)
     app.router.add_get("/api/log", api_log)
     app.router.add_post("/api/assets/download", api_assets_download)
@@ -504,8 +584,10 @@ def make_app() -> web.Application:
     app.router.add_post("/api/wakewords/{name}/confusables", api_confusables)
     app.router.add_post("/api/wakewords/{name}/google-tts-config", api_save_google_tts_config)
     app.router.add_post("/api/wakewords/{name}/google-tts", api_google_tts)
+    app.router.add_post("/api/wakewords/{name}/google-tts-prune", api_prune_google_tts)
     app.router.add_get("/api/google-tts/voices", api_google_tts_voices)
     app.router.add_post("/api/wakewords/{name}/test", api_test)
+    app.router.add_get("/api/wakewords/{name}/live-score", ws_live_score)
     app.router.add_post("/api/wakewords/{name}/evaluate", api_evaluate)
     app.router.add_post("/api/wakewords/{name}/import-dataset", api_import_dataset)
     app.router.add_delete("/api/wakewords/{name}", api_delete)

@@ -138,7 +138,13 @@
   .verdict.no { background: rgba(176,48,48,0.09); color: var(--err); border: 1px solid rgba(176,48,48,0.25); }
   .verdict.info { background: rgba(64,88,120,0.1); color: var(--accent); border: 1px solid rgba(64,88,120,0.25); }
   .rawout { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted);
-            margin-top: 7px; white-space: pre-wrap; }
+             margin-top: 7px; white-space: pre-wrap; }
+  .live-score { margin-top: 12px; padding: 11px 12px 9px; border: 1px solid #303a2a;
+                border-radius: 8px; background: var(--lcd-bg); }
+  .live-score .head { display: flex; justify-content: space-between; align-items: baseline;
+                      color: var(--lcd-text); font-family: 'DM Mono', monospace; font-size: 10px; }
+  .live-score .score { color: var(--lcd-green); font-size: 14px; }
+  .live-score canvas { display: block; width: 100%; height: 150px; margin-top: 7px; }
 
   /* LCD console stays in the right workspace, below the wake-word cards. */
   #console { margin-top: 20px; }
@@ -251,7 +257,7 @@
 
 <script>
 const $ = id => document.getElementById(id);
-let state = null, logOffset = 0, lastJobKey = null;
+let state = null, logOffset = 0, lastJobKey = null, liveTest = null;
 const LOG_WINDOW_LINES = 120;
 const optionalSelection = new Set();
 let optionalSelectionInitialized = false;
@@ -397,6 +403,12 @@ function render() {
         <input type="file" accept="audio/*" multiple style="display:none">
         <input type="file" accept=".zip,application/zip" data-zip style="display:none">
       </div>
+      <div class="live-score" data-live-score style="display:none">
+        <div class="head"><span>LIVE MIC SCORE <span data-live-state>connecting</span></span>
+          <span><span data-live-level>MIC -- dBFS</span> <span class="score" data-live-value>0.000</span></span></div>
+        <canvas data-live-canvas></canvas>
+        <div class="hint" style="color:var(--lcd-dim);margin:3px 0 0">Score over time. Dotted line: example threshold 0.50.</div>
+      </div>
       <div class="actiongroup">
         <div class="microlabel" style="margin-bottom:6px">Improve accuracy</div>
         <div class="row">
@@ -421,6 +433,8 @@ function render() {
           <div class="row" style="margin-top:6px">
             <button class="small" data-act="save-gtts" ${busy() ? 'disabled' : ''}
               title="Save Google TTS locales, voices, and sample count without starting synthesis">Save Google TTS config</button>
+            <button class="small" data-act="prune-gtts" ${busy() ? 'disabled' : ''}
+              title="Preview and remove generated Chirp clips outside the saved locale and voice selection">Preview prune unselected clips</button>
           </div>
         </div>
         <div class="dataset-options" style="margin-top:10px">
@@ -498,7 +512,174 @@ async function pollLog() {
 
 async function refresh() {
   try { state = await api('/api/state'); } catch { return; }
-  render(); renderJob();
+  if (!liveTest) render();
+  renderJob();
+}
+
+class MicResampler {
+  constructor(sourceRate, targetRate = 16000) {
+    this.step = sourceRate / targetRate;
+    this.carry = new Float32Array(0);
+    this.position = 0;
+  }
+  push(input) {
+    const data = new Float32Array(this.carry.length + input.length);
+    data.set(this.carry); data.set(input, this.carry.length);
+    const output = [];
+    while (this.position + 1 < data.length) {
+      const left = Math.floor(this.position), fraction = this.position - left;
+      output.push(data[left] + (data[left + 1] - data[left]) * fraction);
+      this.position += this.step;
+    }
+    const keep = Math.floor(this.position);
+    this.carry = data.slice(keep);
+    this.position -= keep;
+    return output;
+  }
+}
+
+function drawLiveScore(test) {
+  const canvas = test.canvas, box = canvas.getBoundingClientRect();
+  const scale = window.devicePixelRatio || 1;
+  const width = Math.max(240, Math.floor(box.width));
+  const height = Math.max(120, Math.floor(box.height));
+  const pixelWidth = Math.round(width * scale), pixelHeight = Math.round(height * scale);
+  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+    canvas.width = pixelWidth; canvas.height = pixelHeight;
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(pixelWidth / width, 0, 0, pixelHeight / height, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  const left = 30, right = 8, top = 8, bottom = 20;
+  const plotWidth = width - left - right, plotHeight = height - top - bottom;
+  ctx.strokeStyle = 'rgba(154,186,128,0.18)'; ctx.lineWidth = 1;
+  ctx.fillStyle = '#7a9a68'; ctx.font = '9px DM Mono, monospace';
+  for (const score of [0, 0.5, 1]) {
+    const y = top + (1 - score) * plotHeight;
+    ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(left + plotWidth, y); ctx.stroke();
+    ctx.fillText(score.toFixed(1), 2, y + 3);
+  }
+  const thresholdY = top + 0.5 * plotHeight;
+  ctx.strokeStyle = '#c8a040'; ctx.setLineDash([4, 4]);
+  ctx.beginPath(); ctx.moveTo(left, thresholdY); ctx.lineTo(left + plotWidth, thresholdY); ctx.stroke();
+  ctx.setLineDash([]); ctx.fillStyle = '#c8a040'; ctx.fillText('0.50', left + 3, thresholdY - 4);
+  const now = performance.now(), earliest = now - 12000;
+  test.scores = test.scores.filter(point => point.time >= earliest);
+  if (!test.scores.length) return;
+  ctx.strokeStyle = '#9aba80'; ctx.lineWidth = 2; ctx.beginPath();
+  test.scores.forEach((point, index) => {
+    const x = left + Math.max(0, (point.time - earliest) / 12000) * plotWidth;
+    const y = top + (1 - Math.max(0, Math.min(1, point.score))) * plotHeight;
+    if (index) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+  });
+  ctx.stroke();
+  ctx.fillStyle = '#7a9a68'; ctx.fillText('12s ago', left, height - 5); ctx.fillText('now', width - 27, height - 5);
+}
+
+function scheduleLiveScoreDraw(test) {
+  if (test.chartFrame) return;
+  test.chartFrame = requestAnimationFrame(() => {
+    test.chartFrame = null;
+    if (liveTest !== test) return;
+    drawLiveScore(test);
+  });
+}
+
+function sendLivePcm(test, samples) {
+  for (const sample of samples) {
+    test.pcm[test.pcmLength++] = Math.max(-32768, Math.min(32767, Math.round(sample * 32767)));
+    if (test.pcmLength !== 1280) continue;
+    test.ws.send(test.pcm.buffer.slice(0));
+    test.pcmLength = 0;
+  }
+}
+
+function updateMicLevel(label, samples) {
+  let sum = 0;
+  for (const sample of samples) sum += sample * sample;
+  const rms = Math.sqrt(sum / Math.max(1, samples.length));
+  label.textContent = `MIC ${rms > 0 ? (20 * Math.log10(rms)).toFixed(0) : '-∞'} dBFS`;
+}
+
+function stopLiveTest(message = '') {
+  const test = liveTest;
+  if (!test) return;
+  liveTest = null;
+  if (test.chartFrame) cancelAnimationFrame(test.chartFrame);
+  test.processor.disconnect(); test.source.disconnect();
+  test.stream.getTracks().forEach(track => track.stop());
+  test.context.close().catch(() => {});
+  if (test.ws.readyState < WebSocket.CLOSING) test.ws.close();
+  test.button.dataset.live = ''; test.button.textContent = '🎤 Try it';
+  test.panel.style.display = 'none';
+  if (message) {
+    const verdict = test.card.querySelector('.verdict');
+    verdict.style.display = ''; verdict.className = 'verdict no'; verdict.textContent = message;
+  }
+  refresh();
+}
+
+async function startLiveTest(card, name, button) {
+  if (liveTest) stopLiveTest();
+  const panel = card.querySelector('[data-live-score]');
+  const stateLabel = panel.querySelector('[data-live-state]');
+  const scoreLabel = panel.querySelector('[data-live-value]');
+  const levelLabel = panel.querySelector('[data-live-level]');
+  const canvas = panel.querySelector('[data-live-canvas]');
+  let stream, context, source, processor, ws;
+  try {
+    panel.style.display = ''; stateLabel.textContent = 'requesting microphone';
+    stream = await navigator.mediaDevices.getUserMedia({audio: {
+      channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+    }});
+    context = new (window.AudioContext || window.webkitAudioContext)({sampleRate: 16000, latencyHint: 'interactive'});
+    await context.resume();
+    source = context.createMediaStreamSource(stream);
+    await context.audioWorklet.addModule('/live-mic-worklet.js');
+    processor = new AudioWorkletNode(context, 'live-mic-processor', {
+      channelCount: 1, processorOptions: {frameSamples: Math.round(context.sampleRate * 0.08)},
+    });
+    const url = new URL(`/api/wakewords/${encodeURIComponent(name)}/live-score`, window.location.href);
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(url);
+    await new Promise((resolve, reject) => {
+      ws.onopen = resolve;
+      ws.onerror = () => reject(new Error('could not connect to the live scorer'));
+    });
+    const test = {card, button, panel, stateLabel, scoreLabel, canvas, stream, context, source, processor, ws,
+                  resampler: new MicResampler(context.sampleRate), pcm: new Int16Array(1280), pcmLength: 0,
+                  scores: [], chartFrame: null};
+    liveTest = test;
+    button.dataset.live = '1'; button.textContent = '⏹ Stop live test';
+    stateLabel.textContent = 'listening'; scheduleLiveScoreDraw(test);
+    ws.onmessage = event => {
+      const result = JSON.parse(event.data);
+      if (result.error) return stopLiveTest(`Live scoring failed: ${result.error}`);
+      const score = Number(result.score || 0);
+      scoreLabel.textContent = score.toFixed(3);
+      test.scores.push({time: performance.now(), score});
+      scheduleLiveScoreDraw(test);
+    };
+    ws.onclose = () => { if (liveTest === test) stopLiveTest('Live score connection closed.'); };
+    processor.onprocessorerror = () => stopLiveTest('Browser microphone processor stopped unexpectedly.');
+    processor.port.onmessage = event => {
+      if (liveTest !== test || ws.readyState !== WebSocket.OPEN) return;
+      const chunk = new Float32Array(event.data);
+      updateMicLevel(levelLabel, chunk);
+      sendLivePcm(test, test.resampler.push(chunk));
+    };
+    source.connect(processor); processor.connect(context.destination);
+  } catch (error) {
+    if (processor) processor.disconnect();
+    if (source) source.disconnect();
+    if (context) context.close().catch(() => {});
+    if (stream) stream.getTracks().forEach(track => track.stop());
+    if (ws && ws.readyState < WebSocket.CLOSING) ws.close();
+    panel.style.display = 'none';
+    const verdict = card.querySelector('.verdict');
+    verdict.style.display = ''; verdict.className = 'verdict no';
+    verdict.textContent = 'Microphone or live scorer unavailable (needs HTTPS or localhost and microphone permission).';
+  }
 }
 
 /* Turn `forge.py test` output into a plain-language verdict */
@@ -623,6 +804,20 @@ $('wakewords').addEventListener('click', async e => {
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({samples, languages, voices, qps})});
     refresh();
+  } else if (act === 'prune-gtts') {
+    const preview = await api(`/api/wakewords/${name}/google-tts-prune`, {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: '{}'});
+    if (!preview.clips) return alert('No generated Chirp clips are outside the saved locale and voice selection.');
+    const groups = preview.groups.slice(0, 40).map(g =>
+      `${g.directory}: ${g.locale} / ${g.voice} (${g.clips})`).join('\n');
+    const more = preview.groups.length > 40 ? `\n...and ${preview.groups.length - 40} more group(s)` : '';
+    const message = `Delete ${preview.clips} generated Chirp clip(s) outside:\n` +
+      `Locales: ${preview.selection.languages}\nVoices: ${preview.selection.voices}\n\n${groups}${more}`;
+    if (!confirm(message)) return;
+    const result = await api(`/api/wakewords/${name}/google-tts-prune`, {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({confirm: true})});
+    alert(`Deleted ${result.deleted} generated Chirp clip(s). Retrain to rebuild features.`);
+    refresh();
   } else if (act === 'test') {
     const input = card.querySelector('input[type=file]');
     input.onchange = async () => {
@@ -663,35 +858,8 @@ $('wakewords').addEventListener('click', async e => {
     input.click();
     return;
   } else if (act === 'mic') {
-    const v = card.querySelector('.verdict');
-    if (btn.dataset.rec) {
-      btn.dataset.rec = ''; btn.textContent = '🎤 Try it';
-      window.__rec?.stop();
-      return;
-    }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({audio: true});
-      const rec = new MediaRecorder(stream);
-      const chunks = [];
-      rec.ondataavailable = e => chunks.push(e.data);
-      rec.onstop = async () => {
-        stream.getTracks().forEach(t => t.stop());
-        v.style.display = ''; v.className = 'verdict info'; v.textContent = 'Scoring…';
-        const fd = new FormData();
-        fd.append('wav', new Blob(chunks, {type: rec.mimeType}), 'mic.webm');
-        const r = await api(`/api/wakewords/${name}/test`, {method: 'POST', body: fd});
-        showVerdict(card, r.output);
-      };
-      window.__rec = rec;
-      rec.start();
-      btn.dataset.rec = '1'; btn.textContent = '⏹ Done';
-      v.style.display = ''; v.className = 'verdict info';
-      v.textContent = 'Recording — say the wake word, then press Done';
-      setTimeout(() => { if (btn.dataset.rec) { btn.dataset.rec = ''; btn.textContent = '🎤 Try it'; rec.stop(); } }, 5000);
-    } catch (err) {
-      v.style.display = ''; v.className = 'verdict no';
-      v.textContent = 'Microphone not available in this browser (needs HTTPS or localhost) — use "Test a recording…" with a phone recording instead';
-    }
+    if (liveTest && liveTest.button === btn) stopLiveTest();
+    else await startLiveTest(card, name, btn);
     return;
   } else if (act === 'del') {
     if (!confirm(`Remove '${name}'? This deletes its training data and model.`)) return;
