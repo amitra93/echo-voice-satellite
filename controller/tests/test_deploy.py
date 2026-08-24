@@ -67,6 +67,7 @@ def test_dashboard_paths_are_ingress_safe():
     index = (static / "index.html").read_text()
     dashboard = (static / "dashboard.html").read_text()
     jsx = (static / "dashboard.jsx").read_text()
+    logic = (static / "dashboard_logic.js").read_text()
     api = (CONTROLLER / "em_api.py").read_text()
     config = (CONTROLLER / "config.yaml").read_text()
 
@@ -80,11 +81,11 @@ def test_dashboard_paths_are_ingress_safe():
     assert "location.replace('/dashboard')" not in index, \
         "index.html must redirect to a relative dashboard path"
 
-    assert "function ingressPath(path)" in jsx, \
-        "dashboard.jsx must relativize absolute paths for ingress"
-    assert "function ingressWebSocketUrl(path)" in jsx, \
-        "dashboard.jsx must build ingress-relative WebSocket URLs"
-    assert "document.baseURI" in jsx, \
+    assert "function ingressPath(path)" in logic, \
+        "dashboard_logic.js must relativize absolute paths for ingress"
+    assert "function ingressWebSocketUrl(path)" in logic, \
+        "dashboard_logic.js must build ingress-relative WebSocket URLs"
+    assert "document.baseURI" in logic, \
         "the WebSocket URL must resolve against the injected <base href>"
     assert "fetch(ingressPath(path)" in jsx, \
         "the shared API helpers must route through ingressPath"

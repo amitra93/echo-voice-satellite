@@ -1,31 +1,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
-
-// ─── Ingress ──────────────────────────────────────────────────────────────────
-
-// Under Home Assistant Ingress the dashboard is mounted below a generated
-// path (e.g. /api/hassio_ingress/<token>/), not at the site root — the
-// server injects a matching <base href> (see em_api.py's
-// _with_ingress_base). Every absolute "/api/..." path in this file has to
-// become relative through this so it resolves under that base instead of
-// bypassing it straight to the root. A no-op outside ingress, where the
-// page's own URL already is the root.
-function ingressPath(path) {
-  return path.startsWith('/') ? `.${path}` : path;
-}
-
-// True when the page is being served through Home Assistant's ingress
-// gateway. Read off the injected <base href> rather than /api/system/status's
-// ha_ingress, so it is available synchronously and to code with no API token
-// — the WebUSB check runs before any of that.
-function isIngress() {
-  return document.baseURI.includes('/hassio_ingress/');
-}
-
-function ingressWebSocketUrl(path) {
-  const url = new URL(ingressPath(path), document.baseURI);
-  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-  return url.toString();
-}
+const DashboardLogic = window.EchoMuseDashboardLogic;
+const { ingressPath, isIngress, ingressWebSocketUrl, wwModelLabel, uptime,
+  relTime, deviceState, eventAccent, wifiBand, turnSegments, onDeviceMode } = DashboardLogic;
 
 // ─── API ──────────────────────────────────────────────────────────────────────
 
@@ -105,29 +81,6 @@ const API = {
 
 // owwModel display label: stock names ("hey_jarvis_v0.1") and custom model
 // file paths ("/app/data/oww_models/hey_clara.onnx") both prettify.
-function wwModelLabel(v) {
-  if (!v) return '—';
-  if (v.endsWith('.onnx')) v = v.split('/').pop().replace(/\.onnx$/, '');
-  return v.replace(/_v[\d.]+$/, '').replace(/_/g, ' ');
-}
-
-function uptime(s) {
-  if (!s) return '—';
-  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
-  if (d > 0) return `${d}d ${h}h`;
-  if (h > 0) return `${h}h ${m}m`;
-  return `${m}m`;
-}
-
-function relTime(ts) {
-  if (!ts) return '—';
-  const d = Date.now() - ts * 1000;
-  if (d < 60000) return `${Math.floor(d / 1000)}s ago`;
-  if (d < 3600000) return `${Math.floor(d / 60000)}m ago`;
-  if (d < 86400000) return `${Math.floor(d / 3600000)}h ago`;
-  return `${Math.floor(d / 86400000)}d ago`;
-}
-
 // Controller-generated device log lines (`device_log` on the shared events
 // socket) are the only progress channel a long shell-plane operation has —
 // the POST that starts it does not return until it is finished. Components
@@ -137,20 +90,6 @@ const _logSubs = new Set();
 function subscribeDeviceLog(fn) { _logSubs.add(fn); return () => _logSubs.delete(fn); }
 function _emitDeviceLog(deviceId, entry) {
   _logSubs.forEach(fn => { try { fn(deviceId, entry); } catch (e) { console.error(e); } });
-}
-
-function deviceState(d) {
-  if (!d.approved)  return { key: 'pending',   label: 'Pending',   color: 'var(--accent-hi)', dot: '#8ab0d0' };
-  if (!d.connected) return { key: 'offline',   label: 'Offline',   color: 'var(--warn)', dot: '#d4703a' };
-  if (d.muted)      return { key: 'muted',     label: 'Muted',     color: 'var(--error)', dot: '#c04040' };
-  if (d.speaking)   return { key: 'speaking',  label: 'Speaking',  color: 'var(--accent)', dot: '#4080d0' };
-  if (d.thinking)   return { key: 'thinking',  label: 'Thinking',  color: 'var(--warn)', dot: '#a08020' };
-  if (d.listening)  return { key: 'listening', label: 'Listening', color: 'var(--ok)', dot: '#40906a' };
-  return               { key: 'idle',      label: 'Idle',      color: 'var(--muted)', dot: '#aaaaaa' };
-}
-
-function eventAccent(level) {
-  return { info: 'var(--ok)', warn: 'var(--warn)', error: 'var(--error)' }[level] || 'var(--muted)';
 }
 
 // ─── Components ───────────────────────────────────────────────────────────────
@@ -487,11 +426,6 @@ function EqCurve({ bands, fs = 22050 }) {
 // Null rather than a guess: "2.4GHz" shown for a device we cannot actually
 // see the band of is worse than showing nothing, since the whole point is
 // spotting a device that has quietly landed on the slower radio.
-function wifiBand(freqMhz) {
-  if (!freqMhz) return null;
-  return freqMhz >= 4900 ? '5GHz' : '2.4GHz';
-}
-
 function SignalBars({ rssi }) {
   // 0 bars = no signal / null, 4 bars = excellent
   const level = rssi == null ? 0
@@ -778,13 +712,6 @@ const TURN_STAGES = [
   { key: 'ha',  label: 'HA response', color: '#1f8a55' },
   { key: 'tts', label: 'TTS + playback', color: '#96660a' },
 ];
-
-function turnSegments(t) {
-  const stt = Math.max(t.stt_latency_ms || 0, 0);
-  const ha  = Math.max(t.ha_latency_ms || 0, 0);
-  const tts = Math.max(t.tts_latency_ms || 0, 0);
-  return { stt, ha, tts, shown: stt + ha + tts };
-}
 
 const HISTORY_PAGE_SIZE = 20;
 
@@ -2586,12 +2513,7 @@ const _STEP_MODE = {
 
 // TWRP is checked first: its banner is "omni_biscuit", which also contains
 // "biscuit", so an Android-first test would call every TWRP device Android.
-function _bannerMode(banner) {
-  const b = (banner || '').toLowerCase();
-  if (b.includes('omni') || b.includes('twrp') || b.includes('recovery')) return 'twrp';
-  if (b.includes('csm') || b.includes('biscuit')) return 'android';
-  return 'unknown';
-}
+const _bannerMode = DashboardLogic.bannerMode;
 
 const _MODE_NAME = { twrp: 'TWRP recovery', android: 'Android' };
 
@@ -5006,14 +4928,7 @@ const STATE_KEYS = ['startupVolume'];
 // every stage claims to be following the fleet (observed on Office, which
 // displayed hey_rhasspy/standard while actually running hey_mycroft/malevolent).
 function effectiveConfig(globalConfig, device) {
-  const secs = device.config_sections ?? [];
-  const own  = device.config || {};
-  const out  = { ...(globalConfig || {}) };
-  Object.keys(own).forEach(k => {
-    const sec = KEY_SECTION[k];
-    if ((sec && secs.includes(sec)) || STATE_KEYS.includes(k)) out[k] = own[k];
-  });
-  return out;
+  return DashboardLogic.effectiveConfig(globalConfig, device, KEY_SECTION, STATE_KEYS);
 }
 
 // ScopeToggle — per-stage Fleet/Device switch. Shown only on a device's
@@ -5097,11 +5012,6 @@ function StageAdvanced({ open, onToggle, disabledStyle, children }) {
 // Mirrors em_shadow.normalise_mode: an unrecognised stored value renders as
 // "Controller" rather than leaving every segment unselected, which would look
 // like a control that had lost its value.
-function onDeviceMode(config) {
-  const v = String(config.owwOnDevice ?? 'off').toLowerCase();
-  return ['off', 'shadow', 'on'].includes(v) ? v : 'off';
-}
-
 function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             shadowCapable = true, mixCapable = true,
                             holdCapable = true, triggerCapable = true }) {

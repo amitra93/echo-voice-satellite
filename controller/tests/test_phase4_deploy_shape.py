@@ -60,6 +60,8 @@ def test_controller_and_device_agree_on_the_test_audio_path():
 
 def test_test_audio_ui_is_capability_gated_and_targets_the_selected_device():
     dashboard = (CONTROLLER / "static" / "dashboard.jsx").read_text()
+    logic = (CONTROLLER / "static" / "dashboard_logic.js").read_text()
+    dashboard = dashboard + "\n" + logic
     assert "includes('test_audio')" in dashboard
     assert "`/api/devices/${device.device_id}/test_audio`" in dashboard
     assert "`/api/devices/${device.device_id}/test_turn`" in dashboard
@@ -112,6 +114,7 @@ def test_query_history_is_a_fleet_section_below_device_provisioning():
 def test_query_history_rows_are_filterable_and_paginated():
     """The central feed must identify each device and be usable past one page."""
     dashboard = (CONTROLLER / "static" / "dashboard.jsx").read_text()
+    dashboard += "\n" + (CONTROLLER / "static" / "dashboard_logic.js").read_text()
 
     assert "const HISTORY_PAGE_SIZE = 20;" in dashboard
     assert 'aria-label="Filter by device"' in dashboard
