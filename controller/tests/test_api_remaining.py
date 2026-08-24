@@ -215,3 +215,48 @@ def test_ota_update_rollback_and_fleet_deploy_decisions(monkeypatch):
     data = json.loads(response.text)
     assert data["started"] == ["dev"]
     assert {item["device_id"] for item in data["skipped"]} == {"old", "pending"}
+
+
+def test_ota_and_shell_helpers_cover_failure_stages(monkeypatch):
+    class ShellWS:
+        def __init__(self):
+            self.sent = []
+            self.parts = [b"output\n", "__CMD_DONE_9f3a__\n"]
+
+        async def send(self, value):
+            self.sent.append(value)
+
+        async def recv(self):
+            return self.parts.pop(0)
+
+        async def close(self):
+            return None
+
+    shell = ShellWS()
+    live = SimpleNamespace(device_id="dev")
+    monkeypatch.setattr(em_api, "_get_device_shell_ws", lambda value: asyncio.sleep(0, result=shell))
+    released = []
+    monkeypatch.setattr(em_api, "_release_shell_ws", lambda *args: asyncio.sleep(0, result=released.append(args)))
+    assert run(em_api._shell_run(live, "echo ok")) == "output"
+    assert shell.sent and released
+    monkeypatch.setattr(em_api, "_stream_file_to_device", lambda *args, **kwargs: asyncio.sleep(0, result=True))
+    assert run(em_api._stream_binary_to_slot(live, b"bin", "server_b")) is True
+
+    failures = []
+    monkeypatch.setattr(em_api, "_push_log_event", lambda *args: asyncio.sleep(0))
+    monkeypatch.setattr(em_api, "_update_failed", lambda *args: asyncio.sleep(0, result=failures.append(args)))
+    monkeypatch.setattr(em_api, "_fetch_binary", lambda *args: asyncio.sleep(0, result=None))
+    monkeypatch.setattr(em_api, "_devices", {"dev": live})
+    monkeypatch.setattr(em_api.db, "get_device", lambda *args: {"firmware_ver": "v1"})
+    monkeypatch.setattr(em_api.db, "set_firmware_previous", lambda *args: None)
+    run(em_api._run_update("dev", {"version": "v2", "url": "u"}))
+    assert "fetch binary" in failures[-1][1].lower()
+
+    failures.clear()
+    monkeypatch.setattr(em_api, "_shell_run", lambda *args, **kwargs: asyncio.sleep(0, result="MIGRATE_FAILED"))
+    run(em_api._run_update("dev", {"version": "v2", "url": "u"}, b"bin"))
+    assert "migration failed" in failures[-1][1].lower()
+
+    monkeypatch.setattr(em_api, "_devices", {})
+    run(em_api._run_rollback("dev", "v1"))
+    assert "disconnected" in failures[-1][1].lower()
