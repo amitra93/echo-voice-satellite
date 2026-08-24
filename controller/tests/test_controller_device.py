@@ -741,6 +741,26 @@ def test_barge_watcher_detects_thinking_and_playback_wakes(monkeypatch):
     asyncio.run(run())
 
 
+def test_wake_capture_snapshot_is_debounced_and_saved_off_loop(monkeypatch):
+    async def run():
+        device = new_device()
+        device.wake_ring.extend(b"ring")
+        device.wake_capture_sec = 2.0
+        saved = []
+        monkeypatch.setattr(em_controller.em_training_captures, "plan_snapshot", lambda *args: b"clip")
+        monkeypatch.setattr(em_controller.em_training_captures, "save", lambda *args: saved.append(args))
+        loop = asyncio.get_running_loop()
+        em_controller._maybe_capture_wake(device, "hey", 0.7, "act", loop)
+        await asyncio.sleep(0)
+        assert saved == [("hey", "dev", b"clip", "act", 0.7)]
+        previous = device._last_capture_mono
+        monkeypatch.setattr(em_controller.em_training_captures, "plan_snapshot", lambda *args: None)
+        em_controller._maybe_capture_wake(device, "hey", 0.8, "miss", loop)
+        assert device._last_capture_mono == previous
+
+    asyncio.run(run())
+
+
 def test_handle_control_rejects_non_register_and_holds_unknown_device_pending(monkeypatch):
     class WS:
         remote_address = ("192.0.2.1", 1234)
