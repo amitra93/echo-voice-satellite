@@ -479,6 +479,44 @@ def test_data_handler_routes_valid_audio_and_vad_sentinel(monkeypatch):
     asyncio.run(run())
 
 
+def test_router_and_shell_handler_reject_invalid_sessions(monkeypatch):
+    class WS:
+        remote_address = ("192.0.2.12", 8767)
+
+        def __init__(self, path="/"):
+            self.path = path
+            self.request = types.SimpleNamespace(path=path)
+            self.closed = False
+
+        async def close(self):
+            self.closed = True
+
+        async def wait_closed(self):
+            return None
+
+    async def run():
+        missing = WS("/shell/")
+        await em_controller.handle_shell(missing, "/shell/")
+        assert missing.closed
+
+        denied = WS("/shell/dev")
+        monkeypatch.setattr(em_controller, "_link_auth_ok", lambda *args: asyncio.sleep(0, result=False))
+        await em_controller.handle_shell(denied, "/shell/dev?pty=1")
+        assert denied.closed
+
+        no_pending = WS("/shell/dev")
+        monkeypatch.setattr(em_controller, "_link_auth_ok", lambda *args: asyncio.sleep(0, result=True))
+        em_controller._shell_pending.pop("dev", None)
+        await em_controller.handle_shell(no_pending, "/shell/dev")
+        assert no_pending.closed
+
+        unknown = WS("/other")
+        await em_controller._route(unknown, False)
+        assert unknown.closed
+
+    asyncio.run(run())
+
+
 def test_handle_control_rejects_non_register_and_holds_unknown_device_pending(monkeypatch):
     class WS:
         remote_address = ("192.0.2.1", 1234)
