@@ -39,9 +39,7 @@ OPTION_ENV_VARS = {
     "music_assistant_url": "MUSIC_ASSISTANT_URL",
 }
 
-if OPTIONS_PATH.is_file():
-    options = json.loads(OPTIONS_PATH.read_text(encoding="utf-8"))
-
+def apply_options(options: dict) -> None:
     for key, value in options.items():
         env_key = OPTION_ENV_VARS.get(key)
         if env_key is None:
@@ -65,4 +63,12 @@ if OPTIONS_PATH.is_file():
             env_value = str(value)
         os.environ.setdefault(env_key, env_value)
 
-os.execvp("python3", ["python3", "-u", "em_controller.py"])
+
+def main() -> None:
+    if OPTIONS_PATH.is_file():
+        apply_options(json.loads(OPTIONS_PATH.read_text(encoding="utf-8")))
+    os.execvp("python3", ["python3", "-u", "em_controller.py"])
+
+
+if __name__ == "__main__":
+    main()

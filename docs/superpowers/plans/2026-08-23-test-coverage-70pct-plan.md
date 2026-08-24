@@ -404,6 +404,16 @@ copying, drift detection, and `main()` check/set-version behavior.
 (`735 passed, 1 skipped`). Remaining
 branches are missing presentation files and the ordinary no-argument write path.
 
+### Controller workstream execution: add-on startup mapping slice (completed 2026-08-23)
+Refactored `controller/em_start.py`'s existing import-time behavior into
+`apply_options()` and `main()` without changing the executable entrypoint.
+Added `controller/tests/test_start.py` covering bool/string conversion, empty
+values, unknown-option warnings, environment precedence, options-file loading,
+and the final `execvp` arguments.
+
+`em_start.py` reached **95.7%** across the full controller suite
+(`737 passed, 1 skipped`). The only uncovered line is the `__main__` guard.
+
 ### Phase 4 — the big lever: `em_api.py` and `em_controller.py`
 This is genuinely necessary — Phases 3+5 alone cap out well short of 70%
 for the controller, because these two files are 48% of production
