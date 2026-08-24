@@ -60,6 +60,7 @@ import em_oww_models
 import em_pki
 import em_player
 import em_recordings
+import em_training_captures
 import em_volume
 import em_sendspin
 import em_scenes
@@ -302,6 +303,14 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/devices/{id}/activity",      _get_device_activity)
     app.router.add_get("/api/devices/{id}/turns/{turn}/audio", _get_turn_audio)
     app.router.add_get("/api/devices/{id}/turns/{turn}/audio/{kind}", _get_turn_audio)
+
+    # Wake-word training captures (admin-only)
+    app.router.add_get("/api/training_captures", _get_training_captures)
+    app.router.add_get("/api/training_captures/{model}/captures", _get_training_capture_list)
+    app.router.add_get("/api/training_captures/{model}/export", _get_training_capture_export)
+    app.router.add_get("/api/training_captures/{model}/audio/{name}", _get_training_capture_audio)
+    app.router.add_post("/api/training_captures/{model}/{name}/label", _post_training_capture_label)
+    app.router.add_delete("/api/training_captures/{model}/{name}", _delete_training_capture)
     app.router.add_post("/api/devices/{id}/wifi",         _post_device_wifi)
     app.router.add_post("/api/devices/{id}/wifi/scan",    _post_device_wifi_scan)
     app.router.add_post("/api/devices/{id}/update",       _post_device_update)
@@ -770,6 +779,116 @@ def _slug(text: str) -> str:
     return out or "device"
 
 
+# ─── Wake-word training captures ─────────────────────────────────────────────
+#
+# Short 16kHz clips captured around wake activations and near-misses
+# (em_training_captures), grouped by wake-word model stem, for an admin to
+# label and hand to oww_forge. ALL admin-only: these are recognisable speech
+# from inside someone's home, the same bar as _get_turn_audio.
+
+@auth.require_admin
+async def _get_training_captures(request: web.Request) -> web.Response:
+    """GET /api/training_captures — wake words with capture files, and their
+    per-bucket counts. ADMIN ONLY."""
+    loop = asyncio.get_event_loop()
+    models = await loop.run_in_executor(None, em_training_captures.list_models)
+    return _ok({"models": models, "untriaged_cap": em_training_captures.UNTRIAGED_CAP})
+
+
+@auth.require_admin
+async def _get_training_capture_list(request: web.Request) -> web.Response:
+    """GET /api/training_captures/{model}/captures?bucket=untriaged — the
+    captures in one bucket, newest first, with parsed metadata. ADMIN ONLY."""
+    model  = request.match_info["model"]
+    bucket = request.query.get("bucket", "untriaged")
+    if em_training_captures.safe_model(model) is None:
+        return _error("bad_request", "invalid wake-word model", 400)
+    if bucket not in em_training_captures.BUCKETS:
+        return _error("bad_request", "bucket must be untriaged/positive/negative", 400)
+    loop = asyncio.get_event_loop()
+    items = await loop.run_in_executor(
+        None, em_training_captures.list_captures, model, bucket
+    )
+    return _ok({"model": model, "bucket": bucket, "captures": items})
+
+
+@auth.require_admin
+async def _get_training_capture_audio(request: web.Request) -> web.Response:
+    """GET /api/training_captures/{model}/audio/{name} — one capture as a WAV.
+    ADMIN ONLY (recognisable speech, same bar as _get_turn_audio)."""
+    model = request.match_info["model"]
+    name  = request.match_info["name"]
+    loop  = asyncio.get_event_loop()
+    path  = await loop.run_in_executor(
+        None, em_training_captures.resolve, model, name
+    )
+    if path is None:
+        return _error("no_capture", "No such capture", 404)
+    return web.FileResponse(
+        path,
+        headers={
+            "Content-Type":        "audio/wav",
+            "Content-Disposition": f'attachment; filename="{name}"',
+            "Cache-Control":       "private, max-age=60",
+        },
+    )
+
+
+@auth.require_admin
+async def _post_training_capture_label(request: web.Request) -> web.Response:
+    """POST /api/training_captures/{model}/{name}/label {label} — move a capture
+    into a bucket, from wherever it is: label an untriaged clip, correct a
+    mislabel (positive↔negative), or send one back to `untriaged`. ADMIN ONLY."""
+    model = request.match_info["model"]
+    name  = request.match_info["name"]
+    body  = await _json_body(request)
+    label = body.get("label")
+    if label not in em_training_captures.BUCKETS:
+        return _error("bad_request",
+                      "label must be positive, negative or untriaged", 400)
+    loop = asyncio.get_event_loop()
+    ok = await loop.run_in_executor(
+        None, em_training_captures.label, model, name, label
+    )
+    if not ok:
+        return _error("no_capture", "No such capture", 404)
+    return _ok({"model": model, "name": name, "label": label})
+
+
+@auth.require_admin
+async def _delete_training_capture(request: web.Request) -> web.Response:
+    """DELETE /api/training_captures/{model}/{name} — discard a capture from
+    whichever bucket holds it. ADMIN ONLY."""
+    model = request.match_info["model"]
+    name  = request.match_info["name"]
+    loop  = asyncio.get_event_loop()
+    ok = await loop.run_in_executor(
+        None, em_training_captures.discard, model, name
+    )
+    if not ok:
+        return _error("no_capture", "No such capture", 404)
+    return _ok({"model": model, "name": name})
+
+
+@auth.require_admin
+async def _get_training_capture_export(request: web.Request) -> web.Response:
+    """GET /api/training_captures/{model}/export — a ZIP of the labelled
+    positive/negative captures, in the layout oww_forge imports. ADMIN ONLY."""
+    model = request.match_info["model"]
+    if em_training_captures.safe_model(model) is None:
+        return _error("bad_request", "invalid wake-word model", 400)
+    loop = asyncio.get_event_loop()
+    data = await loop.run_in_executor(None, em_training_captures.export_zip, model)
+    return web.Response(
+        body=data,
+        headers={
+            "Content-Type":        "application/zip",
+            "Content-Disposition": f'attachment; filename="{_slug(model)}-dataset.zip"',
+            "Cache-Control":       "no-store",
+        },
+    )
+
+
 @auth.require_auth
 async def _get_device_activity(request: web.Request) -> web.Response:
     """GET /api/devices/{id}/activity?days=7 — aggregated activity stats
@@ -1071,6 +1190,14 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         live.ns_asr = bool(effective["nsAsr"])
     if "saveUtterances" in effective:
         live.save_utterances = bool(effective["saveUtterances"])
+    if "saveWakeCaptures" in effective:
+        # Toggling off clears the rolling ring in the wake listener on its next
+        # frame; nothing to do here but mirror the flag.
+        live.save_wake_captures = bool(effective["saveWakeCaptures"])
+    if "wakeCaptureSec" in effective:
+        live.wake_capture_sec = float(effective["wakeCaptureSec"])
+    if "wakeNearMissFloor" in effective:
+        live.wake_near_miss_floor = float(effective["wakeNearMissFloor"])
     if "bargeInEnabled" in effective:
         live.barge_in_enabled = bool(effective["bargeInEnabled"])
     if "bargeInThreshold" in effective:

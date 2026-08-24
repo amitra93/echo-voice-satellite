@@ -4978,7 +4978,7 @@ const STAGE_MONO = "'DM Mono',monospace";
 // be silently wrong.
 const CONFIG_SECTIONS = {
   "playback": ["eqBands", "eqLoudness", "duckDb"],
-  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice"],
+  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "saveWakeCaptures", "wakeCaptureSec", "wakeNearMissFloor"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs"],
@@ -5197,10 +5197,9 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
     ? { name: wwModelLabel(config.owwModel), file: config.owwModel.split('/').pop(), path: config.owwModel, missing: true }
     : null;
 
-  // Sensitivity: map owwThreshold (0.1–0.9) to 1–9 int, inverted (low threshold = eager)
-  const sensitivityToThreshold = v => Number((1.0 - (v - 1) / 8 * 0.8).toFixed(2));
-  const thresholdToSensitivity = t => Math.round((1.0 - t) / 0.8 * 8) + 1;
-  const sensitivity = thresholdToSensitivity(config.owwThreshold ?? 0.5);
+  const threshold = Number(Number(config.owwThreshold ?? 0.5).toFixed(2));
+  const nearMissFloor = Number(Number(config.wakeNearMissFloor ?? 0.05).toFixed(2));
+  const floorConflict = nearMissFloor >= threshold;
 
   const bands = config.eqBands ?? [0,0,0,0,0,0,0,0];
   const RING_SCENES = [
@@ -5335,19 +5334,42 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
           </div>
           <div>
             <div style={inputStyle}>
-              <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--text2)', marginBottom: 6 }}>Sensitivity</div>
-              <input type="range" min={1} max={9} step={1} value={sensitivity}
-                style={{ width: '100%' }}
-                onChange={e => set('owwThreshold', sensitivityToThreshold(Number(e.target.value)))}/>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
-                <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)' }}>Precise</span>
-                <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)' }}>Eager</span>
+              <Slider
+                label="Sensitivity"
+                sub="confidence score required to activate (0.00 = eager, 1.00 = precise)"
+                value={threshold}
+                min={0.01}
+                max={1.00}
+                step={0.01}
+                formatValue={v => v.toFixed(2)}
+                onChange={v => set('owwThreshold', Number(v.toFixed(2)))}
+              />
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: -14, marginBottom: 16 }}>
+                <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)' }}>0.00 (Eager)</span>
+                <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)' }}>1.00 (Precise)</span>
               </div>
             </div>
-            <div style={{ marginTop: 16, ...inputStyle }}>
+            <div style={{ marginTop: 8, ...inputStyle }}>
               <Toggle label="Speex denoise" sub="cleans audio before scoring — try in noisy rooms" value={config.owwSpeexNs ?? false} onChange={v => set('owwSpeexNs', v)}/>
               <Toggle label="Barge-in" sub="wake word interrupts playback — enable AEC first" value={config.bargeInEnabled ?? false} onChange={v => set('bargeInEnabled', v)}/>
-              <Slider label="Barge threshold" sub="wake confidence needed during playback — raise it if a response cuts itself short" value={config.bargeInThreshold ?? 0.05} min={0.05} max={0.9} step={0.05} onChange={v => set('bargeInThreshold', v)}/>
+              <Slider label="Barge threshold" sub="wake confidence needed during playback — raise it if a response cuts itself short" value={config.bargeInThreshold ?? 0.05} min={0.05} max={0.9} step={0.05} formatValue={v => v.toFixed(2)} onChange={v => set('bargeInThreshold', v)}/>
+              <Slider label="Near-miss floor" sub="minimum score to count as a near-miss and log/capture — raise if picking up too much background speech" value={nearMissFloor} min={0.01} max={0.95} step={0.01} formatValue={v => v.toFixed(2)} onChange={v => set('wakeNearMissFloor', Number(v.toFixed(2)))}/>
+              {floorConflict && (
+                <div style={{
+                  fontFamily: mono,
+                  fontSize: 10,
+                  color: 'var(--error)',
+                  marginTop: -10,
+                  marginBottom: 16,
+                  padding: '6px 10px',
+                  borderRadius: 6,
+                  background: 'rgba(210, 45, 0, 0.12)',
+                  border: '1px solid var(--error)',
+                  lineHeight: 1.5,
+                }}>
+                  ⚠️ Near-miss floor ({nearMissFloor.toFixed(2)}) is ≥ activation sensitivity ({threshold.toFixed(2)}). Near-misses will never trigger or record. Lower the near-miss floor or raise the sensitivity threshold.
+                </div>
+              )}
               <Slider label="Arbitration window" sub="ms that the first Echo to hear you silences the others — no added delay; 0 disables" value={config.wakeArbitrationMs ?? 700} min={0} max={2000} step={50} unit="ms" onChange={v => set('wakeArbitrationMs', v)}/>
               {/* Three modes, so a select rather than a toggle. Each option is
                   offered only when the device says it can do it — capability,
@@ -5379,6 +5401,10 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                 <div className="em-label" style={{ marginTop: 6, color: 'var(--muted)' }}>
                   Needs the wake word runtime installed on this Echo (Updates tab) — costs ~0.4 of a core while it runs.
                 </div>
+              )}
+              <Toggle label="Save wake captures" sub="keeps short clips of activations and near-misses to label and retrain — writes speech to disk; review under Settings → Training" value={config.saveWakeCaptures ?? false} onChange={v => set('saveWakeCaptures', v)}/>
+              {(config.saveWakeCaptures ?? false) && (
+                <Slider label="Capture length" sub="seconds of audio before each detection to keep" value={config.wakeCaptureSec ?? 2.0} min={0.5} max={5.0} step={0.5} unit="s" onChange={v => set('wakeCaptureSec', v)}/>
               )}
             </div>
           </div>
@@ -5694,6 +5720,234 @@ function DeployAllModal({ release, devices, deployState, onStarted, onDismiss, o
 // ─── SettingsPanel ─────────────────────────────────────────────────────────────
 // Gear icon → modal with two tabs: Fleet Config and Account.
 
+// WakeTrainingTab — admin triage of captured wake activations / near-misses.
+//
+// Captures are grouped by wake-word model stem. The admin works the untriaged
+// queue one clip at a time: play it, then mark "Should have activated"
+// (positive) or "Should have ignored" (negative) — the label, not what
+// triggered the capture, decides which training bucket it lands in. A finished
+// dataset is downloaded as a ZIP and imported into oww_forge for retraining.
+//
+// The audio is recognisable speech, so every request is admin-only server-side;
+// clips are fetched via API.blob (Bearer-only, no cookie) as object URLs.
+function WakeTrainingTab({ onBacklog }) {
+  const [models, setModels]   = useState(null);   // [{model, counts}]
+  const [model, setModel]     = useState(null);   // selected stem
+  const [queue, setQueue]     = useState([]);     // untriaged captures, newest first
+  const [idx, setIdx]         = useState(0);
+  const [audioUrl, setAudioUrl] = useState(null);
+  const [busy, setBusy]       = useState(false);
+  const [msg, setMsg]         = useState(null);
+  const [exporting, setExporting] = useState(false);
+  const [lastAction, setLastAction] = useState(null); // {name, label} — undo target
+  const urlRef = useRef(null);
+  const audioRef = useRef(null);
+
+  const refreshModels = useCallback(async (keep) => {
+    try {
+      const r = await API.get('/api/training_captures');
+      const list = r.models || [];
+      setModels(list);
+      // Surface the total untriaged backlog to the parent (tab badge), so the
+      // work-to-do is visible without opening this pane.
+      if (onBacklog) onBacklog(list.reduce((n, m) => n + (m.counts.untriaged || 0), 0));
+      const pick = keep && list.some(m => m.model === keep)
+        ? keep
+        : (list.find(m => m.counts.untriaged > 0)?.model || list[0]?.model || null);
+      setModel(pick);
+      return pick;
+    } catch (e) { setMsg({ ok: false, text: e.error || 'Failed to load captures' }); return null; }
+  }, [onBacklog]);
+
+  const loadQueue = useCallback(async (m) => {
+    if (!m) { setQueue([]); return; }
+    try {
+      const r = await API.get(`/api/training_captures/${encodeURIComponent(m)}/captures?bucket=untriaged`);
+      setQueue(r.captures || []);
+      setIdx(0);
+    } catch (e) { setMsg({ ok: false, text: e.error || 'Failed to load queue' }); }
+  }, []);
+
+  useEffect(() => { refreshModels(); }, [refreshModels]);
+  useEffect(() => { setLastAction(null); loadQueue(model); }, [model, loadQueue]);
+  // Keep idx in range as the queue shrinks under it.
+  useEffect(() => { setIdx(i => Math.min(i, Math.max(0, queue.length - 1))); }, [queue.length]);
+
+  // Fetch the current clip's audio as an object URL whenever it changes; revoke
+  // the previous one so blobs don't pile up in memory.
+  const current = queue[idx] || null;
+  useEffect(() => {
+    let cancelled = false;
+    if (urlRef.current) { URL.revokeObjectURL(urlRef.current); urlRef.current = null; }
+    setAudioUrl(null);
+    if (!model || !current) return;
+    API.blob(`/api/training_captures/${encodeURIComponent(model)}/audio/${encodeURIComponent(current.name)}`)
+      .then(b => { if (cancelled) return; const u = URL.createObjectURL(b); urlRef.current = u; setAudioUrl(u); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [model, current]);
+  useEffect(() => () => { if (urlRef.current) URL.revokeObjectURL(urlRef.current); }, []);
+
+  async function act(label) {
+    if (!model || !current || busy) return;
+    const clip = current;
+    setBusy(true); setMsg(null);
+    try {
+      if (label === 'discard') {
+        await API.del(`/api/training_captures/${encodeURIComponent(model)}/${encodeURIComponent(clip.name)}`);
+        setLastAction(null); // a discarded clip is gone — not undoable
+      } else {
+        await API.post(`/api/training_captures/${encodeURIComponent(model)}/${encodeURIComponent(clip.name)}/label`, { label });
+        setLastAction({ name: clip.name, label });
+      }
+      // Drop it from the queue in place so the next clip slides into view
+      // without a full reload.
+      setQueue(q => q.filter(c => c.name !== clip.name));
+      refreshModels(model);
+    } catch (e) { setMsg({ ok: false, text: e.error || 'Action failed' }); }
+    setBusy(false);
+  }
+
+  // Undo the most recent label by sending that clip back to the queue. Only
+  // labels are undoable — a discard deleted the file. The generalised
+  // move-anywhere endpoint (label → untriaged) is what makes this possible.
+  async function undo() {
+    if (!lastAction || busy) return;
+    setBusy(true); setMsg(null);
+    try {
+      await API.post(`/api/training_captures/${encodeURIComponent(model)}/${encodeURIComponent(lastAction.name)}/label`, { label: 'untriaged' });
+      setLastAction(null);
+      await loadQueue(model);
+      refreshModels(model);
+    } catch (e) { setMsg({ ok: false, text: e.error || 'Undo failed' }); }
+    setBusy(false);
+  }
+
+  function replay() {
+    const el = audioRef.current;
+    if (el) { el.currentTime = 0; el.play().catch(() => {}); }
+  }
+
+  // Keyboard triage: A = should-have-activated, I = should-have-ignored,
+  // D = discard, U = undo, Space = replay. Ignored while typing in a field so
+  // the wake-word picker still works normally.
+  useEffect(() => {
+    function onKey(e) {
+      const tag = (e.target.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const k = e.key.toLowerCase();
+      if (k === ' ') { e.preventDefault(); replay(); return; }
+      if (k === 'u') { e.preventDefault(); undo(); return; }
+      if (!current || busy) return;
+      if (k === 'a') { e.preventDefault(); act('positive'); }
+      else if (k === 'i') { e.preventDefault(); act('negative'); }
+      else if (k === 'd') { e.preventDefault(); act('discard'); }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [current, busy, model, lastAction]);
+
+  async function exportDataset() {
+    if (!model) return;
+    setExporting(true); setMsg(null);
+    try {
+      const b = await API.blob(`/api/training_captures/${encodeURIComponent(model)}/export`);
+      const u = URL.createObjectURL(b);
+      const a = document.createElement('a');
+      a.href = u; a.download = `${model}-dataset.zip`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(u), 4000);
+    } catch (e) { setMsg({ ok: false, text: e.error || 'Export failed' }); }
+    setExporting(false);
+  }
+
+  const mono = "'DM Mono',monospace";
+  const sel = models?.find(m => m.model === model);
+
+  if (models === null) {
+    return <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--muted)' }}>Loading…</div>;
+  }
+  if (models.length === 0) {
+    return (
+      <div style={{ maxWidth: 520 }}>
+        <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--text2)', lineHeight: 1.7 }}>
+          No wake captures yet. Turn on <b>Save wake captures</b> under a device's
+          Config → Wake word (or fleet config), and clips of activations and
+          near-misses will collect here to label.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ maxWidth: 620 }}>
+      <div style={{ fontFamily: mono, fontSize: 10, color: 'var(--muted)', marginBottom: 16, lineHeight: 1.6 }}>
+        Play each clip and mark whether the wake word <b>should</b> have fired.
+        Download the dataset when done and import it into oww_forge to retrain.
+        <br/>Keys: <b>A</b> activated · <b>I</b> ignored · <b>D</b> discard · <b>U</b> undo · <b>Space</b> replay.
+      </div>
+
+      {/* Wake-word picker */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 18 }}>
+        <span className="em-label">Wake word</span>
+        <select value={model || ''} onChange={e => setModel(e.target.value)}
+          style={{ fontFamily: mono, fontSize: 12, padding: '6px 10px' }}>
+          {models.map(m => (
+            <option key={m.model} value={m.model}>
+              {m.model} — {m.counts.untriaged} to label
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {sel && (
+        <div style={{ display: 'flex', gap: 8, marginBottom: 18, fontFamily: mono, fontSize: 10, color: 'var(--muted)' }}>
+          <span>untriaged {sel.counts.untriaged}</span>·
+          <span style={{ color: 'var(--ok)' }}>positive {sel.counts.positive}</span>·
+          <span style={{ color: 'var(--error)' }}>negative {sel.counts.negative}</span>
+        </div>
+      )}
+
+      {current ? (
+        <div className="em-panel" style={{ padding: '18px 20px', marginBottom: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, fontFamily: mono, fontSize: 10, color: 'var(--text2)' }}>
+            <span>{current.kind === 'act' ? 'Activation' : 'Near-miss'} · score {current.score.toFixed(3)}</span>
+            <span style={{ color: 'var(--muted)' }}>{current.device_id} · {new Date(current.ts_ms).toLocaleString()}</span>
+          </div>
+          {audioUrl
+            ? <audio ref={audioRef} src={audioUrl} controls autoPlay style={{ width: '100%' }} />
+            : <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--muted)' }}>Loading audio…</div>}
+          <div style={{ display: 'flex', gap: 10, marginTop: 16, flexWrap: 'wrap' }}>
+            <Pill accent disabled={busy} onClick={() => act('positive')}>Should have activated</Pill>
+            <Pill disabled={busy} onClick={() => act('negative')}>Should have ignored</Pill>
+            <Pill danger disabled={busy} onClick={() => act('discard')}>Discard</Pill>
+          </div>
+        </div>
+      ) : (
+        <div className="em-panel" style={{ padding: '18px 20px', marginBottom: 16, fontFamily: mono, fontSize: 11, color: 'var(--muted)' }}>
+          Nothing left to label for this wake word.
+        </div>
+      )}
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, minHeight: 20 }}>
+        {lastAction && (
+          <button onClick={undo} disabled={busy}
+            style={{ background: 'transparent', border: 0, color: 'var(--muted)', cursor: 'pointer', fontFamily: mono, fontSize: 11, textDecoration: 'underline', padding: 0 }}>
+            Undo last ({lastAction.label})
+          </button>
+        )}
+        {msg && <span style={{ fontFamily: mono, fontSize: 11, color: msg.ok ? 'var(--ok)' : 'var(--error)' }}>{msg.text}</span>}
+      </div>
+
+      <Pill disabled={exporting || !sel || (sel.counts.positive + sel.counts.negative === 0)} onClick={exportDataset}>
+        {exporting ? 'Preparing…' : 'Download dataset (.zip)'}
+      </Pill>
+    </div>
+  );
+}
+
+
 function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, isAdmin }) {
   const [tab, setTab]             = useState('fleet');
   const [config, setConfig]       = useState({ ...globalConfig });
@@ -5719,6 +5973,16 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
   const [musicAssistantBusy, setMusicAssistantBusy] = useState(false);
   const [musicAssistantMsg, setMusicAssistantMsg] = useState(null);
   const [sendspinStatus, setSendspinStatus] = useState(null);
+  // Total untriaged wake captures across all wake words — drives the badge on
+  // the Training tab so the labelling backlog is visible without opening it.
+  const [trainingBacklog, setTrainingBacklog] = useState(null);
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    API.get('/api/training_captures')
+      .then(r => setTrainingBacklog((r.models || []).reduce((n, m) => n + (m.counts.untriaged || 0), 0)))
+      .catch(() => {});
+  }, [isAdmin]);
 
   // Object URLs pin their blob in memory until revoked; the panel closing is
   // the last moment we can still reach this one.
@@ -5831,8 +6095,8 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
 
   // Support is admin-only because the endpoint is: the bundle spans the whole
   // fleet, so a tab a non-admin can only be refused by is worse than no tab.
-  const TABS = isAdmin ? ['fleet', 'account', 'integration', 'music', 'support'] : ['fleet', 'account'];
-  const TAB_LABELS = { fleet: 'Config', account: 'Account', integration: 'HA Integration', music: 'Music', support: 'Support' };
+  const TABS = isAdmin ? ['fleet', 'account', 'integration', 'music', 'training', 'support'] : ['fleet', 'account'];
+  const TAB_LABELS = { fleet: 'Config', account: 'Account', integration: 'HA Integration', music: 'Music', training: 'Training', support: 'Support' };
 
   return (
     <div style={{ position:'fixed', inset:0, background:'rgba(180,176,168,0.5)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:200, backdropFilter:'blur(8px)' }}
@@ -5851,7 +6115,12 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
               one tab style across the dashboard. */}
           <div className="em-tabs" style={{ display:'flex', gap:2 }}>
             {TABS.map(t => (
-              <button key={t} onClick={() => setTab(t)} style={{ background: tab === t ? 'linear-gradient(180deg,var(--raised),var(--surface))' : 'transparent', border: tab === t ? '1px solid var(--border-hard)' : '1px solid transparent', borderBottom: tab === t ? '1px solid var(--surface)' : '1px solid transparent', borderRadius: '6px 6px 0 0', fontFamily: "'DM Mono',monospace", fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.1em', padding: '7px 14px', cursor: 'pointer', color: tab === t ? 'var(--text)' : 'var(--muted)', marginBottom: -1, transition: 'color 0.15s' }}>{TAB_LABELS[t]}</button>
+              <button key={t} onClick={() => setTab(t)} style={{ background: tab === t ? 'linear-gradient(180deg,var(--raised),var(--surface))' : 'transparent', border: tab === t ? '1px solid var(--border-hard)' : '1px solid transparent', borderBottom: tab === t ? '1px solid var(--surface)' : '1px solid transparent', borderRadius: '6px 6px 0 0', fontFamily: "'DM Mono',monospace", fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.1em', padding: '7px 14px', cursor: 'pointer', color: tab === t ? 'var(--text)' : 'var(--muted)', marginBottom: -1, transition: 'color 0.15s' }}>
+                {TAB_LABELS[t]}
+                {t === 'training' && trainingBacklog > 0 && (
+                  <span style={{ marginLeft: 6, padding: '1px 6px', borderRadius: 8, background: 'var(--accent)', color: 'var(--accent-tint)', fontSize: 9 }}>{trainingBacklog}</span>
+                )}
+              </button>
             ))}
           </div>
         </div>
@@ -5963,6 +6232,10 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                 </div>
               ))}
             </div>
+          )}
+
+          {tab === 'training' && isAdmin && (
+            <WakeTrainingTab onBacklog={setTrainingBacklog}/>
           )}
 
           {tab === 'support' && (

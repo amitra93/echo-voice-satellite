@@ -79,6 +79,7 @@ import em_tap_burst
 import em_turn_engine as turn_engine
 import em_ha_sidechannels as ha_sidechannels
 import em_oww_models
+import em_training_captures
 import em_player
 import em_volume
 import em_sendspin
@@ -157,6 +158,11 @@ DEVICE_APPROVAL = os.environ.get("DEVICE_APPROVAL", "strict")
 
 # Mic
 CHUNK_BYTES          = 1280 * 2   # 2560 bytes = 80ms at 16kHz S16_LE mono
+
+# Wake-capture pre-roll ring bound (em_training_captures owns the window
+# policy — RING_MAX_SEC, the debounce, and the snapshot decision). 5s at 16kHz
+# mono S16 = 160KB per device.
+WAKE_RING_MAX_BYTES  = int(em_training_captures.RING_MAX_SEC * em_training_captures.SAMPLE_RATE * 2)
 # NOTE: VOICE_PREROLL_DISCARD lives in em_turn_engine.py (turn_engine.VOICE_PREROLL_DISCARD)
 # — it's used there in _stream_mic_audio, and _run_voice_locked below reads it
 # via that single source of truth rather than keeping a second copy here that
@@ -320,6 +326,19 @@ class Device:
         # _persist_turn (which owns the write — it has the rowid the
         # filename is keyed on) and consumed there.
         self.last_utterance_pcm: bytes | None = None
+        # saveWakeCaptures: opportunistic capture of the pre-roll before a wake
+        # ACTIVATION or NEAR-MISS, for labelling + oww_forge retraining
+        # (em_training_captures). Controller-side off the wake stream the OWW
+        # listener already holds — no device change. wake_ring is the rolling
+        # buffer of recent wake-stream PCM (bounded to WAKE_RING_MAX_BYTES);
+        # wake_capture_sec is how much of it a clip keeps; _last_capture_mono
+        # debounces the many frames one utterance crosses the near-miss floor
+        # on into a single clip.
+        self.save_wake_captures: bool = False
+        self.wake_capture_sec:  float = 2.0
+        self.wake_near_miss_floor: float = 0.05
+        self.wake_ring: bytearray = bytearray()
+        self._last_capture_mono: float = 0.0
         self.eq_bands:      list  = [0.0] * 8
         self.eq_loudness:   bool  = False
         # LED ring scene — render-ready palette/spinner from em_scenes,
@@ -1770,6 +1789,33 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
 
 # ─── Wake word listener ───────────────────────────────────────────────────────
 
+def _maybe_capture_wake(device: Device, model_key: str, score: float,
+                        kind: str, loop) -> None:
+    """
+    Snapshot the wake-capture ring for one detection, debounced per device.
+
+    Runs on the wake listener's hot path, so it must not block: the decision and
+    slice are pure (em_training_captures.plan_snapshot, unit-tested) and the WAV
+    write is dispatched to the default executor. The refractory clock is the
+    loop's monotonic time — em_training_captures.save stamps the wall-clock
+    filename itself, since this module deliberately does not import `time` (the
+    shadow-clock reasoning). The debounce window is armed only when a clip is
+    actually produced.
+    """
+    now = loop.time()
+    pcm = em_training_captures.plan_snapshot(
+        device.wake_ring, device.wake_capture_sec, now, device._last_capture_mono
+    )
+    if pcm is None:
+        return
+    device._last_capture_mono = now
+    dev_id = device.device_id
+    loop.run_in_executor(
+        None,
+        lambda: em_training_captures.save(model_key, dev_id, pcm, kind, score),
+    )
+
+
 async def wake_word_listener(device: Device):
     loop = asyncio.get_event_loop()
 
@@ -1899,6 +1945,16 @@ async def wake_word_listener(device: Device):
                 continue
 
             buf.extend(payload)
+            # Feed the wake-capture ring off the same continuous stream OWW
+            # scores (em_training_captures). Only while the feature is on and
+            # the speaker is silent — TTS echo is not pre-roll worth keeping —
+            # and cleared the moment it is turned off so no stale speech lingers.
+            if device.save_wake_captures and not device.speaking:
+                device.wake_ring.extend(payload)
+                if len(device.wake_ring) > WAKE_RING_MAX_BYTES:
+                    del device.wake_ring[:len(device.wake_ring) - WAKE_RING_MAX_BYTES]
+            elif not device.save_wake_captures and device.wake_ring:
+                device.wake_ring.clear()
             while len(buf) >= CHUNK_BYTES:
                 frame   = bytes(buf[:CHUNK_BYTES])
                 del buf[:CHUNK_BYTES]
@@ -1958,8 +2014,9 @@ async def wake_word_listener(device: Device):
                 eff_threshold = device.oww_threshold
                 if device.barge_in_enabled and em_player.is_playing(device.device_id):
                     eff_threshold = min(eff_threshold, device.barge_threshold)
+                near_miss_floor = float(getattr(device, "wake_near_miss_floor", 0.05))
 
-                if 0.05 < score < eff_threshold:
+                if near_miss_floor < score < eff_threshold:
                     device.oww_near_misses += 1
                     nm_pending += 1
                     nm_max = max(nm_max, float(score))
@@ -2013,6 +2070,24 @@ async def wake_word_listener(device: Device):
                 source = em_shadow.decide_wake_source(
                     device.oww_on_device, dev_wake, ctrl_hit
                 )
+
+                # Wake-capture: snapshot the pre-roll ring for labelling +
+                # retraining. An activation (whoever triggered it) is an "act"
+                # clip; a below-threshold score above the near-miss floor is a
+                # "miss". The label the admin later applies, not this kind,
+                # decides positive/negative — see em_training_captures.
+                if device.save_wake_captures:
+                    if ctrl_hit or source == "device":
+                        _cap_kind = "act"
+                    elif score > near_miss_floor:
+                        _cap_kind = "miss"
+                    else:
+                        _cap_kind = None
+                    if _cap_kind is not None:
+                        _maybe_capture_wake(
+                            device, model_key, float(score), _cap_kind, loop
+                        )
+
                 if ctrl_hit and device.oww_on_device == em_shadow.MODE_ON:
                     # "on" mode, and this controller heard it too. Recorded for
                     # the comparison and nothing else — the device is driving.
@@ -2520,6 +2595,9 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         device.oww_speex_ns  = bool(config.get("owwSpeexNs", False))
         device.ns_asr        = bool(config.get("nsAsr", False))
         device.save_utterances = bool(config.get("saveUtterances", False))
+        device.save_wake_captures = bool(config.get("saveWakeCaptures", False))
+        device.wake_capture_sec = float(config.get("wakeCaptureSec", 2.0))
+        device.wake_near_miss_floor = float(config.get("wakeNearMissFloor", 0.05))
         device.barge_in_enabled = bool(config.get("bargeInEnabled", False))
         device.barge_threshold  = float(config.get("bargeInThreshold", 0.6))
         device.button_single_tap_event = bool(

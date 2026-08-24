@@ -30,7 +30,8 @@ SECTIONS: dict[str, dict] = {
         "keys": [
             "owwModel", "owwThreshold", "owwSpeexNs",
             "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs",
-            "owwOnDevice",
+            "owwOnDevice", "saveWakeCaptures", "wakeCaptureSec",
+            "wakeNearMissFloor",
         ],
     },
     "microphones": {

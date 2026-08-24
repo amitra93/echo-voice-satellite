@@ -77,6 +77,7 @@ COPY em_tap_burst.py .
 COPY em_player.py .
 COPY em_config_sections.py .
 COPY em_recordings.py .
+COPY em_training_captures.py .
 COPY em_turnclock.py .
 COPY em_firmware.py .
 COPY em_announce.py .

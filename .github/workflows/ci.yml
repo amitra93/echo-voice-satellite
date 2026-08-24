@@ -21,10 +21,13 @@ jobs:
         # pyyaml is for the add-on config parity tests (test_channels.py):
         # config.yaml is genuinely YAML and hand-parsing it to compare
         # options and schema would be fragile in exactly the way that test
-        # exists to prevent. Pure Python and dependency-free — nothing like
-        # pulling openwakeword or aiohttp in here, which is what the
-        # minimal-test-env rule is actually about.
-        run: pip install pytest numpy scipy pyyaml
+        # exists to prevent. Pure Python and dependency-free.
+        #
+        # aiohttp is the real web framework em_api.py imports at module
+        # level, needed by handler-level tests driven through aiohttp.test_utils.
+        # websockets remains stubbed via sys.modules, while openwakeword and
+        # onnxruntime stay out: nothing here needs a real wake-word model.
+        run: pip install pytest numpy scipy pyyaml aiohttp
       - name: Run pytest
         working-directory: controller
         run: python -m pytest tests/ -v

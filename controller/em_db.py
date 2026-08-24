@@ -31,6 +31,7 @@ from typing import Optional
 
 import em_config_sections
 import em_recordings
+import em_training_captures
 
 log = logging.getLogger("echomuse.db")
 
@@ -193,6 +194,20 @@ DEFAULT_DEVICE_CONFIG = {
     # only (the device never sees the audio again); the key rides the
     # config channel and the device ignores it, same as wakeArbitrationMs.
     "saveUtterances":   False,
+    # saveWakeCaptures: keep short 16kHz clips of the audio leading up to a
+    # wake ACTIVATION or NEAR-MISS, for an admin to label and hand to
+    # oww_forge for retraining (em_training_captures). Captured entirely
+    # controller-side off the always-on wake stream the OWW listener already
+    # scores — the device never sees the audio again and ignores this key,
+    # same as saveUtterances. Default OFF: like saveUtterances this writes
+    # recognisable speech to disk, so enabling it is a decision. wakeCaptureSec
+    # sets how many seconds of pre-roll each clip holds.
+    "saveWakeCaptures": False,
+    "wakeCaptureSec":   2.0,
+    # wakeNearMissFloor: minimum openWakeWord score to register as a near-miss
+    # (for the near-miss counters, logs, and saveWakeCaptures snapshotting).
+    # Default 0.05. Below this is treated as background room noise.
+    "wakeNearMissFloor": 0.05,
     # bleProxyEnabled: BLE proxy (device-side passive scan over the raw HCI
     # transport, forwarded to HA as a separate ESPHome bluetooth_proxy
     # device — em_ble_proxy.py). Default off: enabling durably disables the
@@ -1409,6 +1424,12 @@ def delete_device(device_id: str) -> None:
             log.info(f"[db] Removed {removed} recording(s) for {device_id}")
     except Exception as e:
         log.warning(f"[db] Recording cleanup failed for {device_id}: {e}")
+    try:
+        removed = em_training_captures.delete_device(device_id)
+        if removed:
+            log.info(f"[db] Removed {removed} wake-capture(s) for {device_id}")
+    except Exception as e:
+        log.warning(f"[db] Wake-capture cleanup failed for {device_id}: {e}")
     log.info(f"[db] Device deleted: {device_id}")
 
 

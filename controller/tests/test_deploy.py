@@ -1125,6 +1125,30 @@ def test_recordings_and_transcripts_are_admin_only():
         "_redact_turns_for must remove stt_text")
 
 
+def test_wake_training_captures_are_admin_only():
+    """
+    Wake-capture clips are recognisable speech from inside someone's home —
+    the same bar as saved utterances (test above). Every endpoint that lists,
+    plays, moves, discards or exports them must be admin-only, enforced
+    server-side rather than in the dashboard: a UI-only rule protects nothing
+    from anyone who opens the network tab.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    handlers = [
+        "_get_training_captures",
+        "_get_training_capture_list",
+        "_get_training_capture_audio",
+        "_post_training_capture_label",
+        "_delete_training_capture",
+        "_get_training_capture_export",
+    ]
+    for name in handlers:
+        m = re.search(rf"(@auth\.require_\w+)\s*\nasync def {name}\b", src)
+        assert m, f"{name} not found or has no auth decorator"
+        assert m.group(1) == "@auth.require_admin", (
+            f"{name} must be admin-only — wake captures are raw speech")
+
+
 def test_role_changes_refuse_to_strand_the_install():
     """
     PATCH /api/users/{id} must refuse to demote the last admin. On the
