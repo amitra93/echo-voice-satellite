@@ -324,6 +324,17 @@ fake controller.
 `pkg/led` increased from **31.0% to 96.8%**. The LED race suite and full
 host-testable device suite pass.
 
+### Device workstream execution: wakeword fixture slice (completed 2026-08-23)
+Added direct tests in `device/internal/wakeword/fixture/fixture_test.go` with
+small binary fixture builders. Tests cover strict ORT loading and geometry,
+truncation/magic/trailing-data errors, audio chunk decoding, scale-based
+tolerances, length and value diffs, report summaries, and empty-pipeline
+verification. ONNX-backed inference remains covered by its existing package
+tests rather than duplicated here.
+
+`internal/wakeword/fixture` increased from **0% to 74.3%**. The fixture race
+suite and full host-testable device suite pass.
+
 ### Phase 3 — controller quick/medium wins
 `em_auth.py` (session/bcrypt/role logic), `em_db.py`
 (query and migration-fixup logic), `em_oww_assets.py` (LRU eviction,
