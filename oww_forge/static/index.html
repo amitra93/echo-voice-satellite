@@ -397,9 +397,6 @@ function render() {
       <div class="actiongroup">
         <div class="microlabel" style="margin-bottom:6px">Improve accuracy</div>
         <div class="row">
-          <button class="small" data-act="addrec" ${busy() ? 'disabled' : ''}
-            title="The strongest accuracy boost: real recordings of your household saying the phrase">
-            + Family recordings…</button>
           <button class="small" data-act="gtts" ${busy() ? 'disabled' : ''}
             title="Adds Chirp 3 positive samples for every selected locale and voice">+ Google Chirp 3 voices</button>
           <button class="small" data-act="import" ${busy() ? 'disabled' : ''}
@@ -416,6 +413,10 @@ function render() {
           <label>Samples per voice per locale <input data-gtts-samples type="number" min="1" value="${w.google_tts_samples_per_voice}"
             ${busy() ? 'disabled' : ''}></label>
           <div class="hint">A voice available for two selected locales receives this many clips for each locale. Confusable negatives receive the same matrix.</div>
+          <div class="row" style="margin-top:6px">
+            <button class="small" data-act="save-gtts" ${busy() ? 'disabled' : ''}
+              title="Save Google TTS locales, voices, and sample count without starting synthesis">Save Google TTS config</button>
+          </div>
         </div>
         <div class="dataset-options" style="margin-top:10px">
           <div class="microlabel">Confusable phrases</div>
@@ -504,8 +505,8 @@ function showVerdict(card, output) {
   if (!scores.length) { v.className = 'verdict no'; v.textContent = '✗ Could not score that audio'; return; }
   const best = Math.max(...scores);
   if (best >= 0.5) { v.className = 'verdict ok'; v.textContent = `✓ Heard it! (score ${best.toFixed(2)} — the device would wake)`; }
-  else if (best >= 0.2) { v.className = 'verdict info'; v.textContent = `~ Close but under the wake threshold (score ${best.toFixed(2)} of 0.5 needed) — try again closer to the mic, or add family recordings and retrain`; }
-  else { v.className = 'verdict no'; v.textContent = `✗ Not recognised (score ${best.toFixed(2)}) — add family recordings or a spelling variant, then retrain`; }
+  else if (best >= 0.2) { v.className = 'verdict info'; v.textContent = `~ Close but under the wake threshold (score ${best.toFixed(2)} of 0.5 needed) — try again closer to the mic, or import labeled captures and retrain`; }
+  else { v.className = 'verdict no'; v.textContent = `✗ Not recognised (score ${best.toFixed(2)}) — import labeled captures or a spelling variant, then retrain`; }
 }
 
 $('coreDetail').onclick = () => {
@@ -602,26 +603,28 @@ $('wakewords').addEventListener('click', async e => {
     const phrases = card.querySelector('[data-confusables]').value
       .split(',').map(value => value.trim()).filter(Boolean);
     await api(`/api/wakewords/${name}/confusables`, {method: 'POST',
-      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({phrases})});
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({phrases})});
     refresh();
-  } else if (act === 'test' || act === 'addrec') {
+  } else if (act === 'save-gtts') {
+    const samples = +card.querySelector('[data-gtts-samples]').value;
+    const languages = card.querySelector('[data-gtts-languages]').value.trim();
+    const voices = card.querySelector('[data-gtts-voices]').value.trim();
+    if (!Number.isInteger(samples) || samples < 1 || !languages) return alert('Enter one or more locales and a positive samples-per-pair value.');
+    await api(`/api/wakewords/${name}/google-tts-config`, {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({samples, languages, voices})});
+    refresh();
+  } else if (act === 'test') {
     const input = card.querySelector('input[type=file]');
     input.onchange = async () => {
       const fd = new FormData();
-      for (const f of input.files) fd.append(act === 'test' ? 'wav' : 'audio', f);
+      for (const f of input.files) fd.append('wav', f);
       const v = card.querySelector('.verdict');
       v.style.display = ''; v.className = 'verdict info';
-      v.textContent = act === 'test' ? 'Scoring…' : 'Adding recordings…';
-      if (act === 'test') {
-        const r = await api(`/api/wakewords/${name}/test`, {method: 'POST', body: fd});
-        showVerdict(card, r.output);
-      } else {
-        const r = await api(`/api/wakewords/${name}/samples`, {method: 'POST', body: fd});
-        v.className = r.errors.length ? 'verdict no' : 'verdict ok';
-        v.textContent = `✓ Added ${r.added} recording(s) — press Retrain to teach the model with them` +
-          (r.errors.length ? ` (${r.errors.length} failed)` : '');
-        refresh();
-      }
+      v.textContent = 'Scoring…';
+      const r = await api(`/api/wakewords/${name}/test`, {method: 'POST', body: fd});
+      showVerdict(card, r.output);
     };
     input.click();
     return;

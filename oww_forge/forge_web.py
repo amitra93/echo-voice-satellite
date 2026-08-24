@@ -297,38 +297,6 @@ async def api_import_dataset(request):
     return web.json_response({"ok": True, "counts": counts})
 
 
-async def api_add_samples(request):
-    """Real recordings (you, the kids) → the positive training set. The
-    generate step counts existing clips toward n_samples, so these displace
-    synthetic ones rather than growing the set."""
-    name = request.match_info["name"]
-    _require_wakeword(name)
-    import yaml as _yaml
-
-    cfg = _yaml.safe_load((forge.WAKEWORDS / name / "config.yml").read_text())
-    base = Path(cfg["output_dir"]) / cfg["model_name"]
-    train_dir, test_dir = base / "positive_train", base / "positive_test"
-    train_dir.mkdir(parents=True, exist_ok=True)
-    test_dir.mkdir(parents=True, exist_ok=True)
-    uploads = await _save_uploads(request, "audio")
-    if not uploads:
-        raise web.HTTPBadRequest(text="no audio uploaded")
-    n_ok, errors = 0, []
-    try:
-        for i, src in enumerate(uploads):
-            out_dir = test_dir if (i + 1) % 10 == 0 else train_dir
-            dest = out_dir / f"real_{int(time.time())}_{i}.wav"
-            try:
-                _to_wav16k(src, dest)
-                n_ok += 1
-            except Exception as e:
-                errors.append(f"{src.name}: {e}")
-    finally:
-        for p in uploads:
-            p.unlink(missing_ok=True)
-    return web.json_response({"ok": not errors, "added": n_ok, "errors": errors})
-
-
 async def api_build(request):
     name = request.match_info["name"]
     _require_wakeword(name)
@@ -379,6 +347,31 @@ async def api_confusables(request):
     cfg["custom_negative_phrases"] = normalized
     cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
     return web.json_response({"ok": True, "phrases": normalized})
+
+
+async def api_save_google_tts_config(request):
+    """Persist Google TTS fields without starting a synthesis job."""
+    name = request.match_info["name"]
+    _require_wakeword(name)
+    body = await request.json()
+    try:
+        samples = int(body.get("samples"))
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(text="samples per voice/locale must be an integer")
+    if samples < 1:
+        raise web.HTTPBadRequest(text="samples per voice/locale must be positive")
+    languages = str(body.get("languages") or "").strip()
+    if not languages:
+        raise web.HTTPBadRequest(text="at least one locale is required")
+    cfg_path = forge.WAKEWORDS / name / "config.yml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    cfg["google_tts_samples_per_voice"] = samples
+    cfg["google_tts_languages"] = languages
+    cfg["google_tts_voices"] = str(body.get("voices") or "").strip()
+    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    return web.json_response({"ok": True, "samples": samples,
+                              "languages": languages,
+                              "voices": cfg["google_tts_voices"]})
 
 
 async def api_google_tts(request):
@@ -487,11 +480,11 @@ def make_app() -> web.Application:
     app.router.add_post("/api/wakewords/{name}/build", api_build)
     app.router.add_post("/api/wakewords/{name}/datasets", api_dataset_options)
     app.router.add_post("/api/wakewords/{name}/confusables", api_confusables)
+    app.router.add_post("/api/wakewords/{name}/google-tts-config", api_save_google_tts_config)
     app.router.add_post("/api/wakewords/{name}/google-tts", api_google_tts)
     app.router.add_get("/api/google-tts/voices", api_google_tts_voices)
     app.router.add_post("/api/wakewords/{name}/test", api_test)
     app.router.add_post("/api/wakewords/{name}/evaluate", api_evaluate)
-    app.router.add_post("/api/wakewords/{name}/samples", api_add_samples)
     app.router.add_post("/api/wakewords/{name}/import-dataset", api_import_dataset)
     app.router.add_delete("/api/wakewords/{name}", api_delete)
     app.router.add_get("/api/models/{name}.onnx", api_model_download)

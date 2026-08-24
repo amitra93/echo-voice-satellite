@@ -185,18 +185,17 @@ US vowel, not a British "clar-ra". Three levers, in increasing strength:
    small classifier makes the auto-trainer more conservative (the two-spelling
    `hey_clarra` trained to *zero* false positives/hour but lower recall than
    single-spelling `hey_clara`, 0.43 vs 0.52 on the augmented test set) —
-   if a variant model feels deaf, add real recordings and retrain, or lower
+   if a variant model feels deaf, import labeled captures and retrain, or lower
    the device's `owwThreshold` a notch.
 2. **Google TTS mix-in** — Forge uses Chirp 3 voices. Select exact locales
    and optionally provide a comma-separated list of exact voice names. The
    sample count applies to every usable locale/voice pair, so `500` over two
    voices available in `en-IN` and `en-PH` produces 2,000 positive clips.
-3. **Real recordings** (best) — the UI's "+ Recordings…" button (or dropping
-   16kHz wavs into `positive_train/`) adds actual samples of you and the
-   kids to the training set; any phone recording format works (ffmpeg
-   converts). Even 20–50 real clips measurably pull the model toward the
-   voices that matter. They're augmented with reverb/noise like everything
-   else, and displace synthetic clips rather than growing the set.
+3. **Controller-labeled captures** (best) — use EchoMuse's controller to
+   capture activations and near-misses, then label them as "should have
+   activated" or "should have ignored". Import the exported ZIP below so the
+   positive and negative labels are preserved; do not add arbitrary speech to
+   the positive set.
 
 ### Import labelled captures from EchoMuse
 
@@ -216,8 +215,9 @@ set** (the same `TEST_FRACTION` as Google-TTS positives) so the held-out
 evaluation stays honest. Positives labelled from near-misses teach the model
 the voices/pronunciations it is currently missing; negatives labelled from
 false activations are the cheapest fix for false wakes — the real-world
-equivalent of `custom_negative_phrases`. Imported clips displace synthetic ones
-at generate time, exactly like family recordings.
+equivalent of `custom_negative_phrases`. Imported clips displace synthetic
+ones at generate time while preserving the positive/negative labels from the
+controller.
 
 ### Testing a built model
 
