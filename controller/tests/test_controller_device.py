@@ -802,6 +802,56 @@ def test_wake_listener_triggers_controller_turn_and_restores_listening(monkeypat
     asyncio.run(run())
 
 
+def test_wake_listener_escalates_when_mic_frames_stop_arriving(monkeypatch):
+    class StopListener(Exception):
+        pass
+
+    class Model:
+        def reset(self):
+            return None
+
+        def predict(self, samples):
+            return {"hey": 0.0}
+
+    async def run():
+        device = new_device()
+        device.oww_model = "hey"
+        device.oww_threshold = 0.5
+        starts = []
+        stops = []
+        monkeypatch.setattr(em_controller, "OWWModel", lambda **kwargs: Model())
+        monkeypatch.setattr(em_controller.em_oww_models, "prediction_key", lambda value: "hey")
+
+        async def mic_start():
+            starts.append(True)
+            if len(starts) > 3:
+                raise StopListener()
+
+        async def mic_stop():
+            stops.append(True)
+
+        device.mic_start = mic_start
+        device.mic_stop = mic_stop
+        original_wait_for = em_controller.asyncio.wait_for
+        attempts = 0
+
+        async def timeout_then_stop(awaitable, timeout):
+            nonlocal attempts
+            attempts += 1
+            if attempts <= 3:
+                awaitable.close()
+                raise asyncio.TimeoutError()
+            return await original_wait_for(awaitable, timeout)
+
+        monkeypatch.setattr(em_controller.asyncio, "wait_for", timeout_then_stop)
+        with pytest.raises(StopListener):
+            await em_controller.wake_word_listener(device)
+        assert len(starts) == 4
+        assert len(stops) == 1
+
+    asyncio.run(run())
+
+
 def test_handle_control_rejects_non_register_and_holds_unknown_device_pending(monkeypatch):
     class WS:
         remote_address = ("192.0.2.1", 1234)
