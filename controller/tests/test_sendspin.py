@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import types
 
 import pytest
 
@@ -31,6 +32,12 @@ def test_normalize_server_url(raw, expected):
 def test_normalize_server_url_rejects_unsafe_or_invalid_values(raw):
     with pytest.raises(ValueError):
         em_sendspin.normalize_server_url(raw)
+
+
+def test_normalize_server_url_adds_path_and_rejects_bad_port_syntax():
+    assert em_sendspin.normalize_server_url("ws://ma/custom") == "ws://ma:8927/custom"
+    with pytest.raises(ValueError):
+        em_sendspin.normalize_server_url("ws://ma:not-a-port")
 
 
 class FakeClient:
@@ -139,6 +146,71 @@ def test_audio_and_stream_events_are_forwarded():
         ("end", None),
     ]
     assert player.compute_play_time(100) == 110
+
+
+def test_player_updates_metadata_group_and_controller_state():
+    player = em_sendspin.SendspinPlayer("study", "Study")
+    states = []
+    player.set_state_listener(lambda state: states.append((state.title, state.playback_state, state.volume)))
+
+    player._metadata(types.SimpleNamespace(metadata=types.SimpleNamespace(title="Song", artist="Artist", album="Album")))
+    player._group(types.SimpleNamespace(playback_state=types.SimpleNamespace(value="paused")))
+    player._controller(types.SimpleNamespace(controller=types.SimpleNamespace(volume=35, muted=True)))
+    player._stream_start({"media_title": "Live", "media_artist": "Band"})
+    assert player.state.title == "Live"
+    assert player.state.artist == "Band"
+    assert player.state.album == "Album"
+    assert player.state.playback_state == "playing"
+    assert player.state.volume == 35 and player.state.muted is True
+    assert states
+
+
+def test_global_runtime_helpers_forward_and_noop():
+    class Runtime:
+        def __init__(self):
+            self.calls = []
+
+        async def command(self, *args, **kwargs):
+            self.calls.append(("command", args, kwargs))
+
+        async def register_device(self, *args):
+            self.calls.append(("register", args))
+
+        async def unregister_device(self, *args):
+            self.calls.append(("unregister", args))
+
+        async def yield_device(self, *args):
+            self.calls.append(("yield", args))
+
+        async def release_device(self, *args):
+            self.calls.append(("release", args))
+
+        async def configure(self, *args):
+            self.calls.append(("configure", args))
+
+        def status(self):
+            return {"devices": ["study"]}
+
+    runtime = Runtime()
+    em_sendspin.set_runtime(runtime)
+
+    async def run():
+        await em_sendspin.command("study", "mute", mute=True)
+        await em_sendspin.register_device("study", "Study", object())
+        await em_sendspin.unregister_device("study")
+        await em_sendspin.yield_device("study")
+        await em_sendspin.release_device("study")
+        await em_sendspin.configure("ma.local")
+
+    try:
+        asyncio.run(run())
+        assert len(runtime.calls) == 6
+        assert em_sendspin.runtime_status() == {"devices": ["study"]}
+    finally:
+        em_sendspin.set_runtime(None)
+
+    assert em_sendspin.runtime_status()["devices"] == []
+    asyncio.run(em_sendspin.unregister_device("missing"))
 
 
 def test_detach_unsubscribes_all_callbacks_and_resets_state():

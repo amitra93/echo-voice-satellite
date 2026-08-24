@@ -378,6 +378,16 @@ controller suite passes with the new tests.
 `em_oww_assets.py` increased from **57.5% to 97.0%** (`727 passed, 1 skipped`).
 Only the unavailable-installed-package branches remain intentionally defensive.
 
+### Controller workstream execution: Sendspin adapter slice (completed 2026-08-23)
+Expanded `controller/tests/test_sendspin.py` to cover URL path normalization,
+metadata/group/controller callback state updates, and global runtime helper
+forwarding/no-op behavior. Existing listener, runtime, transport, and store
+tests cover the heavier lifecycle paths.
+
+`em_sendspin.py` increased from **75.7% to 80.3%** across the full controller
+suite (`730 passed, 1 skipped`). Remaining gaps are mostly optional mDNS,
+connection retry, and SDK error branches.
+
 ### Phase 4 — the big lever: `em_api.py` and `em_controller.py`
 This is genuinely necessary — Phases 3+5 alone cap out well short of 70%
 for the controller, because these two files are 48% of production
