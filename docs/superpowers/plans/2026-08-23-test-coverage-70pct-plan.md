@@ -395,6 +395,15 @@ container-bridge warning path. The full controller suite passes.
 
 `em_hostip.py` increased from **77.5% to 100.0%** (`732 passed, 1 skipped`).
 
+### Controller workstream execution: channel generator slice (completed 2026-08-23)
+Expanded `controller/tests/test_channels.py` with isolated temporary-tree tests
+for version preservation/fallback, generated documentation and presentation
+copying, drift detection, and `main()` check/set-version behavior.
+
+`tools/sync_channels.py` reached **85.6%** across the full controller suite
+(`735 passed, 1 skipped`). Remaining
+branches are missing presentation files and the ordinary no-argument write path.
+
 ### Phase 4 — the big lever: `em_api.py` and `em_controller.py`
 This is genuinely necessary — Phases 3+5 alone cap out well short of 70%
 for the controller, because these two files are 48% of production

@@ -171,3 +171,68 @@ def test_every_channel_documents_the_version_it_pins():
             f"{path.name}/CHANGELOG.md never mentions {version}, the version "
             f"its config.yaml pins — an update to it shows notes for some "
             f"other release")
+
+
+def test_generator_preserves_existing_version_and_copies_docs(tmp_path, monkeypatch):
+    controller = tmp_path / "controller"
+    repo = tmp_path
+    controller.mkdir()
+    (controller / "translations").mkdir()
+    (controller / "config.yaml").write_text(
+        'name: "GA"\nslug: "ga"\npanel_title: GA\nversion: "2.0.0"\n'
+        'description: "Stable"\noptions: {}\n'
+    )
+    (controller / "DOCS.md").write_text("stable docs")
+    for rel in sync_channels.PRESENTATION:
+        source = controller / rel
+        source.parent.mkdir(parents=True, exist_ok=True)
+        source.write_bytes(rel.encode())
+
+    channel = sync_channels.Channel("ea-test", "ea-test", "EA", "EA", "Early", "BANNER\n")
+    channel_path = repo / channel.dirname
+    channel_path.mkdir()
+    (channel_path / "config.yaml").write_text('version: "1.5.0"\n')
+    monkeypatch.setattr(sync_channels, "CONTROLLER", controller)
+    monkeypatch.setattr(sync_channels, "REPO", repo)
+    monkeypatch.setattr(sync_channels, "PRESENTATION", ("translations/en.yaml", "icon.png"))
+
+    generated = sync_channels.generate(channel)
+    assert 'version: "1.5.0"' in generated["config.yaml"]
+    assert generated["DOCS.md"] == "BANNER\nstable docs"
+    sync_channels.write(channel)
+    assert not sync_channels.check(channel)
+    assert (channel_path / "icon.png").read_bytes() == b"icon.png"
+
+    (channel_path / "config.yaml").write_text("drift")
+    assert "differs" in " ".join(sync_channels.check(channel))
+
+
+def test_generator_uses_ga_version_when_ea_config_is_missing_or_malformed(tmp_path, monkeypatch):
+    controller = tmp_path / "controller"
+    controller.mkdir()
+    (controller / "config.yaml").write_text('version: "3.0.0"\n')
+    channel = sync_channels.Channel("ea", "ea", "EA", "EA", "Early", "")
+    monkeypatch.setattr(sync_channels, "CONTROLLER", controller)
+    monkeypatch.setattr(sync_channels, "REPO", tmp_path)
+    assert sync_channels._current_version(tmp_path / "missing", "fallback") == "fallback"
+    malformed = tmp_path / "malformed"
+    malformed.write_text("name: no version")
+    assert sync_channels._current_version(malformed, "fallback") == "fallback"
+    assert 'version: "3.0.0"' in sync_channels.generate(channel)["config.yaml"]
+
+
+def test_main_check_and_set_version_on_isolated_channel(tmp_path, monkeypatch, capsys):
+    controller = tmp_path / "controller"
+    controller.mkdir()
+    (controller / "config.yaml").write_text('version: "4.0.0"\n')
+    channel = sync_channels.Channel("ea", "ea", "EA", "EA", "Early", "")
+    monkeypatch.setattr(sync_channels, "CONTROLLER", controller)
+    monkeypatch.setattr(sync_channels, "REPO", tmp_path)
+    monkeypatch.setattr(sync_channels, "EA", channel)
+    monkeypatch.setattr(sync_channels, "PRESENTATION", ())
+
+    assert sync_channels.main(["--set-version", "4.1.0"]) == 0
+    assert 'version: "4.1.0"' in (tmp_path / "ea/config.yaml").read_text()
+    assert sync_channels.main(["--check"]) == 0
+    assert "in step" in capsys.readouterr().out
+    assert sync_channels.main(["--set-version"]) == 2
