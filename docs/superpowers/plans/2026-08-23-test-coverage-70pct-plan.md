@@ -285,6 +285,16 @@ passes. The remaining client gap is concentrated in live WebSocket handshake,
 dispatch, shell, and data-plane behavior, which should be covered with fake
 WebSocket integration tests separately rather than broadening this unit slice.
 
+### Device workstream execution: Bluetooth scanner slice (completed 2026-08-23)
+Added `device/internal/bluetooth/scanner_test.go`. Tests cover advertisement
+batch keys, duplicate coalescing with latest RSSI retention, count-triggered
+flushes, callback/send statistics, unique-address expiry, environment integer
+defaults, and idempotent enable/disable state transitions. Real HCI transport,
+Bluedroid package commands, and watchdog/retry timing remain outside host tests.
+
+`internal/bluetooth` increased from **28.9% to 57.5%**. The Bluetooth race
+suite and full host-testable device suite pass.
+
 ### Phase 3 — controller quick/medium wins
 `em_auth.py` (session/bcrypt/role logic), `em_db.py`
 (query and migration-fixup logic), `em_oww_assets.py` (LRU eviction,
