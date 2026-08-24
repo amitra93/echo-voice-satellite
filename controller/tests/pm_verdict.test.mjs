@@ -18,7 +18,9 @@ import { fileURLToPath } from "url";
 import { dirname, join } from "path";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const src = readFileSync(join(HERE, "..", "static", "dashboard.jsx"), "utf8");
+const src = readFileSync(join(HERE, "..", "static", "dashboard.jsx"), "utf8")
+  + "\n" + readFileSync(join(HERE, "..", "static", "dashboard_logic.js"), "utf8")
+  + "\nfunction _bannerMode(banner) { return bannerMode(banner); }\n";
 
 // Handles both arrow forms in this file: `= (x) => { ... };` with a body, and
 // `= (x) => expr || expr;` without one. Scanning for a matching brace only
@@ -123,7 +125,8 @@ function liftFunctionDecl(name) {
 
 const { _bannerMode, _STEP_MODE } = await import(
   "data:text/javascript;base64," + Buffer.from(
-    liftFunctionDecl("_bannerMode") + "\n" + liftConstObject("_STEP_MODE")
+    liftFunctionDecl("bannerMode") + "\nfunction _bannerMode(banner) { return bannerMode(banner); }\n"
+    + liftConstObject("_STEP_MODE")
     + "\nexport { _bannerMode, _STEP_MODE };"
   ).toString("base64"));
 

@@ -260,3 +260,40 @@ def test_stream_speaker_chunks_preserves_partial_data_and_reports_metrics():
         assert frames[-1] == bytes([em_controller.SPEAKER_EOS_TYPE])
 
     asyncio.run(run())
+
+
+def test_handle_control_rejects_non_register_and_holds_unknown_device_pending(monkeypatch):
+    class WS:
+        remote_address = ("192.0.2.1", 1234)
+
+        def __init__(self, message):
+            self.message = message
+            self.sent = []
+            self.closed = False
+
+        async def recv(self):
+            return self.message
+
+        async def send(self, message):
+            self.sent.append(json.loads(message))
+
+        async def close(self):
+            self.closed = True
+
+    async def run():
+        bad = WS(json.dumps({"type": "ping"}))
+        await em_controller.handle_control(bad)
+        assert bad.closed
+
+        pending = WS(json.dumps({"type": "register", "device_id": "new", "ip": "192.0.2.2"}))
+        monkeypatch.setattr(em_controller, "_link_auth_ok", lambda *args: asyncio.sleep(0, result=True))
+        monkeypatch.setattr(em_controller.db, "get_config", lambda *args: "strict")
+        monkeypatch.setattr(em_controller.db, "get_device", lambda *args: None)
+        monkeypatch.setattr(em_controller.db, "register_new_device", lambda *args: None)
+        monkeypatch.setattr(em_controller.db, "log_device", lambda *args: None)
+        monkeypatch.setattr(em_controller.api, "notify_device_pending", lambda *args: asyncio.sleep(0))
+        await em_controller.handle_control(pending)
+        assert pending.sent == [{"type": "pending"}]
+        assert pending.closed
+
+    asyncio.run(run())
