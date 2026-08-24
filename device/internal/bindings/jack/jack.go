@@ -45,6 +45,8 @@ var statePath = "/sys/class/switch/h2w/state"
 // worth a second transport.
 const PollInterval = time.Second
 
+var pollInterval = PollInterval
+
 // Inserted reports whether something is plugged into the jack.
 //
 // Absent hardware reads as NOT inserted rather than as an error, because every
@@ -99,7 +101,7 @@ func Watch(ctx context.Context, onChange func(inserted bool)) {
 	log.Printf("[jack] detect switch at %s (state=%d)", statePath, first)
 
 	was := first != 0
-	t := time.NewTicker(PollInterval)
+	t := time.NewTicker(pollInterval)
 	defer t.Stop()
 	for {
 		select {

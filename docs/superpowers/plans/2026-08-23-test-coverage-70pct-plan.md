@@ -305,6 +305,15 @@ outside host tests.
 `internal/bindings/als` increased from **60.2% to 73.9%**. The ALS race suite
 and full host-testable device suite pass.
 
+### Device workstream execution: headphone jack watcher slice (completed 2026-08-23)
+Added a poll-interval seam and expanded `device/internal/bindings/jack/jack_test.go`
+to cover baseline seeding, insert/remove transitions, transient malformed reads,
+missing-switch startup, and cancellation. Real sysfs polling and tinymix/audio
+hardware effects remain outside host tests.
+
+`internal/bindings/jack` increased from **46.2% to 100.0%**. The jack race
+suite and full host-testable device suite pass.
+
 ### Phase 3 — controller quick/medium wins
 `em_auth.py` (session/bcrypt/role logic), `em_db.py`
 (query and migration-fixup logic), `em_oww_assets.py` (LRU eviction,

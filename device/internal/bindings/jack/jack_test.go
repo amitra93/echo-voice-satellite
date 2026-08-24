@@ -1,9 +1,11 @@
 package jack
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // State reads a fixed path, so the tests point it at a temp file by swapping
@@ -72,4 +74,58 @@ func TestUnparseableStateIsNotOk(t *testing.T) {
 	if _, ok := State(); ok {
 		t.Fatal("unparseable content must report not-ok, not a state")
 	}
+}
+
+func TestWatchReportsTransitionsAndIgnoresBadReads(t *testing.T) {
+	withStateFile(t, "0\n")
+	oldInterval := pollInterval
+	pollInterval = time.Millisecond
+	t.Cleanup(func() { pollInterval = oldInterval })
+
+	ctx, cancel := context.WithCancel(context.Background())
+	t.Cleanup(cancel)
+	changes := make(chan bool, 2)
+	go Watch(ctx, func(inserted bool) { changes <- inserted })
+
+	// The initial state seeds the baseline and must not produce an event.
+	time.Sleep(5 * time.Millisecond)
+	if err := os.WriteFile(statePath, []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-changes:
+		if !got {
+			t.Fatal("insert transition reported as removal")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not report insertion")
+	}
+
+	if err := os.WriteFile(statePath, []byte("bad\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(5 * time.Millisecond)
+	if len(changes) != 0 {
+		t.Fatal("invalid state produced a transition")
+	}
+
+	if err := os.WriteFile(statePath, []byte("0\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case got := <-changes:
+		if got {
+			t.Fatal("removal transition reported as insertion")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("watcher did not report removal")
+	}
+	cancel()
+}
+
+func TestWatchReturnsWhenSwitchIsMissing(t *testing.T) {
+	old := statePath
+	statePath = filepath.Join(t.TempDir(), "missing")
+	t.Cleanup(func() { statePath = old })
+	Watch(context.Background(), func(bool) { t.Fatal("callback fired without switch") })
 }
