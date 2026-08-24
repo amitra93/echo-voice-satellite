@@ -414,6 +414,14 @@ and the final `execvp` arguments.
 `em_start.py` reached **95.7%** across the full controller suite
 (`737 passed, 1 skipped`). The only uncovered line is the `__main__` guard.
 
+### API workstream execution: pure policy helper slice (completed 2026-08-23)
+Added `controller/tests/test_api_pure.py` using the existing lightweight
+`websockets` import stub. Tests cover ingress base-path escaping, transcript
+redaction, safe recording slugs, embedded firmware-version extraction, and
+config clobber detection. The full controller suite passes (`741 passed,
+1 skipped`); `em_api.py` moved from 15.4% to 15.9% while the next step is
+authenticated handler-level coverage.
+
 ### Phase 4 — the big lever: `em_api.py` and `em_controller.py`
 This is genuinely necessary — Phases 3+5 alone cap out well short of 70%
 for the controller, because these two files are 48% of production
