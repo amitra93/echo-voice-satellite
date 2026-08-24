@@ -435,6 +435,11 @@ protection, successful role updates, and password-field omission. The full
 controller suite passes (`748 passed, 1 skipped`); `em_api.py` reached
 **18.3%** overall.
 
+Added global-config handler coverage for dropped-key refusal, explicit
+replacement, persistence, and pushing each connected device its effective
+configuration. The full controller suite passes (`749 passed, 1 skipped`);
+`em_api.py` reached **19.1%** overall.
+
 ### Phase 4 — the big lever: `em_api.py` and `em_controller.py`
 This is genuinely necessary — Phases 3+5 alone cap out well short of 70%
 for the controller, because these two files are 48% of production

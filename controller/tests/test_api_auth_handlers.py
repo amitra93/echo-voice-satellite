@@ -132,3 +132,25 @@ def test_get_users_omits_password_hash(monkeypatch):
         "id": 1, "username": "admin", "role": "admin", "ha_linked": False,
         "created_at": "now",
     }]
+
+
+def test_global_config_refuses_dropped_keys_and_pushes_effective_values(monkeypatch):
+    handler = em_api._post_global_config.__wrapped__
+    monkeypatch.setattr(em_api.db, "get_global_device_config_raw", lambda: {"old": 1, "keep": 2})
+    dropped = request({"keep": 2})
+    assert run(handler(dropped)).status == 409
+
+    saved = []
+    pushed = []
+    monkeypatch.setattr(em_api.db, "set_global_device_config", lambda config: saved.append(config))
+    monkeypatch.setattr(em_api.db, "get_effective_device_config", lambda device_id: {"device": device_id})
+    monkeypatch.setattr(em_api, "_apply_live_config", lambda device_id, live, config: asyncio.sleep(0, result=pushed.append((device_id, config))))
+    old_devices = em_api._devices
+    em_api._devices = {"dev-1": object(), "dev-2": object()}
+    try:
+        response = run(handler(request({"keep": 3, "replace": True})))
+    finally:
+        em_api._devices = old_devices
+    assert json.loads(response.text) == {"config": {"keep": 3}, "pushed_to": ["dev-1", "dev-2"]}
+    assert saved == [{"keep": 3}]
+    assert pushed == [("dev-1", {"device": "dev-1"}), ("dev-2", {"device": "dev-2"})]
