@@ -263,6 +263,17 @@ modes.
 host-testable device suite passes, including beamformer/discovery/Wi-Fi race
 checks.
 
+### Device workstream execution: server state/LED slice (completed 2026-08-23)
+Added `device/internal/server/server_test.go` with recording LED fakes. Tests
+cover LED base-state recording, legacy listening detection, mute and volume
+paint suppression, direction-marker highlighting and angle mapping, base-state
+repaint, clamp behavior, and persistence failure handling. Hardware startup,
+tinymix, GPIO, and the asynchronous LED initialization path remain outside
+host tests.
+
+`internal/server` increased from **32.7% to 49.7%**. The full host-testable
+device suite passes, including server/beamformer/discovery/Wi-Fi race checks.
+
 ### Phase 3 — controller quick/medium wins
 `em_auth.py` (session/bcrypt/role logic), `em_db.py`
 (query and migration-fixup logic), `em_oww_assets.py` (LRU eviction,
