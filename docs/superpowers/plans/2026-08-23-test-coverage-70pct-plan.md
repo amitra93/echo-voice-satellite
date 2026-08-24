@@ -314,6 +314,16 @@ hardware effects remain outside host tests.
 `internal/bindings/jack` increased from **46.2% to 100.0%**. The jack race
 suite and full host-testable device suite pass.
 
+### Device workstream execution: LED animation slice (completed 2026-08-23)
+Added `device/pkg/led/animation_test.go`. Tests cover animation parsing,
+loop markers, color expansion, ignored malformed-width entries, parse errors,
+file loading, non-looped playback, cancellation, loop termination, controller
+errors, and deadline errors. Hardware LED controller writes remain behind the
+fake controller.
+
+`pkg/led` increased from **31.0% to 96.8%**. The LED race suite and full
+host-testable device suite pass.
+
 ### Phase 3 — controller quick/medium wins
 `em_auth.py` (session/bcrypt/role logic), `em_db.py`
 (query and migration-fixup logic), `em_oww_assets.py` (LRU eviction,
