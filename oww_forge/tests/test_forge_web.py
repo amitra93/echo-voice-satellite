@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+import json
 from pathlib import Path
 from unittest.mock import patch
 
@@ -10,6 +11,7 @@ sys.path.insert(0, str(Path(__file__).parents[1]))
 
 import forge
 import forge_web
+import google_tts
 
 
 class Request:
@@ -28,6 +30,8 @@ class ForgeWebGoogleTtsTests(unittest.IsolatedAsyncioTestCase):
         self.config = self.wakewords / "demo" / "config.yml"
         self.config.parent.mkdir()
         self.config.write_text(yaml.safe_dump({
+            "model_name": "demo",
+            "output_dir": str(self.wakewords / "work"),
             "custom_negative_phrases": ["old phrase"],
             "google_tts_samples_per_voice": 30,
             "google_tts_languages": "en-US",
@@ -88,6 +92,31 @@ class ForgeWebGoogleTtsTests(unittest.IsolatedAsyncioTestCase):
                 "voices": "",
                 "qps": 0,
             }))
+
+    async def test_prune_google_tts_previews_then_deletes_only_unselected_clips(self):
+        base = self.wakewords / "work" / "demo"
+        for directory in ("positive_train", "positive_test", "negative_train", "negative_test"):
+            (base / directory).mkdir(parents=True, exist_ok=True)
+        kept = base / "positive_train" / "google_en-US_Chirp3-HD-A_000000.wav"
+        removed = base / "negative_train" / "google_ja-JP_Chirp3-HD-B_000000.wav"
+        custom = base / "positive_train" / "custom_recording.wav"
+        for path in (kept, removed, custom):
+            path.write_bytes(b"wav")
+
+        with patch.object(google_tts, "selected_chirp3_pairs", return_value=[("en-US", "Chirp3-HD-A")]):
+            preview = await forge_web.api_prune_google_tts(Request({}))
+            payload = json.loads(preview.body)
+            self.assertEqual(payload["clips"], 1)
+            self.assertEqual(payload["deleted"], 0)
+            self.assertTrue(removed.exists())
+
+            confirmed = await forge_web.api_prune_google_tts(Request({"confirm": True}))
+            payload = json.loads(confirmed.body)
+            self.assertEqual(payload["deleted"], 1)
+
+        self.assertTrue(kept.exists())
+        self.assertTrue(custom.exists())
+        self.assertFalse(removed.exists())
 
 
 if __name__ == "__main__":

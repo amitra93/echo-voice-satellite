@@ -21,6 +21,8 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
 TEST_FRACTION = 0.1
@@ -29,6 +31,7 @@ EST_PRICE_PER_MCHAR = 16.0
 VOICE_LIST_RETRIES = (15, 30, 60, 120)
 TTS_RETRIES = (15, 30, 60)
 DEFAULT_QPS = 2.0
+_CHIRP_CLIP = re.compile(r"^google_([A-Za-z0-9-]+)_(.+)_(\d{6})\.wav$")
 
 
 def log(msg: str) -> None:
@@ -103,6 +106,56 @@ def list_chirp3_voices(languages):
     return result
 
 
+def selected_chirp3_pairs(languages, voice_names=()):
+    """Resolve configured locale/voice names into the Chirp pairs they allow."""
+    languages = tuple(dict.fromkeys(locale.strip() for locale in languages if locale.strip()))
+    requested = tuple(dict.fromkeys(name.strip() for name in voice_names if name.strip()))
+    if not languages:
+        raise ValueError("at least one locale is required")
+    available = list_chirp3_voices(languages)
+    known = {voice for names in available.values() for voice in names}
+    missing = sorted(set(requested) - known)
+    if missing:
+        raise ValueError("requested voices are unavailable or do not support the selected locales: " +
+                         ", ".join(missing))
+    pairs = [(locale, voice) for locale, names in available.items()
+             for voice in names if not requested or voice in requested]
+    if not pairs:
+        raise ValueError("no Chirp 3 voices match the selected locales")
+    return pairs
+
+
+def safe_voice_name(voice: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_.-]+", "_", voice)
+
+
+def chirp_clip_pair(path: Path) -> tuple[str, str] | None:
+    """Return a generated clip's (locale, safe_voice), never guessing on names."""
+    match = _CHIRP_CLIP.fullmatch(path.name)
+    return (match.group(1), match.group(2)) if match else None
+
+
+@dataclass
+class PrunePlan:
+    paths: list[Path]
+    groups: dict[tuple[str, str, str], int]
+
+
+def plan_prune_clips(base: Path, pairs) -> PrunePlan:
+    """Find generated Chirp clips outside the selected locale/voice pairs."""
+    selected = {(locale, safe_voice_name(voice)) for locale, voice in pairs}
+    paths = []
+    groups = Counter()
+    for directory in ("positive_train", "positive_test", "negative_train", "negative_test"):
+        for path in sorted((base / directory).glob("google_*.wav")):
+            pair = chirp_clip_pair(path)
+            if pair is None or pair in selected:
+                continue
+            paths.append(path)
+            groups[(directory, *pair)] += 1
+    return PrunePlan(paths, dict(groups))
+
+
 def synthesize(phrases, samples_per_voice, train_dir: Path, test_dir: Path,
                languages, voice_names=(), assume_yes=False, qps=DEFAULT_QPS) -> None:
     """Synthesize every selected Chirp 3 voice/locale pair equally.
@@ -167,7 +220,7 @@ def synthesize(phrases, samples_per_voice, train_dir: Path, test_dir: Path,
 
     jobs = []
     for pair_index, (locale, voice) in enumerate(pairs):
-        safe_voice = re.sub(r"[^A-Za-z0-9_.-]+", "_", voice.name)
+        safe_voice = safe_voice_name(voice.name)
         for sample_index in range(samples_per_voice):
             index = pair_index * samples_per_voice + sample_index
             phrase = phrases[index % len(phrases)]
