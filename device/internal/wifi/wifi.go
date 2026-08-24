@@ -118,11 +118,17 @@ var (
 
 // ─── Queries ──────────────────────────────────────────────────────────────────
 
-func wpaCli(args ...string) (string, error) {
+func wpaCliCommand(args ...string) (string, error) {
 	full := append([]string{"-p", wpaSockDir, "-i", iface}, args...)
 	out, err := exec.Command("wpa_cli", full...).CombinedOutput()
 	return string(out), err
 }
+
+// wpaCli is a seam for the query helpers. Production uses wpaCliCommand;
+// host tests replace it with deterministic scan/status responses.
+var wpaCli = wpaCliCommand
+
+var sleep = time.Sleep
 
 // CurrentSSID returns the associated SSID, or "" when not associated.
 func CurrentSSID() string {
@@ -165,7 +171,7 @@ func Scan() ([]Network, error) {
 	if _, err := wpaCli("scan"); err != nil {
 		return nil, fmt.Errorf("scan trigger: %w", err)
 	}
-	time.Sleep(4 * time.Second)
+	sleep(4 * time.Second)
 	out, err := wpaCli("scan_results")
 	if err != nil {
 		return nil, fmt.Errorf("scan_results: %w", err)
@@ -349,7 +355,7 @@ func waitFor(what string, timeout time.Duration, cond func() bool) bool {
 		if cond() {
 			return true
 		}
-		time.Sleep(time.Second)
+		sleep(time.Second)
 	}
 	log.Printf("[wifi] timed out waiting for %s (%s)", what, timeout)
 	return false
@@ -389,7 +395,7 @@ func waitForAssociation(ssid string, timeout time.Duration) bool {
 			log.Printf("[wifi] waiting for association to %q — wpa_state=%s", ssid, state)
 			lastDiag = time.Now()
 		}
-		time.Sleep(time.Second)
+		sleep(time.Second)
 	}
 	log.Printf("[wifi] timed out waiting for association to %q (%s)", ssid, timeout)
 	return false

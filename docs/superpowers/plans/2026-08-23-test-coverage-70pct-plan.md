@@ -230,6 +230,17 @@ Phases 1+2 land device at roughly **1114 + 142 + 1780 ≈ 3036 / 2983** —
 comfortably over 70% in-scope, with real headroom for targets that land
 lower than illustrated.
 
+### Device workstream execution: Wi-Fi slice (completed 2026-08-23)
+Added `device/internal/wifi/wifi_test.go` and narrow injection seams for the
+external `wpa_cli` query and sleep calls. Tests cover credential validation,
+open/WPA config composition, scan parsing/deduplication/sorting, scan errors,
+SSID status parsing, polling, pending-result copy/commit behavior, and the
+no-marker recovery path. Real Android service toggles, filesystem paths, and
+network association gates remain outside host tests.
+
+`internal/wifi` increased from **0% to 35.7%**. The full host-testable device
+suite passes, including race checks for Wi-Fi and Phase 1 packages.
+
 ### Phase 3 — controller quick/medium wins
 `em_auth.py` (session/bcrypt/role logic), `em_db.py`
 (query and migration-fixup logic), `em_oww_assets.py` (LRU eviction,
