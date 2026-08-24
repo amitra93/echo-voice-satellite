@@ -20,6 +20,7 @@ Typical flow:
 import argparse
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
+import itertools
 import json
 import os
 import re
@@ -316,6 +317,96 @@ def _audio_16k_clip(audio, sr: int):
     return (np.clip(audio, -1, 1) * 32767).astype("int16")
 
 
+def _decode_audio_bytes(raw: bytes, name: str):
+    """Encoded audio container bytes → (float32 array, sample rate).
+
+    datasets-server's parquet exports store the ORIGINAL container bytes in an
+    `audio.bytes` column (wav for FLEURS, ogg/opus for VoxPopuli). soundfile /
+    libsndfile 1.2 reads all of those directly; ffmpeg is the fallback for
+    anything it rejects.
+    """
+    import io
+
+    import soundfile as sf
+
+    try:
+        data, sr = sf.read(io.BytesIO(raw), dtype="float32", always_2d=False)
+        return data, sr
+    except Exception:
+        import subprocess
+        import tempfile
+
+        suffix = ("." + name.rsplit(".", 1)[-1] if "." in name else ".ogg")
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / f"in{suffix}"
+            dst = Path(tmp) / "out.wav"
+            src.write_bytes(raw)
+            subprocess.run(
+                ["ffmpeg", "-y", "-loglevel", "error", "-i", str(src),
+                 "-ar", "16000", "-ac", "1", "-f", "wav", str(dst)],
+                check=True, timeout=120,
+            )
+            data, sr = sf.read(str(dst), dtype="float32", always_2d=False)
+            return data, sr
+
+
+def _row_to_clip(row) -> "np.ndarray":
+    """One dataset row → one int16 16k mono clip, whatever shape the row is.
+
+    Streaming rows carry decoded arrays (`audio.array` + `.sampling_rate`);
+    locally-prefetched parquet rows carry raw container bytes (`audio.bytes`).
+    """
+    a = row["audio"]
+    if isinstance(a, dict) and a.get("bytes") is not None:
+        arr, sr = _decode_audio_bytes(a["bytes"], a.get("path") or "clip")
+    else:
+        arr, sr = a["array"], a["sampling_rate"]
+    return _audio_16k_clip(arr, sr)
+
+
+def _iter_parquet_audio_rows(path: Path):
+    """Yield `{"audio": {"bytes": …}}` rows from a local parquet shard."""
+    import pyarrow.parquet as pq
+
+    pf = pq.ParquetFile(str(path))
+    names = pf.schema_arrow.names
+    acol = "audio" if "audio" in names else names[0]
+    for batch in pf.iter_batches(batch_size=64, columns=[acol]):
+        col = batch.column(0)
+        for i in range(len(col)):
+            yield {"audio": col[i].as_py()}
+
+
+def _prefetch_shard(repo: str, config: str, split: str) -> list[Path]:
+    """Download this config's converted parquet shards to the hub cache.
+
+    Discovers shard filenames via the Hub API rather than guessing a pattern:
+    the two repos this serves lay them out differently — google/fleurs nests
+    single files under `parquet-data/<config>/<split>-00000-of-00001.parquet`,
+    while facebook/voxpopuli puts MULTI-shard splits at the repo root
+    (`en_accented/test-00000-of-00002.parquet` + `-of-00001-`). Guessing got a
+    404 on VoxPopuli and silently cost it the fast path (observed 2026-08-23).
+
+    Uses hf_hub_download per shard, so each honours HF_HUB_ENABLE_HF_TRANSFER=1
+    (multi-connection Rust downloader). Returns shards in filename order so row
+    order matches what streaming would have yielded. Raises if nothing matches;
+    the caller falls back to streaming.
+    """
+    import re
+
+    from huggingface_hub import HfApi, hf_hub_download
+
+    files = HfApi().list_repo_files(repo_id=repo, repo_type="dataset")
+    pat = re.compile(
+        rf"^(?:parquet-data/)?{re.escape(config)}/{re.escape(split)}-\d+-of-\d+\.parquet$")
+    wanted = sorted(f for f in files if pat.match(f))
+    if not wanted:
+        raise FileNotFoundError(
+            f"no {config}/{split}-*.parquet shards found in dataset {repo}")
+    return [Path(hf_hub_download(repo_id=repo, repo_type="dataset", filename=f))
+            for f in wanted]
+
+
 def iter_decoded_audio_members(archive: Path, wanted_names: set[str] | None = None,
                                max_workers: int = DECODE_WORKERS):
     """Yield decoded clips with a bounded decode queue while reading a tar.
@@ -391,31 +482,79 @@ def _stream_feature_configs(repo: str, configs: tuple[str, ...], dest: Path,
         return
     embedder = _feature_extractor(backend, ncpu)
     chunks = []
+    skipped = []
     overall_started = monotonic()
     for config_index, config in enumerate(configs, start=1):
         log(f"streaming {label} {config} (up to {FEATURE_CLIPS_PER_CONFIG:,} clips)")
         batch, count, config_started, last_log = [], 0, monotonic(), monotonic()
         split = "test" if repo == "facebook/voxpopuli" and config == "en_accented" else "train"
-        ds = datasets.load_dataset(repo, name=config, split=split, streaming=True)
-        for row in ds:
-            try:
-                audio = row["audio"]
-                batch.append(_audio_16k_clip(audio["array"], audio["sampling_rate"]))
-            except Exception as error:
-                log(f"  skipping unreadable {config} clip: {error}")
-                continue
-            count += 1
-            last_log = _progress(f"{label} {config} [{config_index}/{len(configs)}]",
-                                 count, FEATURE_CLIPS_PER_CONFIG, config_started, last_log)
-            if len(batch) == batch_size:
+        # One bad shard must not cost every clip already streamed from EARLIER
+        # configs. Observed on hardware: FLEURS fr_fr throws
+        # pyarrow.lib.ArrowNotImplementedError ("Nested data conversions not
+        # implemented for chunked array outputs") from inside the HF streaming
+        # iterator itself — not a per-clip decode error the inner try/except
+        # already covers, but a config-level failure to even read the shard.
+        # Before this fix that exception propagated out of the whole function,
+        # so a single unreadable language discarded every already-embedded
+        # chunk and the feature file was NEVER written — every FLEURS build
+        # attempt failed this way and none left so much as a partial file.
+        # The fix is to isolate each config's read behind its own try/except:
+        # skip it, keep what already streamed, and continue — a smaller,
+        # imbalanced-but-real feature file beats losing the whole asset to one
+        # config's incompatibility.
+        #
+        # Fetch mode: by default each config's parquet is PREFETCHED via
+        # hf_hub_download (multi-connection via hf_transfer, resumable), then
+        # read locally — single-stream streaming measured 0.1–4 MB/s on the
+        # us.aws.cdn.hf.co route and restarted from zero after every timeout.
+        # Any prefetch problem (odd sharding, hub error) falls back to the old
+        # streaming path below; FORGE_FETCH_MODE=stream forces it outright.
+        try:
+            rows_iter = None
+            if os.environ.get("FORGE_FETCH_MODE", "local") != "stream":
+                try:
+                    _t0 = monotonic()
+                    _shards = _prefetch_shard(repo, config, split)
+                    _mb = sum(p.stat().st_size for p in _shards) / 1e6
+                    log(f"  {label} {config}: {_mb:.0f} MB of parquet "
+                        f"fetched locally ({len(_shards)} shard(s)) in "
+                        f"{_duration(monotonic() - _t0)}")
+                    # Chain shards in filename order — row order then matches
+                    # what streaming would have yielded.
+                    rows_iter = itertools.chain.from_iterable(
+                        _iter_parquet_audio_rows(p) for p in _shards)
+                except Exception as error:
+                    log(f"  {label} {config}: local prefetch unavailable "
+                        f"({error}) — falling back to streaming")
+            if rows_iter is None:
+                ds = datasets.load_dataset(repo, name=config, split=split, streaming=True)
+                rows_iter = iter(ds)
+            for row in rows_iter:
+                try:
+                    batch.append(_row_to_clip(row))
+                except Exception as error:
+                    log(f"  skipping unreadable {config} clip: {error}")
+                    continue
+                count += 1
+                last_log = _progress(f"{label} {config} [{config_index}/{len(configs)}]",
+                                     count, FEATURE_CLIPS_PER_CONFIG, config_started, last_log)
+                if len(batch) == batch_size:
+                    chunks.append(embedder.embed_clips(np.stack(batch), batch_size=batch_size, ncpu=ncpu))
+                    batch = []
+                if count >= FEATURE_CLIPS_PER_CONFIG:
+                    break
+            if batch:
                 chunks.append(embedder.embed_clips(np.stack(batch), batch_size=batch_size, ncpu=ncpu))
-                batch = []
-            if count >= FEATURE_CLIPS_PER_CONFIG:
-                break
-        if batch:
-            chunks.append(embedder.embed_clips(np.stack(batch), batch_size=batch_size, ncpu=ncpu))
-        _progress(f"{label} {config} [{config_index}/{len(configs)}]", count,
-                  FEATURE_CLIPS_PER_CONFIG, config_started, last_log, force=True)
+            _progress(f"{label} {config} [{config_index}/{len(configs)}]", count,
+                      FEATURE_CLIPS_PER_CONFIG, config_started, last_log, force=True)
+        except Exception as error:
+            log(f"  {label} {config} could not be read and is being skipped "
+                f"(clips already gathered from other configs are kept): {error}")
+            skipped.append(config)
+            continue
+    if skipped:
+        log(f"{label}: skipped {len(skipped)}/{len(configs)} config(s) that "
+            f"could not be read: {', '.join(skipped)}")
     if not chunks:
         sys.exit(f"{label} yielded no readable audio")
     FEATURES_DIR.mkdir(parents=True, exist_ok=True)
@@ -1316,6 +1455,10 @@ def main() -> None:
     p.add_argument("name")
     p.add_argument("--wav", nargs="+", required=True, help="wav file(s) or directorie(s)")
     p.set_defaults(func=cmd_test)
+
+    p = sub.add_parser("eval", help="evaluate trained model against its positive and negative test clips")
+    p.add_argument("name", help="model name")
+    p.set_defaults(func=cmd_eval)
 
     args = ap.parse_args()
     args.func(args)

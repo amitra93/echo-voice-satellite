@@ -53,6 +53,14 @@ x-forge-rocm-base: &forge-rocm-base
     - GOOGLE_APPLICATION_CREDENTIALS=/data/google-credentials.json
     # Required only for the official full Common Voice 26 download.
     - MDC_API_KEY=${MDC_API_KEY:-}
+    # huggingface_hub's default read timeout is 10s; streaming a multi-hundred-MB
+    # parquet shard (FLEURS en_us is ONE file) over a slow CDN route trips it
+    # mid-read and forces full-request retries. 60s rides out CDN stalls.
+    - HF_HUB_DOWNLOAD_TIMEOUT=60
+    # Rust multi-connection downloader for hf_hub_download — turns the FLEURS/
+    # VoxPopuli shard fetches from one throttled CDN stream into parallel
+    # range requests. Requires the hf_transfer pip package (requirements.txt).
+    - HF_HUB_ENABLE_HF_TRANSFER=1
 
 services:
   # web frontend (long-running); training jobs spawn inside this container
