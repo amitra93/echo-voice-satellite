@@ -517,6 +517,84 @@ def test_router_and_shell_handler_reject_invalid_sessions(monkeypatch):
     asyncio.run(run())
 
 
+def test_shell_handler_bridges_programmatic_and_dashboard_sessions(monkeypatch):
+    import aiohttp
+
+    class DeviceWS:
+        def __init__(self, messages=()):
+            self.messages = iter(messages)
+            self.sent = []
+            self.closed = False
+
+        async def send(self, value):
+            self.sent.append(value)
+
+        async def close(self):
+            self.closed = True
+
+        async def wait_closed(self):
+            return None
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self.messages)
+            except StopIteration:
+                raise StopAsyncIteration
+
+    class DashboardWS:
+        def __init__(self, messages=()):
+            self.messages = iter(messages)
+            self.text = []
+            self.binary = []
+
+        async def send_str(self, value):
+            self.text.append(value)
+
+        async def send_bytes(self, value):
+            self.binary.append(value)
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self.messages)
+            except StopIteration:
+                raise StopAsyncIteration
+
+    async def run():
+        monkeypatch.setattr(em_controller, "_link_auth_ok", lambda *args: asyncio.sleep(0, result=True))
+        pending = asyncio.get_running_loop().create_future()
+        em_controller._shell_pending["dev"] = pending
+        programmatic = DeviceWS()
+        await em_controller.handle_shell(programmatic, "/shell/dev?pty=1")
+        assert pending.result() is programmatic
+        assert not programmatic.closed
+        em_controller._shell_pending.pop("dev", None)
+
+        pending = asyncio.get_running_loop().create_future()
+        dashboard = DashboardWS([
+            types.SimpleNamespace(type=aiohttp.WSMsgType.BINARY, data=b"stdin"),
+            types.SimpleNamespace(type=aiohttp.WSMsgType.TEXT, data="text"),
+            types.SimpleNamespace(type=aiohttp.WSMsgType.CLOSE, data=b""),
+        ])
+        device = DeviceWS([b"stdout", "status"])
+        em_controller._shell_pending["dev"] = pending
+        em_controller._shell_dashboard["dev"] = dashboard
+        await em_controller.handle_shell(device, "/shell/dev?pty=1")
+        assert json.loads(dashboard.text[0]) == {"type": "shell_meta", "pty": True}
+        assert dashboard.binary == [b"stdout"]
+        assert "status" in dashboard.text
+        assert device.sent == [b"stdin", b"text"]
+        em_controller._shell_pending.pop("dev", None)
+        em_controller._shell_dashboard.pop("dev", None)
+
+    asyncio.run(run())
+
+
 def test_handle_control_rejects_non_register_and_holds_unknown_device_pending(monkeypatch):
     class WS:
         remote_address = ("192.0.2.1", 1234)
