@@ -388,6 +388,13 @@ tests cover the heavier lifecycle paths.
 suite (`730 passed, 1 skipped`). Remaining gaps are mostly optional mDNS,
 connection retry, and SDK error branches.
 
+### Controller workstream execution: host IP resolution slice (completed 2026-08-23)
+Expanded `controller/tests/test_hostip.py` to cover successful and failed
+routing probes, socket cleanup, cached `server_ip()` resolution, and the
+container-bridge warning path. The full controller suite passes.
+
+`em_hostip.py` increased from **77.5% to 100.0%** (`732 passed, 1 skipped`).
+
 ### Phase 4 — the big lever: `em_api.py` and `em_controller.py`
 This is genuinely necessary — Phases 3+5 alone cap out well short of 70%
 for the controller, because these two files are 48% of production
