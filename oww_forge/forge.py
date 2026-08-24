@@ -935,6 +935,8 @@ def cmd_new(args) -> None:
     confusables = [p.strip().lower() for p in args.confusables.split(",") if p.strip()]
     if not phrases:
         sys.exit("empty phrase")
+    if args.google_tts_qps <= 0:
+        sys.exit("queries per second must be positive")
     name = args.name or slugify(phrases[0])
     ww_dir = WAKEWORDS / name
     cfg_path = ww_dir / "config.yml"
@@ -957,6 +959,7 @@ def cmd_new(args) -> None:
     cfg = cfg.replace('google_tts_voices: ""', f"google_tts_voices: {json.dumps(args.google_tts_voices)}")
     cfg = cfg.replace("google_tts_samples_per_voice: 250",
                       f"google_tts_samples_per_voice: {args.google_tts_samples_per_voice}")
+    cfg = cfg.replace("google_tts_qps: 2", f"google_tts_qps: {args.google_tts_qps}")
     cfg_path.write_text(cfg)
     log(f"created {cfg_path}")
     log(f"phrases: {phrases}  positives: {args.samples}  steps: {args.steps}")
@@ -1231,6 +1234,7 @@ def cmd_google_tts(args) -> None:
         languages=args.languages.split(","),
         voice_names=args.voices.split(","),
         assume_yes=args.yes,
+        qps=args.qps if args.qps is not None else cfg.get("google_tts_qps", google_tts.DEFAULT_QPS),
     )
     confusables = cfg.get("custom_negative_phrases") or []
     if confusables:
@@ -1243,6 +1247,7 @@ def cmd_google_tts(args) -> None:
             languages=args.languages.split(","),
             voice_names=args.voices.split(","),
             assume_yes=args.yes,
+            qps=args.qps if args.qps is not None else cfg.get("google_tts_qps", google_tts.DEFAULT_QPS),
         )
 
 
@@ -1411,6 +1416,7 @@ def main() -> None:
     p.add_argument("--google-tts-languages", default="en-US,en-GB,en-AU,en-IN,en-PH,en-SG,en-ZA")
     p.add_argument("--google-tts-voices", default="")
     p.add_argument("--google-tts-samples-per-voice", type=int, default=250)
+    p.add_argument("--google-tts-qps", type=float, default=2.0)
     p.add_argument("--samples", type=int, default=30000, help="synthetic positives (default 30000)")
     p.add_argument("--samples-val", type=int, default=2000)
     p.add_argument("--steps", type=int, default=50000, help="max training steps (default 50000)")
@@ -1436,6 +1442,8 @@ def main() -> None:
                     help="comma-separated exact locales")
     p.add_argument("--voices", default="",
                     help="comma-separated exact Chirp 3 voice names; empty selects all matching voices")
+    p.add_argument("--qps", type=float, default=None,
+                   help="Google TTS requests per second (default: saved config, or 2)")
     p.add_argument("--yes", action="store_true", help="skip the cost-estimate confirmation")
     p.set_defaults(func=cmd_google_tts)
 

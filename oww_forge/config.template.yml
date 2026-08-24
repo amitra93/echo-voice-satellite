@@ -20,6 +20,7 @@ custom_negative_phrases: []
 google_tts_languages: "en-US,en-GB,en-AU,en-IN,en-PH,en-SG,en-ZA"
 google_tts_voices: ""
 google_tts_samples_per_voice: 250
+google_tts_qps: 2
 
 # Synthetic positives: 20k minimum recommended, 100k+ is best.
 n_samples: @N_SAMPLES@

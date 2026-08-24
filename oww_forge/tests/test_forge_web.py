@@ -52,6 +52,7 @@ class ForgeWebGoogleTtsTests(unittest.IsolatedAsyncioTestCase):
             "samples": 125,
             "languages": "en-US, en-GB",
             "voices": "en-US-Chirp3-HD-Achernar",
+            "qps": 3.5,
         }))
 
         self.assertEqual(response.status, 200)
@@ -59,6 +60,7 @@ class ForgeWebGoogleTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config["google_tts_samples_per_voice"], 125)
         self.assertEqual(config["google_tts_languages"], "en-US, en-GB")
         self.assertEqual(config["google_tts_voices"], "en-US-Chirp3-HD-Achernar")
+        self.assertEqual(config["google_tts_qps"], 3.5)
         self.assertEqual(config["unrelated"], "preserved")
 
     async def test_confusables_save_does_not_change_google_tts_config(self):
@@ -75,6 +77,16 @@ class ForgeWebGoogleTtsTests(unittest.IsolatedAsyncioTestCase):
                 "samples": 0,
                 "languages": "en-US",
                 "voices": "",
+                "qps": 2,
+            }))
+
+    async def test_save_google_tts_config_rejects_invalid_qps(self):
+        with self.assertRaises(forge_web.web.HTTPBadRequest):
+            await forge_web.api_save_google_tts_config(Request({
+                "samples": 250,
+                "languages": "en-US",
+                "voices": "",
+                "qps": 0,
             }))
 
 

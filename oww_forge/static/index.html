@@ -209,8 +209,10 @@
          <input id="newGttsLanguages" value="en-US,en-GB,en-AU,en-IN,en-PH,en-SG,en-ZA">
          <label>Exact voice names</label>
          <input id="newGttsVoices" placeholder="Optional comma-separated Chirp 3 voice names; blank = all matching">
-         <label>Samples per voice per locale</label>
+          <label>Samples per voice per locale</label>
           <input id="newGttsSamples" type="number" min="1" value="250">
+          <label>Queries per second</label>
+          <input id="newGttsQps" type="number" min="0.1" step="0.1" value="2">
          <div class="row" style="margin-top:6px">
            <button type="button" class="small" id="listGttsVoices">List available Chirp 3 voices</button>
          </div>
@@ -412,6 +414,8 @@ function render() {
             ${busy() ? 'disabled' : ''} style="width:100%"></label>
           <label>Samples per voice per locale <input data-gtts-samples type="number" min="1" value="${w.google_tts_samples_per_voice}"
             ${busy() ? 'disabled' : ''}></label>
+          <label>Queries per second <input data-gtts-qps type="number" min="0.1" step="0.1" value="${w.google_tts_qps}"
+            ${busy() ? 'disabled' : ''}></label>
           <div class="hint">A voice available for two selected locales receives this many clips for each locale. Confusable negatives receive the same matrix.</div>
           <div class="row" style="margin-top:6px">
             <button class="small" data-act="save-gtts" ${busy() ? 'disabled' : ''}
@@ -561,7 +565,8 @@ $('createBtn').onclick = async () => {
       confusables: $('newConfusables').value,
       google_tts_languages: $('newGttsLanguages').value,
       google_tts_voices: $('newGttsVoices').value,
-      google_tts_samples_per_voice: $('newGttsSamples').value})});
+      google_tts_samples_per_voice: $('newGttsSamples').value,
+      google_tts_qps: $('newGttsQps').value})});
   $('newPhrase').value = ''; $('newName').value = ''; $('newConfusables').value = '';
   refresh();
 };
@@ -596,9 +601,10 @@ $('wakewords').addEventListener('click', async e => {
     const n = +card.querySelector('[data-gtts-samples]').value;
     const langs = card.querySelector('[data-gtts-languages]').value.trim();
     const voices = card.querySelector('[data-gtts-voices]').value.trim();
-    if (!Number.isInteger(n) || n < 1 || !langs) return alert('Enter one or more locales and a positive samples-per-pair value.');
+    const qps = +card.querySelector('[data-gtts-qps]').value;
+    if (!Number.isInteger(n) || n < 1 || !langs || !(qps > 0)) return alert('Enter locales, a positive sample count, and a positive QPS.');
     await api(`/api/wakewords/${name}/google-tts`, {method: 'POST',
-      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({samples: n, languages: langs, voices})});
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({samples: n, languages: langs, voices, qps})});
   } else if (act === 'confusables') {
     const phrases = card.querySelector('[data-confusables]').value
       .split(',').map(value => value.trim()).filter(Boolean);
@@ -610,10 +616,11 @@ $('wakewords').addEventListener('click', async e => {
     const samples = +card.querySelector('[data-gtts-samples]').value;
     const languages = card.querySelector('[data-gtts-languages]').value.trim();
     const voices = card.querySelector('[data-gtts-voices]').value.trim();
-    if (!Number.isInteger(samples) || samples < 1 || !languages) return alert('Enter one or more locales and a positive samples-per-pair value.');
+    const qps = +card.querySelector('[data-gtts-qps]').value;
+    if (!Number.isInteger(samples) || samples < 1 || !languages || !(qps > 0)) return alert('Enter locales, a positive sample count, and a positive QPS.');
     await api(`/api/wakewords/${name}/google-tts-config`, {method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({samples, languages, voices})});
+      body: JSON.stringify({samples, languages, voices, qps})});
     refresh();
   } else if (act === 'test') {
     const input = card.querySelector('input[type=file]');

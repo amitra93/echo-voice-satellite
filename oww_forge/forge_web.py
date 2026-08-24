@@ -163,6 +163,7 @@ def _wakewords_state() -> list:
             "google_tts_languages": cfg.get("google_tts_languages", "en-US,en-GB,en-AU,en-IN,en-PH,en-SG,en-ZA"),
             "google_tts_voices": cfg.get("google_tts_voices", ""),
             "google_tts_samples_per_voice": cfg.get("google_tts_samples_per_voice", 250),
+            "google_tts_qps": cfg.get("google_tts_qps", 2),
             "n_samples": cfg.get("n_samples"),
             "steps": cfg.get("steps"),
             "clips_train": _count(work / "positive_train"),
@@ -234,6 +235,7 @@ async def api_wakeword_create(request):
         google_tts_languages=(body.get("google_tts_languages") or "en-US,en-GB,en-AU,en-IN,en-PH,en-SG,en-ZA").strip(),
         google_tts_voices=(body.get("google_tts_voices") or "").strip(),
         google_tts_samples_per_voice=int(body.get("google_tts_samples_per_voice") or 250),
+        google_tts_qps=float(body.get("google_tts_qps") or 2),
         force=False,
     )
     try:
@@ -368,10 +370,17 @@ async def api_save_google_tts_config(request):
     cfg["google_tts_samples_per_voice"] = samples
     cfg["google_tts_languages"] = languages
     cfg["google_tts_voices"] = str(body.get("voices") or "").strip()
+    try:
+        qps = float(body.get("qps"))
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(text="queries per second must be a number")
+    if qps <= 0:
+        raise web.HTTPBadRequest(text="queries per second must be positive")
+    cfg["google_tts_qps"] = qps
     cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
     return web.json_response({"ok": True, "samples": samples,
                               "languages": languages,
-                              "voices": cfg["google_tts_voices"]})
+                              "voices": cfg["google_tts_voices"], "qps": qps})
 
 
 async def api_google_tts(request):
@@ -387,11 +396,19 @@ async def api_google_tts(request):
         raise web.HTTPBadRequest(text="samples per voice/locale must be positive")
     langs = (body.get("languages") or cfg.get("google_tts_languages") or "en-US").strip()
     voices = (body.get("voices") or cfg.get("google_tts_voices") or "").strip()
+    try:
+        qps = float(body.get("qps") or cfg.get("google_tts_qps", 2))
+    except (TypeError, ValueError):
+        raise web.HTTPBadRequest(text="queries per second must be a number")
+    if qps <= 0:
+        raise web.HTTPBadRequest(text="queries per second must be positive")
     cfg["google_tts_languages"] = langs
     cfg["google_tts_voices"] = voices
     cfg["google_tts_samples_per_voice"] = samples
+    cfg["google_tts_qps"] = qps
     (forge.WAKEWORDS / name / "config.yml").write_text(yaml.safe_dump(cfg, sort_keys=False))
-    argv = ["google-tts", name, "--samples", str(samples), "--languages", langs, "--yes"]
+    argv = ["google-tts", name, "--samples", str(samples), "--languages", langs,
+            "--qps", str(qps), "--yes"]
     if voices:
         argv += ["--voices", voices]
     scope = voices or "all matching Chirp 3 voices"

@@ -234,7 +234,8 @@ count applies to every usable locale/voice pair; pass `--voices` with a
 comma-separated exact voice list to constrain it, or leave it empty to use all
 matching Chirp 3 voices. Each request uses only the selected voice name,
 locale, and reported gender; Chirp 3 speaking-rate and pitch variation are not
-sent. Clips land in the same positive train/test dirs — the subsequent Piper
+sent. The UI's **Queries per second** setting controls the request pacer and
+defaults to 2; the CLI equivalent is `--qps`. Clips land in the same positive train/test dirs — the subsequent Piper
 generation counts them toward `n_samples`, so Google clips displace rather than
 expand the configured positive set.
 

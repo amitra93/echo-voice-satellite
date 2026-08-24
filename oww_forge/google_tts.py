@@ -28,7 +28,7 @@ TEST_FRACTION = 0.1
 EST_PRICE_PER_MCHAR = 16.0
 VOICE_LIST_RETRIES = (15, 30, 60, 120)
 TTS_RETRIES = (15, 30, 60)
-TTS_MIN_INTERVAL = 0.5
+DEFAULT_QPS = 2.0
 
 
 def log(msg: str) -> None:
@@ -104,7 +104,7 @@ def list_chirp3_voices(languages):
 
 
 def synthesize(phrases, samples_per_voice, train_dir: Path, test_dir: Path,
-               languages, voice_names=(), assume_yes=False) -> None:
+               languages, voice_names=(), assume_yes=False, qps=DEFAULT_QPS) -> None:
     """Synthesize every selected Chirp 3 voice/locale pair equally.
 
     ``samples_per_voice`` applies independently to each usable voice and
@@ -130,6 +130,8 @@ def synthesize(phrases, samples_per_voice, train_dir: Path, test_dir: Path,
         sys.exit("at least one locale is required")
     if samples_per_voice < 1:
         sys.exit("samples per voice must be positive")
+    if qps <= 0:
+        sys.exit("queries per second must be positive")
 
     try:
         inventory = [v for v in _list_voices_with_retry(client).voices if "Chirp3" in v.name]
@@ -175,7 +177,7 @@ def synthesize(phrases, samples_per_voice, train_dir: Path, test_dir: Path,
             jobs.append((phrase, locale, voice, dest))
 
     bad_voices = set()
-    request_pacer = _RequestPacer(TTS_MIN_INTERVAL)
+    request_pacer = _RequestPacer(1.0 / qps)
 
     def synth_one(job):
         phrase, locale, voice, dest = job

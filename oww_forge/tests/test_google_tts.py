@@ -7,10 +7,14 @@ from pathlib import Path
 import numpy as np
 sys.path.insert(0, str(Path(__file__).parents[1]))
 
-from google_tts import _write_wav16k
+from google_tts import DEFAULT_QPS, _RequestPacer, _write_wav16k
 
 
 class GoogleTtsAudioTests(unittest.TestCase):
+    def test_default_qps_is_two_and_pacer_interval_is_inverse_qps(self):
+        self.assertEqual(DEFAULT_QPS, 2.0)
+        self.assertAlmostEqual(_RequestPacer(1 / 4).interval, 0.25)
+
     def test_response_is_normalized_to_16khz_mono(self):
         try:
             import soundfile as sf
