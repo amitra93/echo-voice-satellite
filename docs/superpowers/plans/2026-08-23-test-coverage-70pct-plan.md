@@ -440,6 +440,20 @@ replacement, persistence, and pushing each connected device its effective
 configuration. The full controller suite passes (`749 passed, 1 skipped`);
 `em_api.py` reached **19.1%** overall.
 
+### Approved Phase 4 execution status (2026-08-23)
+The API workstream now includes direct tests for setup/auth/users, global and
+per-device config, device listing/detail/approval/label/delete paths, and the
+associated validation/error branches. The controller workstream includes
+stubbed imports plus `Device` tests for capabilities, RTT/stat draining,
+control/data messages, reconnect grace, speaking transitions, LED helpers,
+speaker framing, and pending registration.
+
+The exact full production-only controller run is **761 passed, 1 skipped,
+57.9% coverage**. This is an improvement, but it does **not** meet the 70%
+target yet. The remaining work is concentrated in the large OTA/provisioning/
+activity sections of `em_api.py` and the wake/control/message-loop orchestration
+in `em_controller.py`; no hardware or real wake-model paths were counted.
+
 ### Phase 4 — the big lever: `em_api.py` and `em_controller.py`
 This is genuinely necessary — Phases 3+5 alone cap out well short of 70%
 for the controller, because these two files are 48% of production
@@ -474,6 +488,15 @@ the number needed to close the gap.
 
 ### Phase 5 — dashboard
 Blocked on the decision below.
+
+### Dashboard Option A execution (approved and implemented 2026-08-23)
+Extracted shared pure logic into `static/dashboard_logic.js`, loaded before the
+classic dashboard bundle, and updated `dashboard.jsx` to call the shared
+implementation. Added Node tests for ingress URLs, labels/time formatting,
+device-state priority, Wi-Fi bands, turn segments, banner modes, effective
+config scoping, and on-device wake modes. The dashboard logic test suite passes
+with Node's built-in coverage reporting; the existing Wi-Fi, boot-target, and
+package-verdict suites were updated to consume the extracted source.
 
 ### Phase 6 — wire up reporting (not gating)
 A CI job (or a local script run periodically) that runs `pytest --cov`,
