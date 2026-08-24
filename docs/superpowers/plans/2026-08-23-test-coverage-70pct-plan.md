@@ -55,8 +55,8 @@ Split by what's already covered vs. not:
   `version.py`, `em_audio_frame.py`, `em_sync_sim`, `em_tap_burst`. This is
   the payoff of the pattern CLAUDE.md documents repeatedly — nothing to do
   here.
-- **Real gaps, all pure-testable-in-principle**: `em_ns.py` (0%),
-  `em_auth.py` (54%), `em_db.py` (62%), `em_oww_assets.py`
+- **Real gaps, all pure-testable-in-principle**: `em_auth.py` (54%),
+  `em_db.py` (62%), `em_oww_assets.py`
   (57%), `em_sendspin.py` (75%), `em_hostip.py` (78%),
   `tools/sync_channels.py` (56%), `em_start.py` (0%).
 - **The big lever**: `em_controller.py` (1421 stmts, **0%**) and
@@ -199,6 +199,17 @@ the lowest-coverage controller production module. Added
 controller production-only result increased from **45.3% to 45.9%**;
 `699 passed, 1 skipped`.
 
+### Phase 3 execution: controller NS slice (completed 2026-08-23)
+Added `controller/tests/test_ns.py` with fake ONNX sessions, covering model
+availability and lazy loading, tensor-name discovery, load failure caching,
+partial-hop buffering, multi-hop state updates, output clipping, and debug
+WAV pair writing/failure handling. No ONNX Runtime or DTLN model files are
+required.
+
+`em_ns.py` increased from **0% to 100%** (99/99 statements). Full controller
+production-only coverage increased from **45.9% to 47.3%**;
+`712 passed, 1 skipped`.
+
 ### Phase 2 — device: deepen what's partially tested
 Extract and test the pure cores of `internal/wifi` (marker/gate decision,
 conf generation) and `internal/discovery` (backoff loop via an injected
@@ -224,8 +235,7 @@ lower than illustrated.
 (query and migration-fixup logic), `em_oww_assets.py` (LRU eviction,
 free-space math — CLAUDE.md already calls this "pure logic, unit-tested,"
 so 57% is real untested branches, not a designed gap), `em_sendspin.py`,
-`em_hostip.py`, `tools/sync_channels.py`, `em_ns.py` (buffering/resample
-logic around DTLN, not the model itself), `em_start.py` (the
+`em_hostip.py`, `tools/sync_channels.py`, `em_start.py` (the
 option→env-var mapping is already exercised as *data* by
 `test_deploy.py`; add tests that actually run `main()`'s mapping logic).
 **Illustrative targets**: 85%, 82%, 85%, 88%, 92%, 85%, 45%, 40%
