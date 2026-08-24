@@ -972,6 +972,49 @@ def cmd_new(args) -> None:
 
 BUILD_STEPS = ["generate", "augment", "train"]
 STEP_FLAGS = {"generate": "--generate_clips", "augment": "--augment_clips", "train": "--train_model"}
+FEATURE_FILES = ("positive_features_train.npy", "positive_features_test.npy",
+                 "negative_features_train.npy", "negative_features_test.npy")
+FEATURE_MANIFEST = ".feature_sources.json"
+CLIP_DIRS = ("positive_train", "positive_test", "negative_train", "negative_test")
+
+
+def feature_sources_manifest(work_dir: Path, config: dict) -> dict:
+    """Describe the audio and augmentation options used to make feature arrays."""
+    clips = []
+    for directory in CLIP_DIRS:
+        for path in sorted((work_dir / directory).glob("*.wav")):
+            stat = path.stat()
+            clips.append({"path": f"{directory}/{path.name}",
+                          "size": stat.st_size, "mtime_ns": stat.st_mtime_ns})
+    return {
+        "version": 1,
+        "clips": clips,
+        "augmentation": {
+            "augmentation_rounds": config.get("augmentation_rounds"),
+            "use_musan_background": bool(config.get("use_musan_background")),
+            "use_slr28_augmentation": bool(config.get("use_slr28_augmentation")),
+        },
+    }
+
+
+def features_stale(work_dir: Path, config: dict) -> bool:
+    """Whether feature arrays are absent or do not match their source clips."""
+    if not all((work_dir / filename).exists() for filename in FEATURE_FILES):
+        return True
+    try:
+        recorded = json.loads((work_dir / FEATURE_MANIFEST).read_text())
+    except (OSError, json.JSONDecodeError):
+        return True
+    return recorded != feature_sources_manifest(work_dir, config)
+
+
+def write_feature_manifest(work_dir: Path, config: dict) -> None:
+    """Atomically mark all successfully regenerated feature arrays as current."""
+    path = work_dir / FEATURE_MANIFEST
+    part = path.with_name(path.name + ".part")
+    part.write_text(json.dumps(feature_sources_manifest(work_dir, config),
+                               sort_keys=True, separators=(",", ":")))
+    part.replace(path)
 
 
 def cmd_build(args) -> None:
@@ -982,6 +1025,7 @@ def cmd_build(args) -> None:
     import yaml
 
     config = yaml.safe_load(cfg_path.read_text())
+    work_dir = Path(config["output_dir"]) / config["model_name"]
     missing = missing_assets(config)
     if missing:
         sys.exit("missing training assets:\n  - " + "\n  - ".join(missing))
@@ -1040,25 +1084,22 @@ def cmd_build(args) -> None:
     if args.only_step:
         steps = [args.only_step]
 
-    # Heal an interrupted augment: train.py's "features already exist" check
-    # only looks at the first of the four .npy files, so a run killed midway
-    # (container restart) would skip augment and then crash in training on
-    # the missing ones. Partial set → recompute all four.
-    if "augment" in steps:
-        feat_dir = WAKEWORDS / name / name
-        feats = ["positive_features_train.npy", "positive_features_test.npy",
-                 "negative_features_train.npy", "negative_features_test.npy"]
-        have = [f for f in feats if (feat_dir / f).exists()]
-        if have and len(have) < len(feats):
-            log(f"found {len(have)}/4 feature files from an interrupted augment — recomputing all")
-            args.overwrite = True
-
     for step in steps:
         log(f"=== step: {step} ===")
+        # Generate can add Piper clips, so inspect sources only after it runs.
+        # Upstream checks only whether feature files exist; a manifest is what
+        # prevents fresh Chirp/imported clips from being trained as stale data.
+        if step == "augment" and features_stale(work_dir, config):
+            log("feature sources changed or are untracked — rebuilding all feature arrays")
+            args.overwrite = True
+        if step == "train" and features_stale(work_dir, config):
+            sys.exit("training clips changed since feature generation; rerun from augment")
         cmd = [sys.executable, TRAIN_PY, "--training_config", str(cfg_path), STEP_FLAGS[step]]
         if args.overwrite and step == "augment":
             cmd.append("--overwrite")
         subprocess.run(cmd, check=True)
+        if step == "augment":
+            write_feature_manifest(work_dir, config)
 
     if "train" in steps:
         src = WAKEWORDS / name / f"{name}.onnx"
@@ -1142,6 +1183,10 @@ def evaluate_model(name: str) -> None:
         cfg = yaml.safe_load(cfg_path.read_text())
         if cfg.get("output_dir") and cfg.get("model_name"):
             work_dir = Path(cfg["output_dir"]) / cfg["model_name"]
+
+    if cfg_path.exists() and features_stale(work_dir, cfg):
+        log("WARNING: test clips or augmentation settings changed after the feature build; "
+            "this model was not trained on the current dataset")
 
     pos_dir = work_dir / "positive_test"
     neg_dir = work_dir / "negative_test"
@@ -1277,8 +1322,8 @@ def import_labeled_dataset(name: str, zip_path: Path) -> dict:
     rule google_tts uses, so positives and negatives are split independently and
     a re-run is idempotent per file order. Clips are named `custom_*` so
     forge.py's evaluation buckets them as "Custom / Recorded". Real recordings
-    displace synthetic clips at generate time, exactly like `+ Family
-    recordings`.
+    displace synthetic clips at generate time while retaining their supplied
+    polarity.
 
     Returns per-directory counts (plus `skipped`). Raises FileNotFoundError if
     the wake word does not exist.

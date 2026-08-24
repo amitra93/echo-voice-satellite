@@ -366,8 +366,8 @@ function render() {
     const stages = [
       ['Created', true],
       ['Voices', w.clips_train > 0],
-      ['Mixing', w.features_built],
-      ['Ready', w.model_built],
+      ['Mixing', w.features_built && !w.features_stale],
+      ['Ready', w.model_built && !w.features_stale],
     ];
     const activeIdx = stages.findIndex(s => !s[1]);
     const isTraining = busy() && state.job.label.includes(`'${w.name}'`);
@@ -384,13 +384,14 @@ function render() {
         ${w.model_built ? `<span class="built">trained ${fmtAgo(w.model_mtime)}</span>` : ''}
       </div>
       <div class="stepper">${stepper}</div>
+      ${w.features_stale ? `<div class="hint" style="color:var(--err);margin:-8px 0 12px">New or changed clips need mixing. Retrain will rebuild features automatically.</div>` : ''}
       <div class="row">
         <button class="accent" data-act="build" ${busy() ? 'disabled' : ''}>
-          ${w.model_built ? 'Retrain' : w.clips_train ? 'Continue training' : 'Train'}</button>
+          ${w.features_stale ? 'Retrain new clips' : w.model_built ? 'Retrain' : w.clips_train ? 'Continue training' : 'Train'}</button>
         ${w.model_built ? `
           <button data-act="mic">🎤 Try it</button>
           <button data-act="test">Test a recording…</button>
-          <button data-act="eval" ${busy() ? 'disabled' : ''} title="Score all test clips and generate a full accuracy report">📊 Evaluation report</button>
+          <button data-act="eval" ${busy() ? 'disabled' : ''} title="${w.features_stale ? 'Scores current clips against a model trained on older data' : 'Score all test clips and generate a full accuracy report'}">📊 Evaluation report</button>
           <a href="/api/models/${esc(w.name)}.onnx"><button>Download model</button></a>` : ''}
         <button class="danger" data-act="del" style="margin-left:auto">remove</button>
         <input type="file" accept="audio/*" multiple style="display:none">

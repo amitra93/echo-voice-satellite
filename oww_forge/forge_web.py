@@ -156,6 +156,7 @@ def _wakewords_state() -> list:
         name = cfg["model_name"]
         work = Path(cfg["output_dir"]) / name
         model = forge.MODELS / f"{name}.onnx"
+        features_built = all((work / filename).exists() for filename in forge.FEATURE_FILES)
         words.append({
             "name": name,
             "phrases": cfg.get("target_phrase", []),
@@ -168,7 +169,8 @@ def _wakewords_state() -> list:
             "steps": cfg.get("steps"),
             "clips_train": _count(work / "positive_train"),
             "clips_test": _count(work / "positive_test"),
-            "features_built": (work / "positive_features_train.npy").exists(),
+            "features_built": features_built,
+            "features_stale": forge.features_stale(work, cfg),
             "model_built": model.exists(),
             "model_size_kb": round(model.stat().st_size / 1e3) if model.exists() else None,
             "model_mtime": model.stat().st_mtime if model.exists() else None,
@@ -459,8 +461,11 @@ async def api_evaluate(request):
     model_path = forge.MODELS / f"{name}.onnx"
     if not model_path.exists():
         raise web.HTTPConflict(text=f"model {name}.onnx does not exist yet (build first)")
+    cfg = yaml.safe_load((forge.WAKEWORDS / name / "config.yml").read_text())
+    work = Path(cfg["output_dir"]) / cfg["model_name"]
+    stale = forge.features_stale(work, cfg)
     _start_job("eval", f"evaluating '{name}'", ["eval", name])
-    return web.json_response({"ok": True})
+    return web.json_response({"ok": True, "features_stale": stale})
 
 
 async def api_delete(request):

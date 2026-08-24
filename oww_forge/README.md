@@ -237,7 +237,9 @@ locale, and reported gender; Chirp 3 speaking-rate and pitch variation are not
 sent. The UI's **Queries per second** setting controls the request pacer and
 defaults to 2; the CLI equivalent is `--qps`. Clips land in the same positive train/test dirs — the subsequent Piper
 generation counts them toward `n_samples`, so Google clips displace rather than
-expand the configured positive set.
+expand the configured positive set. After adding Chirp clips or importing a
+labelled dataset, select **Retrain**: Forge detects changed clips and
+automatically rebuilds feature arrays before training.
 
 Setup: create a GCP service account with the Text-to-Speech API enabled, save
 the JSON key as `./data/google-credentials.json`. **Usually free**: the API's
