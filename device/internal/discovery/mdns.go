@@ -14,6 +14,10 @@ import (
 
 const serviceType = "_emcontroller._tcp"
 
+var browseFunc = browse
+var after = time.After
+var verifyServerFunc = verifyServer
+
 type ServerInfo struct {
 	Host string
 	Port int
@@ -34,7 +38,7 @@ func FindServer(ctx context.Context) (*ServerInfo, error) {
 		}
 
 		log.Printf("mDNS: browsing for %s.local...", serviceType)
-		info, err := browse(ctx)
+		info, err := browseFunc(ctx)
 		if err == nil && info != nil {
 			log.Printf("mDNS: found Clara server at %s", info.Addr)
 			return info, nil
@@ -44,7 +48,7 @@ func FindServer(ctx context.Context) (*ServerInfo, error) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(backoff):
+		case <-after(backoff):
 		}
 
 		backoff *= 2
@@ -58,7 +62,7 @@ func FindServer(ctx context.Context) (*ServerInfo, error) {
 // callers that want fresher TXT data (e.g. a tls_port that appeared after
 // the endpoint was cached) but have a working fallback if mDNS fails.
 func FindServerOnce(ctx context.Context) (*ServerInfo, error) {
-	return browse(ctx)
+	return browseFunc(ctx)
 }
 
 func browse(ctx context.Context) (*ServerInfo, error) {
@@ -106,23 +110,35 @@ func browse(ctx context.Context) (*ServerInfo, error) {
 				continue
 			}
 
-			addr := fmt.Sprintf("%s:%d", host, entry.Port)
-			if !verifyServer(addr) {
-				log.Printf("mDNS: candidate %s failed verification — skipping", addr)
+			info, ok := serverInfoFromEntry(entry, verifyServerFunc)
+			if !ok {
+				log.Printf("mDNS: candidate for %s failed verification — skipping", entry.Instance)
 				continue
 			}
 
-			return &ServerInfo{
-				Host:    host,
-				Port:    entry.Port,
-				Addr:    addr,
-				TLSPort: parseTLSPort(entry.Text),
-			}, nil
+			return info, nil
 
 		case <-browseCtx.Done():
 			return nil, fmt.Errorf("browse timeout")
 		}
 	}
+}
+
+func serverInfoFromEntry(entry *zeroconf.ServiceEntry, verify func(string) bool) (*ServerInfo, bool) {
+	host := ""
+	if len(entry.AddrIPv4) > 0 {
+		host = entry.AddrIPv4[0].String()
+	} else if len(entry.AddrIPv6) > 0 {
+		host = entry.AddrIPv6[0].String()
+	}
+	if host == "" {
+		return nil, false
+	}
+	addr := fmt.Sprintf("%s:%d", host, entry.Port)
+	if !verify(addr) {
+		return nil, false
+	}
+	return &ServerInfo{Host: host, Port: entry.Port, Addr: addr, TLSPort: parseTLSPort(entry.Text)}, true
 }
 
 // parseTLSPort extracts the tls_port key from mDNS TXT records

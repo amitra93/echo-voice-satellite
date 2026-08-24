@@ -241,6 +241,17 @@ network association gates remain outside host tests.
 `internal/wifi` increased from **0% to 35.7%**. The full host-testable device
 suite passes, including race checks for Wi-Fi and Phase 1 packages.
 
+### Device workstream execution: discovery slice (completed 2026-08-23)
+Added `device/internal/discovery/mdns_test.go` and seams for the browse,
+backoff timer, and server verification functions. Tests cover TXT TLS-port
+parsing, IPv4/IPv6 candidate conversion, missing-address and failed-verification
+rejection, successful discovery, capped retry backoff, cancellation during a
+retry, already-canceled contexts, and the single-browse API. No mDNS network
+service is required.
+
+`internal/discovery` increased from **0% to 45.8%**. The full host-testable
+device suite passes, including discovery/Wi-Fi race checks.
+
 ### Phase 3 — controller quick/medium wins
 `em_auth.py` (session/bcrypt/role logic), `em_db.py`
 (query and migration-fixup logic), `em_oww_assets.py` (LRU eviction,
