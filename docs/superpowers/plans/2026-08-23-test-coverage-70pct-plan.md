@@ -422,6 +422,13 @@ config clobber detection. The full controller suite passes (`741 passed,
 1 skipped`); `em_api.py` moved from 15.4% to 15.9% while the next step is
 authenticated handler-level coverage.
 
+### API workstream execution: auth/setup handler slice (completed 2026-08-23)
+Added `controller/tests/test_api_auth_handlers.py` using direct handler calls
+and the lightweight `websockets` import stub. Tests cover setup state, first
+admin setup, password login/logout, ingress login rejection/success, and the
+public `/api/auth/me` response shape. The full controller suite passes
+(`746 passed, 1 skipped`); `em_api.py` reached **17.2%** overall.
+
 ### Phase 4 — the big lever: `em_api.py` and `em_controller.py`
 This is genuinely necessary — Phases 3+5 alone cap out well short of 70%
 for the controller, because these two files are 48% of production
