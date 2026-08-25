@@ -10,6 +10,7 @@ services:
     restart: unless-stopped
     network_mode: host
     environment:
+      - TZ=America/New_York
       - DEBUG=1
     env_file:
       - .env

@@ -30,6 +30,7 @@ services:
     restart: unless-stopped
     network_mode: host
     environment:
+      - TZ=America/New_York
       - MDNS_NAME=echomuse-v2
       - DB_PATH=/app/data/echomuse.db
       - DEVICE_APPROVAL=strict
