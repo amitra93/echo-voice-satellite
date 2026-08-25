@@ -856,7 +856,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 					// Re-read per frame: a config push can swap the scorer
 					// mid-stream, and the replaced one is closed.
 					if sc := d.ShadowScorer(); sc != nil {
-						sc.PushBytes(buf[:vadOwwChunkBytes])
+						sc.PushBytesSequence(buf[:vadOwwChunkBytes], seqNum)
 					}
 					sendFrame(buf[:vadOwwChunkBytes])
 					buf = buf[vadOwwChunkBytes:]

@@ -84,6 +84,7 @@ import em_oww_models
 import em_training_captures
 import em_player
 import em_volume
+import em_wake_audio
 import em_sendspin
 import em_clock
 
@@ -419,6 +420,10 @@ class Device:
         # that will actually KNOW what a device has.
         self.oww_model_ready: bool = True
         self.pending_wake: em_shadow.PendingWake = em_shadow.PendingWake()
+        # The device streams continuous PCM during wake listening. Keep enough
+        # of it to rewind from the exact device-reported activation sequence
+        # when control-plane wake delivery arrives after the first command words.
+        self.wake_audio = em_wake_audio.FrameRing()
         # This controller's own crossings while the DEVICE is triggering —
         # the comparison from the other side. Kept in "on" mode because the
         # question that justified on-device wake ("do the two agree?") is
@@ -1459,7 +1464,8 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
                 log.debug(f"[{device.device_id}] TTS stream close: {e}")
 
 
-async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_wakeword: bool = False):
+async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_wakeword: bool = False,
+                            initial_audio: tuple[bytes, ...] | None = None):
     """
     is_wakeword: explicit flag for whether this turn was triggered by wake-
     word detection (as opposed to a button press). Used to decide preroll
@@ -1475,12 +1481,13 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
             drained += 1
         except asyncio.QueueEmpty:
             break
-    while not device.voice_queue.empty():
-        try:
-            device.voice_queue.get_nowait()
-            drained += 1
-        except asyncio.QueueEmpty:
-            break
+    if initial_audio is None:
+        while not device.voice_queue.empty():
+            try:
+                device.voice_queue.get_nowait()
+                drained += 1
+            except asyncio.QueueEmpty:
+                break
     if drained:
         log.info(f"[{device.device_id}] Voice turn: drained {drained} stale frames")
     # Voice preempts music: pause an active media session for the whole
@@ -1678,6 +1685,7 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
             # initial wakeword-triggered turn.
             turn_label      = trigger_label
             preroll_discard = turn_engine.VOICE_PREROLL_DISCARD if is_wakeword else 0
+            turn_initial_audio = initial_audio or ()
             while True:
                 should_continue = False
                 try:
@@ -1687,6 +1695,7 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                         post_turn_play=post_turn_play_esphome,
                         trigger_label=turn_label,
                         preroll_discard=preroll_discard,
+                        initial_audio=turn_initial_audio,
                     )
                 finally:
                     # Watcher spans thinking→playback and is owned here:
@@ -1724,6 +1733,7 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                     await _push_device_state(device)
                     turn_label      = "barge-in"
                     preroll_discard = turn_engine.VOICE_PREROLL_DISCARD
+                    turn_initial_audio = ()
                     # Reset spinner state for the next turn's thinking animation.
                     stop_spin.clear()
                     spin_task = None
@@ -1761,6 +1771,7 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                     await _push_device_state(device)
                     turn_label      = "continuation"
                     preroll_discard = 0
+                    turn_initial_audio = ()
                     # Reset spinner state for the next turn's thinking animation.
                     stop_spin.clear()
                     spin_task = None
@@ -2288,6 +2299,21 @@ async def wake_word_listener(device: Device):
                             "threshold":   round(float(eff_threshold), 4),
                             "noise_floor": round(device.noise_floor, 5),
                         }
+                        initial_audio = None
+                        if source == "device":
+                            activation_seq = dev_wake["activation_seq"]
+                            initial_audio = tuple(device.wake_audio.after(activation_seq))
+                            if initial_audio:
+                                log.info(
+                                    "[%s] Wake rewind: %d frame(s) after sequence %d",
+                                    device.device_id, len(initial_audio), activation_seq,
+                                )
+                            else:
+                                log.warning(
+                                    "[%s] Wake rewind unavailable: activation sequence %d "
+                                    "is outside the PCM ring",
+                                    device.device_id, activation_seq,
+                                )
                         device.oww_paused.set()
                         device.oww_paused_since = loop.time()
                         log.debug(
@@ -2347,7 +2373,10 @@ async def wake_word_listener(device: Device):
                         # this distinguishes the two sources in the Activity
                         # tab and in queries without any of them changing.
                         label = "wakeword-dev" if source == "device" else "wakeword"
-                        await _run_voice_locked(device, trigger_label=f"{label}({score:.3f})", is_wakeword=True)
+                        await _run_voice_locked(
+                            device, trigger_label=f"{label}({score:.3f})",
+                            is_wakeword=True, initial_audio=initial_audio,
+                        )
                         # Back to ch6 omni for wake listening. Belt-and-braces
                         # for turns that never restarted the stream (no-TTS
                         # outcomes: error, no-speech, cancel) — a lock left
@@ -3169,7 +3198,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                             f"{device.oww_on_device!r}, not 'on'"
                         )
                     elif device.pending_wake.offer(
-                        msg.get("score"), msg.get("threshold"), msg.get("ageMs")
+                        msg.get("score"), msg.get("threshold"), msg.get("ageMs"),
+                        msg.get("activationSeq")
                     ):
                         log.info(
                             f"[{device_id}] on-device wake: "
@@ -3352,6 +3382,7 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
 
         device.data_ws = ws
         device.data_ready.set()
+        device.wake_audio.clear()
         log.info(f"[data] Data connection established: {device_id}")
 
         _frame_err_last = float("-inf")
@@ -3392,6 +3423,9 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
                         )
                     continue
                 payload = raw[MIC_HEADER_LEN:]
+                sequence = int.from_bytes(raw[1:MIC_HEADER_LEN], "big")
+                if len(payload) == CHUNK_BYTES:
+                    device.wake_audio.append(sequence, payload)
                 q = (device.voice_queue if device.oww_paused.is_set()
                      else device.mic_queue)
                 try:

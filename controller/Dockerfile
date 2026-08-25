@@ -91,6 +91,7 @@ COPY em_music_sync.py .
 COPY em_sendspin.py .
 COPY em_sync_sim.py .
 COPY em_turn_engine.py .
+COPY em_wake_audio.py .
 COPY em_test_audio.py .
 COPY em_ha_sidechannels.py .
 COPY version.py .

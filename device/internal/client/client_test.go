@@ -122,7 +122,7 @@ func TestOutboundReportsDropSafelyWhenDisconnected(t *testing.T) {
 	c.SendWifiResult(false, "Home", "failed")
 	c.SendPlaybackStats(10, 2, map[string]int{"min_depth": 3})
 	c.SendOwwShadowCross(0.7, 20)
-	c.SendOwwWake(0.8, 0.5, 15)
+	c.SendOwwWake(0.8, 0.5, 15, 42)
 	c.SendBleAdverts([]string{"advert"})
 	c.SendWifiScanResult(nil, "scan failed")
 }

@@ -188,7 +188,7 @@ class PendingWake:
     def __init__(self):
         self._wake = None
 
-    def offer(self, score, threshold, age_ms, at_now: float | None = None) -> bool:
+    def offer(self, score, threshold, age_ms, activation_seq, at_now: float | None = None) -> bool:
         """
         Record a wake the device is asking us to act on. Returns acceptance.
 
@@ -200,7 +200,10 @@ class PendingWake:
         try:
             score = float(score)
             age_s = float(age_ms or 0) / 1000.0
+            activation_seq = int(activation_seq)
         except (TypeError, ValueError):
+            return False
+        if not 0 <= activation_seq <= 0xFFFF:
             return False
         try:
             threshold = float(threshold)
@@ -212,7 +215,8 @@ class PendingWake:
         age_s = max(0.0, min(age_s, MAX_AGE_S))
         at = (at_now if at_now is not None else now()) - age_s
         self._wake = {"at": at, "score": round(score, 4),
-                      "threshold": round(threshold, 4) if threshold is not None else None}
+                       "threshold": round(threshold, 4) if threshold is not None else None,
+                       "activation_seq": activation_seq}
         return True
 
     def take(self, at_now: float | None = None):

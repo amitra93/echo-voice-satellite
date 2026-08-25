@@ -929,8 +929,8 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 	// between "shadow" and "on" costs nothing: the scorer is identical in
 	// both and rebuilding it would reload a 12MB runtime and open a fresh
 	// ~1.28s not-ready window every time someone changed their mind.
-	sc, err := shadow.Open(model, threshold, func(score, crossed float32, at time.Time) {
-		onWakeCrossing(cc, srv, score, crossed, at)
+	sc, err := shadow.Open(model, threshold, func(score, crossed float32, at time.Time, sequence uint16) {
+		onWakeCrossing(cc, srv, score, crossed, at, sequence)
 	})
 	if err != nil {
 		if msg := err.Error(); msg != shadowState.lastErr {
@@ -979,7 +979,7 @@ func actsOnCrossings(mode string) string {
 // the nominal threshold instead is what once made every barge-in look like a
 // wake that had fired below its own bar.
 func onWakeCrossing(cc *client.ControlClient, srv *server.Server,
-	score, crossed float32, at time.Time) {
+	score, crossed float32, at time.Time, activationSeq uint16) {
 	ageMs := time.Since(at).Milliseconds()
 	if config.Get().Snapshot().OwwOnDevice != config.OnDeviceOn {
 		cc.SendOwwShadowCross(score, ageMs)
@@ -1012,7 +1012,7 @@ func onWakeCrossing(cc *client.ControlClient, srv *server.Server,
 			}
 		}
 	}
-	cc.SendOwwWake(score, crossed, ageMs)
+	cc.SendOwwWake(score, crossed, ageMs, activationSeq)
 }
 
 func applyBleConfig(scanner *bluetooth.Scanner) {

@@ -968,12 +968,13 @@ func (c *ControlClient) SendOwwShadowCross(score float32, ageMs int64) {
 // for the same reason as shadow crossings: an Echo's wall clock is unreliable
 // before NTP. The controller needs it to compare claims across devices without
 // network delay deciding which room answers.
-func (c *ControlClient) SendOwwWake(score, threshold float32, ageMs int64) {
+func (c *ControlClient) SendOwwWake(score, threshold float32, ageMs int64, activationSeq uint16) {
 	_ = c.writeJSON(map[string]interface{}{
-		"type":      "oww_wake",
-		"score":     score,
-		"threshold": threshold,
-		"ageMs":     ageMs,
+		"type":          "oww_wake",
+		"score":         score,
+		"threshold":     threshold,
+		"ageMs":         ageMs,
+		"activationSeq": activationSeq,
 	})
 }
 

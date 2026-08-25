@@ -36,7 +36,7 @@ def test_constants_match_the_old_esphome_values():
     # Not load-bearing on their own, but a silent value change here would
     # change wake-tail trimming / hold-gesture timing without anyone
     # noticing — pin them explicitly.
-    assert engine.VOICE_PREROLL_DISCARD == 3
+    assert engine.VOICE_PREROLL_DISCARD == 0
     assert engine.BUTTON_HOLD_MS == 750
     assert engine.VAD_SENTINEL_END == "vad_end"
     assert engine.VAD_SENTINEL_TIMEOUT == "vad_no_speech_timeout"
@@ -178,6 +178,29 @@ def test_zero_preroll_forwards_every_frame():
 
         forwarded = [f for f in turn.socket.frames if f.frame_type == MIC_PCM]
         assert len(forwarded) == 1
+
+    asyncio.run(run())
+
+
+def test_initial_audio_is_forwarded_before_live_voice_queue_frames():
+    async def run():
+        device = FakeDevice()
+        turn = engine.Turn(1, device, None, None, initial_audio=(
+            b"\x01" * MIC_FRAME_BYTES,
+            b"\x02" * MIC_FRAME_BYTES,
+        ))
+        turn.socket = FakeSocket()
+        live = b"\x03" * MIC_FRAME_BYTES
+        await device.voice_queue.put(live)
+        await device.voice_queue.put(engine.VAD_SENTINEL_END)
+        await engine._send_mic(turn)
+
+        forwarded = [f.payload for f in turn.socket.frames if f.frame_type == MIC_PCM]
+        assert forwarded == [
+            b"\x01" * MIC_FRAME_BYTES,
+            b"\x02" * MIC_FRAME_BYTES,
+            live,
+        ]
 
     asyncio.run(run())
 

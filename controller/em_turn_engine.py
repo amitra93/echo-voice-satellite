@@ -55,7 +55,10 @@ log = logging.getLogger("echomuse.turn_engine")
 
 # Ported from em_esphome.py's module constants (Phase 4 cutover) — same
 # values, same meaning, now protocol-agnostic.
-VOICE_PREROLL_DISCARD = 3   # ~240ms of wake-word tail dropped from voice_queue
+# The wake listener consumes the pre-trigger frames itself. Discarding more
+# frames here removes the beginning of the user's command when they speak
+# naturally after the wake word; retain the first routed frame instead.
+VOICE_PREROLL_DISCARD = 0
 BUTTON_HOLD_MS = 750        # device-measured heldMs threshold for a HOLD gesture
 
 # Ceiling on how long _run_turn waits for *something* — the device's own VAD
@@ -118,11 +121,9 @@ class Turn:
     # _run_turn to skip the TTS wait and by the outcome-reporting callers to
     # record "no_speech" instead of "ok".
     no_speech: bool = False
-    # Real audio frames still to discard before forwarding to HA — the
-    # wake-word tail ("…Jarvis") sitting at the front of voice_queue, since
-    # the stream no longer stops at wake. Set from trigger_voice_turn's
-    # preroll_discard; 0 for button/continuation turns and for HACS-created
-    # announcement turns (no wake word, nothing to trim).
+    # Real audio frames still to discard before forwarding to HA. This remains
+    # zero for normal wake turns: the listener consumed pre-trigger audio and
+    # device activation-sequence rewind supplies the post-trigger frames.
     preroll_remaining: int = 0
     started_mono: float = field(default_factory=time.monotonic)
     endpoint_mono: float | None = None
@@ -132,6 +133,7 @@ class Turn:
     tts_ended_mono: float | None = None
     stt_text: str | None = None
     capture_audio: bool = False
+    initial_audio: tuple[bytes, ...] = ()
     mic_audio: bytearray = field(default_factory=bytearray)
     tts_audio: bytearray = field(default_factory=bytearray)
 
@@ -331,7 +333,38 @@ async def _send_mic(turn: Turn) -> None:
         except Exception as exc:
             log.warning("[%s] nsAsr enabled but DTLN is unavailable (%s) — streaming raw audio",
                         getattr(turn.device, "device_id", "?"), exc)
+
+    async def forward(raw_payload: bytes) -> None:
+        nonlocal denoiser, ns_reporter
+        payload = raw_payload
+        if denoiser is not None:
+            try:
+                payload = denoiser.process(raw_payload)
+                if len(payload) != len(raw_payload):
+                    raise RuntimeError(f"DTLN produced {len(payload)} bytes")
+            except Exception as exc:
+                ns_reporter = denoiser
+                denoiser = None
+                payload = raw_payload
+                log.warning("[%s] NS failed mid-turn (%s) — streaming raw audio",
+                            getattr(turn.device, "device_id", "?"), exc)
+        if em_ns.DEBUG_DIR:
+            ns_debug_raw.extend(raw_payload)
+            ns_debug_out.extend(payload)
+        if turn.capture_audio:
+            remaining = em_recordings.MAX_UTTERANCE_BYTES - len(turn.mic_audio)
+            if remaining > 0:
+                turn.mic_audio.extend(payload[:remaining])
+        await turn.socket.send_bytes(
+            audio.encode_frame(audio.MIC_PCM, turn.mic_sequence, payload)
+        )
+        turn.mic_sequence += 1
+
     try:
+        for payload in turn.initial_audio:
+            if turn.socket is None or turn.cancelled.is_set():
+                return
+            await forward(payload)
         while not turn.cancelled.is_set():
             try:
                 payload = await asyncio.wait_for(turn.device.voice_queue.get(), 1.0)
@@ -357,30 +390,7 @@ async def _send_mic(turn: Turn) -> None:
                 turn.preroll_remaining -= 1
                 continue
 
-            raw_payload = payload
-            if denoiser is not None:
-                try:
-                    payload = denoiser.process(raw_payload)
-                    if len(payload) != len(raw_payload):
-                        raise RuntimeError(f"DTLN produced {len(payload)} bytes")
-                except Exception as exc:
-                    ns_reporter = denoiser
-                    denoiser = None
-                    payload = raw_payload
-                    log.warning("[%s] NS failed mid-turn (%s) — streaming raw audio",
-                                getattr(turn.device, "device_id", "?"), exc)
-            if em_ns.DEBUG_DIR:
-                ns_debug_raw.extend(raw_payload)
-                ns_debug_out.extend(payload)
-            if turn.capture_audio:
-                remaining = em_recordings.MAX_UTTERANCE_BYTES - len(turn.mic_audio)
-                if remaining > 0:
-                    # This is exactly the MIC_PCM payload sent to HA, after NS.
-                    turn.mic_audio.extend(payload[:remaining])
-            await turn.socket.send_bytes(
-                audio.encode_frame(audio.MIC_PCM, turn.mic_sequence, payload)
-            )
-            turn.mic_sequence += 1
+            await forward(payload)
         if turn.socket is not None and not turn.cancelled.is_set():
             await turn.socket.send_bytes(audio.encode_frame(audio.MIC_EOS, turn.mic_sequence))
     finally:
@@ -539,6 +549,7 @@ async def trigger_voice_turn(
     post_turn_play,
     trigger_label: str = "unknown",
     preroll_discard: int = 0,
+    initial_audio: tuple[bytes, ...] = (),
 ) -> bool:
     """Offer a controller-triggered turn to the connected HACS integration."""
     # Pop, not read: a continuation turn loops back into trigger_voice_turn
@@ -553,6 +564,7 @@ async def trigger_voice_turn(
         turn_id, device, on_thinking, post_turn_play,
         preroll_remaining=preroll_discard,
         capture_audio=bool(getattr(device, "save_utterances", False)),
+        initial_audio=initial_audio,
     )
     ENGINE.turns[turn_id] = turn
     await _push_event({
