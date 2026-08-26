@@ -1,8 +1,10 @@
 import math
 
 import numpy as np
+import pytest
 
 import em_eq
+import em_limiter
 
 RATE = 48000
 
@@ -79,6 +81,22 @@ def test_streaming_eq_flat_is_passthrough():
     eq = em_eq.StreamingEQ(RATE, bands=[0.0] * 8, subsonic=False)
     chunk = _sine(500, seconds=0.05)
     assert eq.process(chunk) == chunk
+
+
+def test_makeup_gain_raises_audio_before_the_limiter():
+    pcm = _sine(1000, amp=0.1)
+    plain = em_eq.apply(pcm, RATE, bands=[0.0] * 8, subsonic=False)
+    boosted = em_eq.apply(pcm, RATE, bands=[0.0] * 8, subsonic=False,
+                          makeup_gain_db=6.0)
+    assert _rms(boosted) / _rms(plain) == pytest.approx(2.0, rel=0.03)
+
+
+def test_makeup_gain_is_limited_after_it_is_applied():
+    pcm = _sine(1000, amp=0.8)
+    limiter = em_limiter.Limiter(RATE, threshold_db=-10.0)
+    out = em_eq.apply(pcm, RATE, bands=[0.0] * 8, subsonic=False,
+                      limiter=limiter, makeup_gain_db=12.0)
+    assert np.abs(np.frombuffer(out, dtype=np.int16)).max() <= 32767 * 10 ** (-10 / 20) + 2
 
 
 def test_subsonic_filter_attenuates_sub_bass():

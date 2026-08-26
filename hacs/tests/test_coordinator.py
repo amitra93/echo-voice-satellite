@@ -15,7 +15,6 @@ import importlib
 
 import pytest
 
-pytest.importorskip("homeassistant")
 
 from homeassistant.helpers.update_coordinator import UpdateFailed
 

@@ -2,10 +2,9 @@
 
 __init__.py defers every homeassistant-touching import into the function
 bodies (see its module docstring) — importing THIS test module itself needs
-no more than `custom_components.echo_voice_satellite` (the package) plus
-whatever pytest.importorskip below requires, but exercising the setup/unload
-functions still needs the real coordinator/client/ble_scanner modules
-present, so this file still skips without homeassistant installed.
+no more than `custom_components.echo_voice_satellite` (the package). The test
+suite supplies small Home Assistant-compatible fakes in conftest.py, so setup
+and unload behavior also runs without Home Assistant installed.
 """
 
 import asyncio
@@ -13,7 +12,6 @@ import importlib
 
 import pytest
 
-pytest.importorskip("homeassistant")
 
 module = importlib.import_module("custom_components.echo_voice_satellite")
 from custom_components.echo_voice_satellite.const import CONF_API_KEY, CONF_URL, DOMAIN, PLATFORMS  # noqa: E402

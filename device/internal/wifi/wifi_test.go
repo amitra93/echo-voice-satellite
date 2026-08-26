@@ -1,6 +1,8 @@
 package wifi
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -61,6 +63,25 @@ func TestComposeConfWPA2Network(t *testing.T) {
 	}
 	if strings.Contains(conf, "key_mgmt=NONE") {
 		t.Error("WPA network unexpectedly uses key_mgmt=NONE")
+	}
+}
+
+func TestComposeConfUsesAndroidPropertiesWhenAvailable(t *testing.T) {
+	dir := t.TempDir()
+	getprop := filepath.Join(dir, "getprop")
+	if err := os.WriteFile(getprop, []byte("#!/bin/sh\ncase \"$1\" in\nro.product.name) echo Dot;;\nro.product.manufacturer) echo Amazon;;\nro.product.model) echo Model2;;\nro.serialno) echo Serial2;;\n*) echo fallback;;\nesac\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	oldPath := os.Getenv("PATH")
+	t.Cleanup(func() { _ = os.Setenv("PATH", oldPath) })
+	if err := os.Setenv("PATH", dir); err != nil {
+		t.Fatal(err)
+	}
+	conf := composeConf("Home", "password")
+	for _, want := range []string{"device_name=Dot", "manufacturer=Amazon", "model_name=Model2", "serial_number=Serial2"} {
+		if !strings.Contains(conf, want) {
+			t.Errorf("composeConf missing %q:\n%s", want, conf)
+		}
 	}
 }
 
@@ -146,6 +167,47 @@ func TestCurrentSSID(t *testing.T) {
 	if got := CurrentSSID(); got != "" {
 		t.Fatalf("CurrentSSID(unassociated) = %q, want empty", got)
 	}
+	wpaCli = func(args ...string) (string, error) { return "wpa_state=COMPLETED\nfreq=2412\n", nil }
+	if got := CurrentSSID(); got != "" {
+		t.Fatalf("CurrentSSID(without ssid) = %q", got)
+	}
+}
+
+func TestCurrentSSIDTrimsStatusLines(t *testing.T) {
+	oldCli := wpaCli
+	t.Cleanup(func() { wpaCli = oldCli })
+	wpaCli = func(args ...string) (string, error) {
+		return " wpa_state=COMPLETED\n  ssid=Trimmed\n", nil
+	}
+	if got := CurrentSSID(); got != "Trimmed" {
+		t.Fatalf("CurrentSSID() = %q, want Trimmed", got)
+	}
+}
+
+func TestWaitForAssociationRequiresTheRequestedSSID(t *testing.T) {
+	oldCli, oldSleep := wpaCli, sleep
+	t.Cleanup(func() { wpaCli, sleep = oldCli, oldSleep })
+	wpaCli = func(args ...string) (string, error) {
+		return "wpa_state=COMPLETED\nssid=Other\n", nil
+	}
+	sleep = func(time.Duration) {}
+	if waitForAssociation("Target", 0) { // already expired: must not accept another network
+		t.Fatal("accepted association to the wrong SSID")
+	}
+}
+
+func TestAssociationHelpersRecognizeTheCurrentNetwork(t *testing.T) {
+	oldCli := wpaCli
+	t.Cleanup(func() { wpaCli = oldCli })
+	wpaCli = func(args ...string) (string, error) {
+		return "wpa_state=COMPLETED\nssid=Target\n", nil
+	}
+	if !associated() || !associatedTo("Target") {
+		t.Fatal("association helpers rejected the completed target network")
+	}
+	if !waitForAssociation("Target", time.Second) {
+		t.Fatal("waitForAssociation did not accept an immediate target association")
+	}
 }
 
 func TestWaitFor(t *testing.T) {
@@ -184,5 +246,42 @@ func TestRecoverIfPendingWithoutMarkerIsNoop(t *testing.T) {
 	RecoverIfPending()
 	if PendingResult() != nil {
 		t.Fatal("RecoverIfPending created a result without a marker")
+	}
+}
+
+func TestChangeRejectsInvalidCredentialsWithoutTouchingWiFi(t *testing.T) {
+	oldPending, oldInFlight := pending, inFlight
+	t.Cleanup(func() { pending, inFlight = oldPending, oldInFlight })
+	pending = nil
+	inFlight = false
+	Change("bad\"ssid", "password", func() bool { t.Fatal("connected callback called"); return false })
+	result := PendingResult()
+	if result == nil || result.OK || result.SSID != "bad\"ssid" || !strings.Contains(result.Error, "double-quote") {
+		t.Fatalf("invalid change result = %#v", result)
+	}
+}
+
+func TestChangeReportsConcurrentRequest(t *testing.T) {
+	oldPending, oldInFlight := pending, inFlight
+	t.Cleanup(func() { pending, inFlight = oldPending, oldInFlight })
+	pending = nil
+	inFlight = true
+	Change("Home", "password", nil)
+	result := PendingResult()
+	if result == nil || result.OK || result.SSID != "Home" || !strings.Contains(result.Error, "already in progress") {
+		t.Fatalf("concurrent change result = %#v", result)
+	}
+	inFlight = false
+}
+
+func TestChangeReportsMissingCurrentConfig(t *testing.T) {
+	oldPending, oldInFlight := pending, inFlight
+	t.Cleanup(func() { pending, inFlight = oldPending, oldInFlight })
+	pending = nil
+	inFlight = false
+	Change("Home", "password", nil)
+	result := PendingResult()
+	if result == nil || result.OK || result.SSID != "Home" || !strings.Contains(result.Error, "cannot read current config") {
+		t.Fatalf("missing config result = %#v", result)
 	}
 }

@@ -9,6 +9,7 @@ is exactly the labelled positive/negative layout oww_forge imports.
 """
 
 import io
+import json
 import wave
 import zipfile
 
@@ -159,6 +160,36 @@ def test_label_is_idempotent(tmp_path):
     # A double-click on the same bucket is a no-op success, not a failure.
     assert tc.label("hey_jarvis", name, "positive", db) is True
     assert len(tc.list_captures("hey_jarvis", "positive", db)) == 1
+
+
+def test_label_stores_non_destructive_trim_and_export_crops_it(tmp_path):
+    db = _db(tmp_path)
+    name = tc.save("hey_jarvis", "dev1", _pcm(1000), "act", 0.8,
+                   db_path=db, ts_ms=1700)
+    assert tc.label("hey_jarvis", name, "positive", db, 250, 750) is True
+
+    source = tc.resolve("hey_jarvis", name, db_path=db)
+    assert source is not None
+    with wave.open(str(source), "rb") as w:
+        assert w.getnframes() == tc.SAMPLE_RATE
+
+    data = tc.export_zip("hey_jarvis", db)
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        cropped = z.read(f"positive/{name}")
+        manifest = json.loads(z.read("manifest.json"))
+    with wave.open(io.BytesIO(cropped), "rb") as w:
+        assert w.getnframes() == tc.SAMPLE_RATE // 2
+    assert manifest["clips"][0]["trim"] == {"start_ms": 250.0, "end_ms": 750.0}
+
+
+def test_trim_survives_relabel_and_undo(tmp_path):
+    db = _db(tmp_path)
+    name = tc.save("hey_jarvis", "dev1", _pcm(500), "act", 0.8,
+                   db_path=db, ts_ms=1700)
+    assert tc.label("hey_jarvis", name, "positive", db, 100, 400)
+    assert tc.label("hey_jarvis", name, "untriaged", db)
+    data = tc.export_zip("hey_jarvis", db)
+    assert data  # the metadata remains attached even after moving buckets
 
 
 def test_labelled_captures_are_not_pruned(tmp_path):

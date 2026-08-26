@@ -165,6 +165,10 @@ def test_buffer_capacity_is_derived_from_device_depth():
     assert em_sendspin.BUFFER_CAPACITY_BYTES == 480_000
     assert em_sendspin.BUFFER_CAPACITY_BYTES < 2_000_000
     assert em_sendspin.PCM_BYTES_PER_SECOND == 96_000
+    assert em_sendspin.REQUIRED_LEAD_MS == 4_000
+    assert em_sendspin.MIN_BUFFER_MS == 1_000
+    assert em_sendspin.MIN_INITIAL_LEAD_MS == 1_000
+    assert em_sendspin.MAX_INITIAL_LEAD_MS == 10_000
 
 
 def test_register_device_advertises_derived_buffer_capacity(monkeypatch, tmp_path):
@@ -293,5 +297,30 @@ def test_sendspin_session_applies_streaming_eq_to_audio():
         frame_payload = pcm_frame[17:]
         assert len(frame_payload) == len(pcm)
         assert frame_payload != pcm
+
+    asyncio.run(run())
+
+
+def test_sendspin_eq_chain_has_limiter_and_bass_guard_like_legacy_path():
+    # Parity with em_player's legacy 0x04 music feed: the Sendspin EQ must
+    # carry the same clip protection. Without it this path applied EQ+loudness
+    # bass boost with nothing to catch the overshoot, so the mix hard-clipped
+    # (peak=32767 on the AEC far-end tap) and sounded flat / bass-light while
+    # legacy music, guarded, did not.
+    async def run():
+        device = FakeDevice()
+        device.eq_loudness = True
+        device.limiter_enabled = True
+        device.bass_guard_enabled = True
+        session = em_sendspin.SendspinDeviceSession("study", "Study", device, FakeClock())
+        sdk = FakeSDK()
+        session.attach(sdk)
+        await session.start()
+        sdk.start(None)
+        await asyncio.sleep(0)
+        assert session._eq is not None
+        assert session._eq.limiter is not None
+        assert session._eq.guard is not None
+        await session.close()
 
     asyncio.run(run())

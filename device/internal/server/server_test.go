@@ -12,6 +12,22 @@ type recordingLEDController struct {
 	sets [][]led.Led
 }
 
+type failingLEDController struct{ get, set bool }
+
+func (c *failingLEDController) Init() error { return nil }
+func (c *failingLEDController) GetNumLEDs() (int, error) {
+	if c.get {
+		return 0, os.ErrNotExist
+	}
+	return numLEDs, nil
+}
+func (c *failingLEDController) SetLEDs(...led.Led) error {
+	if c.set {
+		return os.ErrPermission
+	}
+	return nil
+}
+
 func (c *recordingLEDController) Init() error { return nil }
 
 func (c *recordingLEDController) GetNumLEDs() (int, error) { return numLEDs, nil }
@@ -43,6 +59,31 @@ func TestClampAdd(t *testing.T) {
 	if got := clampAdd(250, 20); got != 255 {
 		t.Fatalf("clampAdd overflow = %d, want 255", got)
 	}
+}
+
+func TestVolumeStepDownMarksVolumeAuthoritative(t *testing.T) {
+	s := newTestServer(&recordingLEDController{})
+	s.volume.Set(80, false)
+	s.volumeSeeded.Store(false)
+	s.VolumeStepDown()
+	if !s.VolumeSeeded() {
+		t.Fatal("VolumeStepDown did not mark volume authoritative")
+	}
+}
+
+func TestGetUptimeReturnsNonnegativeDuration(t *testing.T) {
+	uptime, err := getUptime()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if uptime < 0 {
+		t.Fatalf("getUptime() = %s, want nonnegative duration", uptime)
+	}
+}
+
+func TestClearLedsHandlesControllerErrors(t *testing.T) {
+	clearLeds(&failingLEDController{get: true})
+	clearLeds(&failingLEDController{set: true})
 }
 
 func TestSetLEDsRecordsAndPaintsBaseState(t *testing.T) {
@@ -188,4 +229,47 @@ func TestStatePersistenceHandlesUnreadableAndRenamePaths(t *testing.T) {
 		t.Fatal(err)
 	}
 	saveDeviceState(filepath.Join(parent, "state.json"), deviceState{Muted: true})
+}
+
+func TestMuteControllerNotifiesAndPersistsBothTransitions(t *testing.T) {
+	m := newMuteController(func() led.Controller { return nil }, nil)
+	var changes []bool
+	var persists int
+	m.SetOnMuteChange(func(muted bool) { changes = append(changes, muted) })
+	m.persist = func() { persists++ }
+
+	m.Toggle()
+	m.Toggle()
+	if m.IsMuted() || len(changes) != 2 || !changes[0] || changes[1] {
+		t.Fatalf("mute transitions = muted:%v changes:%v", m.IsMuted(), changes)
+	}
+	if persists != 2 {
+		t.Fatalf("persist calls = %d, want 2", persists)
+	}
+}
+
+func TestMuteRestoreSetsStateBeforeHardwareIsReady(t *testing.T) {
+	m := newMuteController(func() led.Controller { return nil }, nil)
+	m.RestoreMuted()
+	if !m.IsMuted() {
+		t.Fatal("RestoreMuted did not restore muted state")
+	}
+}
+
+func TestServerVolumeAndMuteCallbacks(t *testing.T) {
+	vc := newVolumeController(func() led.Controller { return nil })
+	mc := newMuteController(func() led.Controller { return nil }, nil)
+	s := &Server{volume: vc, mute: mc}
+	var volume int
+	var muted bool
+	s.SetVolumeChangeCallback(func(level int) { volume = level })
+	s.SetMuteChangeCallback(func(value bool) { muted = value })
+	s.SetVolume(12)
+	s.MuteToggle()
+	if volume != 12 || !muted || !s.IsMuted() || s.VolumeLevel() != 12 {
+		t.Fatalf("server state volume=%d muteCallback=%v muted=%v level=%d", volume, muted, s.IsMuted(), s.VolumeLevel())
+	}
+	s.LEDModeDirection()
+	s.CancelVolumeDisplay()
+	s.RestoreMuteRing()
 }

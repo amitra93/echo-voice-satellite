@@ -4,7 +4,6 @@ import types
 
 import pytest
 
-pytest.importorskip("homeassistant")
 
 module = importlib.import_module("custom_components.echo_voice_satellite.select")
 

@@ -17,9 +17,6 @@ import importlib
 
 import pytest
 
-pytest.importorskip("homeassistant")
-pytest.importorskip("bleak")
-pytest.importorskip("habluetooth")
 
 module = importlib.import_module("custom_components.echo_voice_satellite.ble_scanner")
 

@@ -3,6 +3,9 @@ package server
 import (
 	"math"
 	"testing"
+	"time"
+
+	"github.com/wilbowes/EchoMuse/pkg/led"
 )
 
 func TestSpinFrame(t *testing.T) {
@@ -107,6 +110,44 @@ func TestResolveMeterDefaultsAndClamps(t *testing.T) {
 	}
 }
 
+func TestScaleFrameAndBlackFrame(t *testing.T) {
+	frame := []led.Led{{ID: 3, R: 100, G: 51, B: 1}}
+	got := scaleFrame(frame, 0.5)
+	if got[0] != (led.Led{ID: 3, R: 50, G: 26, B: 1}) {
+		t.Fatalf("scaleFrame = %#v", got[0])
+	}
+	black := blackFrame()
+	if len(black) != numLEDs || black[0].ID != 0 || black[numLEDs-1].ID != numLEDs-1 {
+		t.Fatalf("blackFrame IDs = %#v", black)
+	}
+}
+
+func TestStartAnimStaticAndReplacement(t *testing.T) {
+	c := &recordingLEDController{}
+	s := newTestServer(c)
+	s.StartAnim(AnimSpec{Pattern: "solid", Colors: [][3]uint8{{1, 2, 3}}})
+	if len(c.sets) != 1 || c.sets[0][0].R != 1 {
+		t.Fatalf("solid animation = %#v", c.sets)
+	}
+	s.StartAnim(AnimSpec{Pattern: "off"})
+	if len(c.sets) != 2 || c.sets[1][0].R != 0 {
+		t.Fatalf("off animation = %#v", c.sets)
+	}
+	s.StartAnim(AnimSpec{Pattern: "not-a-pattern"})
+	if len(c.sets) != 3 {
+		t.Fatalf("unknown animation did not clear: %d", len(c.sets))
+	}
+	s.SetAudioLevel(0.25)
+	if got := s.getAudioLevel(); got != 0.25 {
+		t.Fatalf("audio level = %v", got)
+	}
+	oldGen := s.anim.gen
+	s.StopAnim()
+	if s.animCurrent(oldGen) {
+		t.Fatal("stopped generation still current")
+	}
+}
+
 // TestMeterCurveIsVisiblyVaried is the regression guard for the reported
 // "too subtle to distinguish from a solid ring" bug. It asserts the shipped
 // curve produces a wide PERCEPTUAL swing across ordinary speech levels —
@@ -135,5 +176,40 @@ func TestMeterCurveIsVisiblyVaried(t *testing.T) {
 	// And full scale must not clip below full brightness.
 	if p := perceived(1.0); p < 0.99 {
 		t.Fatalf("peak not full brightness: %.3f", p)
+	}
+}
+
+func TestAnimationGoroutinesRenderAndStop(t *testing.T) {
+	patterns := []string{"spin", "pulse", "meter"}
+	for _, pattern := range patterns {
+		t.Run(pattern, func(t *testing.T) {
+			c := &recordingLEDController{}
+			s := newTestServer(c)
+			s.SetAudioLevel(0.2)
+			s.StartAnim(AnimSpec{Pattern: pattern, Colors: [][3]uint8{{10, 20, 30}}, PeriodMs: 1})
+			deadline := time.Now().Add(250 * time.Millisecond)
+			for len(c.sets) == 0 && time.Now().Before(deadline) {
+				time.Sleep(time.Millisecond)
+			}
+			s.StopAnim()
+			if len(c.sets) == 0 {
+				t.Fatal("animation did not render a frame")
+			}
+			count := len(c.sets)
+			time.Sleep(10 * time.Millisecond)
+			if len(c.sets) > count+1 {
+				t.Fatalf("animation continued after StopAnim: %d -> %d frames", count, len(c.sets))
+			}
+		})
+	}
+}
+
+func TestAnimExpiryIgnoresReplacedGeneration(t *testing.T) {
+	c := &recordingLEDController{}
+	s := newTestServer(c)
+	s.anim.gen = 2
+	s.animExpiry(1, 0)
+	if len(c.sets) != 0 {
+		t.Fatal("stale animation expiry cleared a replacement")
 	}
 }

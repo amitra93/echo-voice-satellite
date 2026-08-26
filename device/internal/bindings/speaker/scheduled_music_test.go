@@ -32,14 +32,29 @@ func TestScheduledMusicSkipsLatePrefix(t *testing.T) {
 	stream.start(1)
 	stream.push(1, 0, 1_000_000, pcmSamples(1, 2, 3, 4, 5, 6, 7, 8))
 	got := stream.render(1_000_050, 2)
-	// At 48kHz, 50us is approximately 2 samples. The first rendered sample
-	// should therefore be the third source sample, not delayed audio.
+	// At 48kHz, 50us is approximately 2.4 samples. The first rendered sample
+	// interpolates around the third source sample, not delayed audio; with a
+	// small fraction it rounds back to that sample's value.
 	if got[0] != byte(3) || got[1] != 0 {
 		t.Fatalf("late prefix was not skipped: %v", got)
 	}
 	stats := stream.stats()
-	if stats.LateSamples == 0 || stats.Corrections == 0 {
-		t.Fatal("late sample counter did not advance")
+	if stats.LateSamples == 0 || stats.Interpolations == 0 {
+		t.Fatal("late-sample / interpolation counters did not advance")
+	}
+}
+
+func TestScheduledMusicInterpolatesBetweenSamples(t *testing.T) {
+	var stream scheduledMusic
+	stream.start(1)
+	// Two samples 0 and 1000; rendering exactly half a sample past the anchor
+	// must land near the midpoint (500), which nearest-neighbour never could.
+	stream.push(1, 0, 1_000_000, pcmSamples(0, 1000))
+	// 0.5 samples at 48kHz ~= 10.4us. Render one sample at anchor+10us.
+	got := stream.render(1_000_010, 1)
+	v := int16(uint16(got[0]) | uint16(got[1])<<8)
+	if v < 400 || v > 600 {
+		t.Fatalf("expected interpolated midpoint ~500, got %d", v)
 	}
 }
 

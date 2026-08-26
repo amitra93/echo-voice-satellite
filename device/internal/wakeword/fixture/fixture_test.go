@@ -2,6 +2,7 @@ package fixture
 
 import (
 	"encoding/binary"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -117,6 +118,24 @@ func TestLoadORTRejectsMalformedFiles(t *testing.T) {
 	}
 }
 
+func TestLoadORTRejectsTruncationAtEachHeader(t *testing.T) {
+	valid := validFixtureBytes(wakeword.ChunkSamples, 1, 1)
+	// Keep the cases small and explicit: each cut lands in a different u32
+	// header, ensuring the parser reports an error rather than slicing past EOF.
+	cuts := []int{
+		len(ortMagic) + 2,                               // sample count
+		len(ortMagic) + 4 + 2,                           // audio
+		len(ortMagic) + 4 + 2*wakeword.ChunkSamples + 2, // record count
+	}
+	for i, cut := range cuts {
+		t.Run(fmt.Sprintf("header-%d", i), func(t *testing.T) {
+			if _, err := LoadORT(writeFixture(t, valid[:cut])); err == nil {
+				t.Fatal("truncated header was accepted")
+			}
+		})
+	}
+}
+
 func TestToleranceAndCompare(t *testing.T) {
 	if !CloseEnough(0, 0) || !CloseEnough(1+float32(RelTol), 1) || CloseEnough(1.1, 1) {
 		t.Fatal("CloseEnough tolerance policy is incorrect")
@@ -151,5 +170,61 @@ func TestReportSummaryAndVerify(t *testing.T) {
 	verified := Verify(nil, &ORT{})
 	if verified.Err != nil || !verified.Ok() || verified.ScoreFrom != wakeword.FeatWindow {
 		t.Fatalf("empty verification = %#v", verified)
+	}
+}
+
+type fixtureInferer struct {
+	errStage string
+}
+
+func (f fixtureInferer) Melspec(samples []float32) ([]float32, int, error) {
+	if f.errStage == "melspec" {
+		return nil, 0, os.ErrInvalid
+	}
+	return make([]float32, wakeword.MelBins), 1, nil
+}
+
+func (f fixtureInferer) Embed(window []float32) ([]float32, error) {
+	if f.errStage == "embed" {
+		return nil, os.ErrInvalid
+	}
+	return make([]float32, wakeword.FeatDim), nil
+}
+
+func (f fixtureInferer) Classify(feats []float32) (float32, error) {
+	if f.errStage == "classify" {
+		return 0, os.ErrInvalid
+	}
+	return 0.5, nil
+}
+
+func TestVerifyReportsInferenceErrorsAndStructuralFailures(t *testing.T) {
+	fx := &ORT{Audio: make([]int16, wakeword.ChunkSamples), Records: []Record{{MelInLen: wakeword.ChunkSamples}}}
+	for _, stage := range []string{"melspec", "embed"} {
+		r := Verify(fixtureInferer{errStage: stage}, fx)
+		if r.Err == nil || !strings.Contains(r.Err.Error(), stage) || r.Ok() {
+			t.Fatalf("%s failure report = %#v", stage, r)
+		}
+	}
+
+	badMel := fx
+	badMel.Records = []Record{{MelInLen: wakeword.ChunkSamples, MelOut: make([]float32, wakeword.MelBins), Emb: make([]float32, wakeword.FeatDim)}}
+	badMel.Records[0].MelInLen++
+	r := Verify(fixtureInferer{}, badMel)
+	if len(r.Structural) == 0 || !strings.Contains(r.Structural[0], "fed melspec") {
+		t.Fatalf("structural report = %#v", r)
+	}
+}
+
+func TestSpyCopiesSuccessfulInferenceOutputs(t *testing.T) {
+	s := &spy{inner: fixtureInferer{}}
+	if _, _, err := s.Melspec(nil); err != nil || len(s.melOuts) != 1 || len(s.melInLen) != 1 {
+		t.Fatalf("spy Melspec = %#v, %#v", s.melInLen, s.melOuts)
+	}
+	if _, err := s.Embed(nil); err != nil || len(s.embs) != 1 {
+		t.Fatalf("spy Embed captured %d outputs", len(s.embs))
+	}
+	if _, err := s.Classify(nil); err != nil {
+		t.Fatal(err)
 	}
 }

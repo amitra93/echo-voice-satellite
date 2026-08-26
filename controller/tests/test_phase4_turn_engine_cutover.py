@@ -205,6 +205,46 @@ def test_initial_audio_is_forwarded_before_live_voice_queue_frames():
     asyncio.run(run())
 
 
+def test_two_second_preroll_and_live_audio_have_one_ordered_boundary():
+    async def run():
+        device = FakeDevice()
+        preroll = tuple(bytes([i]) * MIC_FRAME_BYTES for i in range(25))
+        turn = engine.Turn(1, device, None, None, initial_audio=preroll)
+        turn.socket = FakeSocket()
+        live = bytes([25]) * MIC_FRAME_BYTES
+        await device.voice_queue.put(live)
+        await device.voice_queue.put(engine.VAD_SENTINEL_END)
+
+        await engine._send_mic(turn)
+
+        forwarded = [f.payload for f in turn.socket.frames if f.frame_type == MIC_PCM]
+        assert forwarded == list(preroll) + [live]
+
+    asyncio.run(run())
+
+
+def test_ring_preroll_does_not_discard_the_following_live_frames():
+    async def run():
+        device = FakeDevice()
+        preroll = tuple(bytes([i]) * MIC_FRAME_BYTES for i in range(25))
+        turn = engine.Turn(
+            1, device, None, None,
+            initial_audio=preroll,
+            preroll_remaining=engine.VOICE_PREROLL_DISCARD,
+        )
+        turn.socket = FakeSocket()
+        live = bytes([25]) * MIC_FRAME_BYTES
+        await device.voice_queue.put(live)
+        await device.voice_queue.put(engine.VAD_SENTINEL_END)
+
+        await engine._send_mic(turn)
+
+        forwarded = [f.payload for f in turn.socket.frames if f.frame_type == MIC_PCM]
+        assert forwarded == list(preroll) + [live]
+
+    asyncio.run(run())
+
+
 def test_trigger_voice_turn_wires_preroll_discard_through_a_real_turn(monkeypatch, tmp_path):
     import em_db
 

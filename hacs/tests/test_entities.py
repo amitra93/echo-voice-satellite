@@ -2,7 +2,6 @@ import importlib
 
 import pytest
 
-pytest.importorskip("homeassistant")
 
 entities = importlib.import_module("custom_components.echo_voice_satellite.entities")
 

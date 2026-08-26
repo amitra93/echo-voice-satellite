@@ -59,3 +59,5 @@ def test_create_sdk_client_builds_mono_pcm_player(monkeypatch):
     assert support.supported_formats[0].sample_rate == 48000
     assert support.supported_formats[0].channels == 1
     assert support.supported_formats[0].bit_depth == 16
+    assert client.kwargs["required_lead_time_ms"] == em_sendspin.REQUIRED_LEAD_MS
+    assert client.kwargs["min_buffer_ms"] == em_sendspin.MIN_BUFFER_MS

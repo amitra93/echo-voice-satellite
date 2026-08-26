@@ -156,6 +156,22 @@ def test_global_config_refuses_dropped_keys_and_pushes_effective_values(monkeypa
     assert pushed == [("dev-1", {"device": "dev-1"}), ("dev-2", {"device": "dev-2"})]
 
 
+def test_live_config_applies_and_clamps_tts_gain(monkeypatch):
+    sent = []
+
+    async def send_control(message):
+        sent.append(message)
+
+    live = SimpleNamespace(send_control=send_control, led_anim_capable=False)
+    monkeypatch.setattr(em_api, "_hold_back_oww_model", lambda live, config: (config, None))
+    monkeypatch.setattr(em_api.em_scenes, "resolve", lambda config: {})
+
+    run(em_api._apply_live_config("dev", live, {"ttsGainDb": 99.0}))
+
+    assert sent == [{"type": "config", "ttsGainDb": 99.0}]
+    assert live.tts_gain_db == 12.0
+
+
 def test_device_listing_and_crud_handlers(monkeypatch):
     monkeypatch.setattr(em_api.db, "get_all_devices", lambda: [{"id": 1}])
     monkeypatch.setattr(em_api.db, "get_pending_devices", lambda: [{"id": 2}])

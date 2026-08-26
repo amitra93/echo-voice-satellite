@@ -238,3 +238,23 @@ func TestContextCancelReleasesMicStream(t *testing.T) {
 	d.StopMic()
 	time.Sleep(100 * time.Millisecond)
 }
+
+func TestVADPeriodRMSAndNoSpeechTimeoutOverride(t *testing.T) {
+	if got := vadPeriodRMS(nil); got != 0 {
+		t.Fatalf("empty RMS = %v", got)
+	}
+	pcm := []byte{0, 0, 0, 0, 0, 64, 0, 192} // 0, 0, 0.5, -0.5
+	if got := vadPeriodRMS(pcm); got < 0.35 || got > 0.36 {
+		t.Fatalf("RMS = %v", got)
+	}
+	old := noSpeechTimeoutForTest
+	t.Cleanup(func() { noSpeechTimeoutForTest = old })
+	noSpeechTimeoutForTest = 17 * time.Millisecond
+	if got := effectiveNoSpeechTimeout(); got != 17*time.Millisecond {
+		t.Fatalf("override = %v", got)
+	}
+	noSpeechTimeoutForTest = 0
+	if got := effectiveNoSpeechTimeout(); got != noSpeechTimeout {
+		t.Fatalf("default = %v", got)
+	}
+}

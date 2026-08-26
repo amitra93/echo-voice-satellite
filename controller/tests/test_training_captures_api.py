@@ -11,6 +11,9 @@ em_training_captures + auth + the JSON helpers, none of which need it.
 """
 
 import asyncio
+import io
+import wave
+import zipfile
 import sys
 import types
 
@@ -99,7 +102,7 @@ def test_full_triage_round_trip(monkeypatch, tmp_path):
 
         # label it positive, then correct to negative, then send back
         r = await client.post(f"/api/training_captures/hey_jarvis/{a}/label",
-                              json={"label": "positive"})
+                              json={"label": "positive", "start_ms": 50, "end_ms": 150})
         assert r.status == 200
         r = await client.post(f"/api/training_captures/hey_jarvis/{a}/label",
                               json={"label": "negative"})
@@ -111,10 +114,12 @@ def test_full_triage_round_trip(monkeypatch, tmp_path):
         r = await client.get("/api/training_captures/hey_jarvis/export")
         assert r.status == 200
         assert r.headers["Content-Type"] == "application/zip"
-        import io, zipfile
         with zipfile.ZipFile(io.BytesIO(await r.read())) as z:
             names = z.namelist()
+            cropped = z.read(f"negative/{a}")
         assert f"negative/{a}" in names and "manifest.json" in names
+        with wave.open(io.BytesIO(cropped), "rb") as w:
+            assert w.getnframes() == 1600
 
     _run(monkeypatch, tmp_path, body)
 

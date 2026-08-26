@@ -4,7 +4,6 @@ import inspect
 
 import pytest
 
-pytest.importorskip("homeassistant")
 
 from homeassistant.components.assist_pipeline import PipelineEvent, PipelineEventType
 from homeassistant.components.assist_satellite import (

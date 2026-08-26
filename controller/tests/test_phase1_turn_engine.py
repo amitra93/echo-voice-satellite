@@ -135,6 +135,20 @@ def test_upsample_24_to_48_preserves_energy_and_bounds():
     assert abs(rms_out - rms_in) / rms_in < 0.03
 
 
+def test_streaming_upsampler_matches_one_shot_across_chunk_boundaries():
+    samples = np.array([0, 12000, -9000, 20000, -16000, 500], dtype=np.int16)
+    one_shot = engine._upsample_24_to_48(samples.tobytes())
+    upsampler = engine._StreamingUpsampler()
+    chunked = b"".join([
+        upsampler.process(samples[:2].tobytes()),
+        upsampler.process(samples[2:5].tobytes()),
+        upsampler.process(samples[5:].tobytes()),
+        upsampler.flush(),
+    ])
+    assert chunked == one_shot
+    assert len(chunked) == len(samples.tobytes()) * 2
+
+
 def test_turn_action_endpoint_sets_processing_signal(monkeypatch):
     async def run():
         events = []

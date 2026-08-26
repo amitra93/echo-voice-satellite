@@ -275,9 +275,10 @@ def test_run_turn_pushes_responding_state_and_calls_post_turn_play(fresh_engine)
 
     result, played = asyncio.run(run())
     assert result is True
-    assert len(played) == 1 and len(played[0]) == 1
-    # _tts_chunks upsamples 24kHz->48kHz before handing chunks to post_turn_play.
-    assert played[0][0] == engine._upsample_24_to_48(b"\x01\x00\x02\x00")
+    assert len(played) == 1
+    # _tts_chunks may emit the interpolator's final held sample separately;
+    # concatenation remains exactly the same as one-shot 24kHz->48kHz.
+    assert b"".join(played[0]) == engine._upsample_24_to_48(b"\x01\x00\x02\x00")
     assert fresh_engine[-1]["state"] == "responding"
 
 

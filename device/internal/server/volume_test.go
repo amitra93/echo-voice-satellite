@@ -11,8 +11,8 @@ import (
 // returns before touching displayActive when its getter yields nil).
 type fakeLEDController struct{ setCalls int }
 
-func (f *fakeLEDController) Init() error               { return nil }
-func (f *fakeLEDController) GetNumLEDs() (int, error)   { return numLEDs, nil }
+func (f *fakeLEDController) Init() error              { return nil }
+func (f *fakeLEDController) GetNumLEDs() (int, error) { return numLEDs, nil }
 func (f *fakeLEDController) SetLEDs(leds ...led.Led) error {
 	f.setCalls++
 	return nil
@@ -104,9 +104,9 @@ func TestVolumeMaxIsCodecUnityNotTheControlMaximum(t *testing.T) {
 // each press is a huge jump, too many and reaching the top is a chore.
 func TestButtonBandTakesAReasonableNumberOfPresses(t *testing.T) {
 	presses := (volumeMax - volumeButtonFloor) / volumeStep
-	if presses < 6 || presses > 16 {
-		t.Fatalf("%d presses to cross the band (step %d over %d..%d); "+
-			"want roughly 8-12", presses, volumeStep, volumeButtonFloor, volumeMax)
+	if presses != 8 {
+		t.Fatalf("%d presses to cross the band (step %d over %d..%d); want 8 for nine levels",
+			presses, volumeStep, volumeButtonFloor, volumeMax)
 	}
 }
 
@@ -150,6 +150,46 @@ func TestSteppingSaturatesAtBothEnds(t *testing.T) {
 	if level != volumeButtonFloor {
 		t.Errorf("stepping down from the floor reached %d, want %d",
 			level, volumeButtonFloor)
+	}
+}
+
+func TestVolumeControllerGetSetClampsAndNotifies(t *testing.T) {
+	vc := newVolumeController(func() led.Controller { return nil })
+	var notified []int
+	vc.SetOnVolumeChange(func(level int) { notified = append(notified, level) })
+
+	vc.Set(-10, false)
+	vc.Set(volumeMax+10, false)
+	if got := vc.Get(); got != volumeMax {
+		t.Fatalf("clamped volume = %d, want %d", got, volumeMax)
+	}
+	if len(notified) != 2 || notified[0] != volumeMin || notified[1] != volumeMax {
+		t.Fatalf("volume callbacks = %v", notified)
+	}
+}
+
+func TestVolumeStepDownUsesButtonBand(t *testing.T) {
+	vc := newVolumeController(func() led.Controller { return nil })
+	vc.Set(volumeButtonFloor+volumeStep, false)
+	vc.StepDown()
+	if got := vc.Get(); got != volumeButtonFloor {
+		t.Fatalf("StepDown() = %d, want floor %d", got, volumeButtonFloor)
+	}
+}
+
+func TestSeedVolumeOnlyAppliesOnceAndMarksSeeded(t *testing.T) {
+	vc := newVolumeController(func() led.Controller { return nil })
+	s := &Server{volume: vc}
+	if s.VolumeSeeded() {
+		t.Fatal("volume unexpectedly seeded")
+	}
+	s.SeedVolume(40)
+	s.SeedVolume(90)
+	if got := s.VolumeLevel(); got != 40 {
+		t.Fatalf("second SeedVolume overwrote level: %d", got)
+	}
+	if !s.VolumeSeeded() {
+		t.Fatal("SeedVolume did not mark volume authoritative")
 	}
 }
 

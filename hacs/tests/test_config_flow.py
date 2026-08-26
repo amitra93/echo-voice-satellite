@@ -3,8 +3,6 @@ import importlib
 
 import pytest
 
-pytest.importorskip("homeassistant")
-pytest.importorskip("voluptuous")
 
 config_flow = importlib.import_module("custom_components.echo_voice_satellite.config_flow")
 from custom_components.echo_voice_satellite.client import ControllerError  # noqa: E402

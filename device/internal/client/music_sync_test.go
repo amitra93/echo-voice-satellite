@@ -38,6 +38,9 @@ func TestMusicSyncControlAndPCMCodec(t *testing.T) {
 
 func TestMusicSyncStateRejectsStaleFrames(t *testing.T) {
 	var state musicSyncStreamState
+	if state.clear(1) || state.end(1) {
+		t.Fatal("inactive stream accepted lifecycle operation")
+	}
 	if !state.start(1) || state.start(1) || state.start(0) {
 		t.Fatal("invalid stream generation accepted")
 	}
@@ -49,6 +52,9 @@ func TestMusicSyncStateRejectsStaleFrames(t *testing.T) {
 	}
 	if state.accept(musicSyncPCMFrame{Generation: 2, Sequence: 3, PCM: []byte{0, 0}}) {
 		t.Fatal("wrong generation accepted")
+	}
+	if state.clear(2) || state.end(2) {
+		t.Fatal("wrong generation accepted lifecycle operation")
 	}
 	if !state.clear(1) || !state.accept(musicSyncPCMFrame{Generation: 1, Sequence: 0, PCM: []byte{0, 0}}) || !state.end(1) || state.accept(musicSyncPCMFrame{Generation: 1, Sequence: 1, PCM: []byte{0, 0}}) {
 		t.Fatal("stream lifecycle failed")

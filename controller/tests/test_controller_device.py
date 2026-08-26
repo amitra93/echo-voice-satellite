@@ -645,7 +645,7 @@ def test_shell_handler_bridges_programmatic_and_dashboard_sessions(monkeypatch):
 
 def test_voice_playback_helpers_wait_for_device_completion(monkeypatch):
     async def run():
-        monkeypatch.setattr(em_controller.em_eq, "apply", lambda pcm, *args: pcm)
+        monkeypatch.setattr(em_controller.em_eq, "apply", lambda pcm, *args, **kwargs: pcm)
         monkeypatch.setattr(em_controller, "_push_device_state", lambda *args: asyncio.sleep(0))
         device = new_device()
         device.eq_bands = [0.0] * 8

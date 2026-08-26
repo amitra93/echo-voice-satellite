@@ -1,20 +1,29 @@
 package client
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/json"
 	"encoding/pem"
 	"math/big"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strconv"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/gorilla/websocket"
+	"github.com/wilbowes/EchoMuse/internal/config"
+	"github.com/wilbowes/EchoMuse/internal/discovery"
 	"github.com/wilbowes/EchoMuse/pkg/buttons"
+	"github.com/wilbowes/EchoMuse/pkg/led"
 )
 
 func TestLoadLinkCredsWithoutFilesIsPlainAndUnauthenticated(t *testing.T) {
@@ -125,6 +134,86 @@ func TestOutboundReportsDropSafelyWhenDisconnected(t *testing.T) {
 	c.SendOwwWake(0.8, 0.5, 15, 42)
 	c.SendBleAdverts([]string{"advert"})
 	c.SendWifiScanResult(nil, "scan failed")
+}
+
+func TestConnectDispatchesControlMessagesAndAppliesConfig(t *testing.T) {
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	// The handler sends a complete batch after the registration handshake. The
+	// client owns the dispatch switch; this exercises it through the wire rather
+	// than calling private branches directly.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Errorf("upgrade: %v", err)
+			return
+		}
+		defer conn.Close()
+		var register map[string]interface{}
+		if err := conn.ReadJSON(&register); err != nil {
+			t.Errorf("register: %v", err)
+			return
+		}
+		if register["type"] != "register" {
+			t.Errorf("register = %#v", register)
+		}
+		if err := conn.WriteJSON(map[string]string{"type": "ack"}); err != nil {
+			return
+		}
+		messages := []interface{}{
+			map[string]interface{}{"type": "leds", "leds": []led.Led{{ID: 0, G: 10}}, "listening": true},
+			map[string]interface{}{"type": "led_anim", "anim": map[string]interface{}{"pattern": "spin"}},
+			map[string]interface{}{"type": "mic_start", "lock_mic": true},
+			map[string]interface{}{"type": "mic_stop"},
+			map[string]interface{}{"type": "beam_lock"}, map[string]interface{}{"type": "beam_unlock"},
+			map[string]interface{}{"type": "volume_set", "level": 77}, map[string]interface{}{"type": "mute_toggle"},
+			map[string]interface{}{"type": "config", "vadThreshold": 0.123, "owwThreshold": 0.321},
+			map[string]interface{}{"type": "wifi_change", "ssid": "Home", "psk": "password"},
+			map[string]interface{}{"type": "wifi_commit"}, map[string]interface{}{"type": "wifi_scan"},
+			map[string]interface{}{"type": "speaker_flush"}, map[string]interface{}{"type": "music_flush"},
+			map[string]interface{}{"type": "duck", "on": true}, map[string]interface{}{"type": "test_audio"},
+			map[string]interface{}{"type": "test_audio_cleanup"}, map[string]interface{}{"type": "unknown"},
+		}
+		for _, msg := range messages {
+			_ = conn.WriteJSON(msg)
+		}
+		_ = conn.WriteControl(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, "done"), time.Now().Add(time.Second))
+	}))
+	defer server.Close()
+
+	type events struct{ leds, anim, start, stop, beam, volume, mute, wifi, commit, scan, speaker, music, test, cleanup, config int }
+	var e events
+	configSeen := make(chan config.ConfigMessage, 1)
+	c := NewControlClient("test-device", func([]led.Led, *bool) { e.leds++ }, func(bool) { e.start++ }, func() { e.stop++ })
+	c.OnLEDAnim(func(json.RawMessage) { e.anim++ })
+	c.OnBeamLock(func(bool) { e.beam++ })
+	c.OnVolumeSet(func(int) { e.volume++ })
+	c.OnMuteToggle(func() { e.mute++ })
+	c.OnWifiChange(func(string, string) { e.wifi++ })
+	c.OnWifiCommit(func() { e.commit++ })
+	c.OnWifiScan(func() { e.scan++ })
+	c.OnSpeakerFlush(func() { e.speaker++ })
+	c.OnMusicFlush(func() { e.music++ })
+	c.OnDuck(func(bool) { e.music++ })
+	c.OnTestAudio(func() { e.test++ })
+	c.OnTestAudioCleanup(func() { e.cleanup++ })
+	c.OnConfigApplied(func(m config.ConfigMessage) { configSeen <- m })
+	addr := strings.TrimPrefix(server.URL, "http://")
+	err := c.connect(context.Background(), &discovery.ServerInfo{Addr: addr, Host: strings.Split(addr, ":")[0]}, NewDataClient("test", nil, nil, nil))
+	if err == nil {
+		t.Fatal("connect unexpectedly succeeded after server close")
+	}
+	select {
+	case <-configSeen:
+	case <-time.After(time.Second):
+		t.Fatal("config callback did not run")
+	}
+	time.Sleep(20 * time.Millisecond) // test_audio is intentionally dispatched asynchronously.
+	if e != (events{leds: 1, anim: 1, start: 1, stop: 1, beam: 2, volume: 1, mute: 1, wifi: 1, commit: 1, scan: 1, speaker: 1, music: 2, test: 1, cleanup: 1}) {
+		t.Fatalf("dispatch counts = %+v", e)
+	}
+	if got := config.Get().VadThreshold; got != 0.123 {
+		t.Fatalf("config VadThreshold = %v", got)
+	}
 }
 
 func testCertificatePEM(t *testing.T) []byte {

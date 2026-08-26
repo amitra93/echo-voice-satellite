@@ -1,11 +1,90 @@
 from __future__ import annotations
 
 import asyncio
+import sys
 import types
 
 import pytest
 
+import em_clock
 import em_sendspin
+
+
+def test_controller_monotonic_clock_matches_em_clock():
+    # aiosendspin's default Clock reads CLOCK_MONOTONIC_RAW; em_clock and
+    # ClockSync read CLOCK_MONOTONIC (time.monotonic_ns()) — two different
+    # kernel counters that are not guaranteed to share an origin (measured on
+    # one controller host: a stable ~595s gap between them). Every timestamp
+    # this clock feeds into aiosendspin's compute_play_time() must land in the
+    # SAME domain as em_clock.monotonic_us(), or every device-target
+    # conversion is off by whatever that gap happens to be on the host.
+    clock = em_sendspin.ControllerMonotonicClock()
+    before = em_clock.monotonic_us()
+    reading = clock.now_us()
+    after = em_clock.monotonic_us()
+    assert before <= reading <= after
+
+
+def test_create_sdk_client_passes_controller_clock(monkeypatch):
+    # aiosendspin is not part of the host test dependency set (see
+    # CLAUDE.md's install list) — stub just enough of its surface to observe
+    # what create_sdk_client constructs the real client with, the same
+    # pattern test_training_captures_api.py uses for a heavy optional import.
+    captured = {}
+
+    class FakeSendspinClient:
+        def __init__(self, client_id, name, roles, **kwargs):
+            captured["client_id"] = client_id
+            captured["kwargs"] = kwargs
+
+    class FakeRoles:
+        PLAYER = "player"
+        CONTROLLER = "controller"
+        METADATA = "metadata"
+
+    aiosendspin_pkg = types.ModuleType("aiosendspin")
+    client_mod = types.ModuleType("aiosendspin.client")
+    client_mod.SendspinClient = FakeSendspinClient
+    types_mod = types.ModuleType("aiosendspin.models.types")
+    types_mod.Roles = FakeRoles
+    models_pkg = types.ModuleType("aiosendspin.models")
+    models_pkg.types = types_mod
+    player_mod = types.ModuleType("aiosendspin.models.player")
+
+    class FakeClientHelloPlayerSupport:
+        def __init__(self, **kwargs):
+            pass
+
+    class FakeSupportedAudioFormat:
+        def __init__(self, **kwargs):
+            pass
+
+    player_mod.ClientHelloPlayerSupport = FakeClientHelloPlayerSupport
+    player_mod.SupportedAudioFormat = FakeSupportedAudioFormat
+
+    class FakeAudioCodec:
+        PCM = "pcm"
+
+    class FakePlayerCommand:
+        VOLUME = "volume"
+        MUTE = "mute"
+
+    types_mod.AudioCodec = FakeAudioCodec
+    types_mod.PlayerCommand = FakePlayerCommand
+
+    monkeypatch.setitem(sys.modules, "aiosendspin", aiosendspin_pkg)
+    monkeypatch.setitem(sys.modules, "aiosendspin.client", client_mod)
+    monkeypatch.setitem(sys.modules, "aiosendspin.models", models_pkg)
+    monkeypatch.setitem(sys.modules, "aiosendspin.models.types", types_mod)
+    monkeypatch.setitem(sys.modules, "aiosendspin.models.player", player_mod)
+
+    asyncio.run(em_sendspin.create_sdk_client("study", "Study", buffer_capacity=480_000))
+
+    clock = captured["kwargs"]["clock"]
+    assert isinstance(clock, em_sendspin.ControllerMonotonicClock)
+    assert clock.now_us() == pytest.approx(em_clock.monotonic_us(), abs=1_000_000)
+    assert captured["kwargs"]["required_lead_time_ms"] == em_sendspin.REQUIRED_LEAD_MS
+    assert captured["kwargs"]["min_buffer_ms"] == em_sendspin.MIN_BUFFER_MS
 
 
 class FakeServerInfo:

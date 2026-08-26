@@ -152,3 +152,31 @@ func TestFindServerOnceUsesBrowseSeam(t *testing.T) {
 		t.Fatalf("FindServerOnce() = %#v, %v; want %#v", got, err, want)
 	}
 }
+
+func TestVerifyServerAcceptsAndRejectsLoopback(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	accepted := make(chan struct{})
+	go func() {
+		conn, err := listener.Accept()
+		if err == nil {
+			close(accepted)
+			conn.Close()
+		}
+	}()
+	if !verifyServer(listener.Addr().String()) {
+		t.Fatal("verifyServer rejected a listening TCP endpoint")
+	}
+	select {
+	case <-accepted:
+	case <-time.After(time.Second):
+		t.Fatal("verifyServer did not connect")
+	}
+	if verifyServer("127.0.0.1:1") {
+		t.Fatal("verifyServer accepted a closed TCP endpoint")
+	}
+}

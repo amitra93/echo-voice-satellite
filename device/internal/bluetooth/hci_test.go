@@ -129,6 +129,39 @@ func TestParseCommandComplete(t *testing.T) {
 	}
 }
 
+func TestParseCommandStatusAndMalformedEvents(t *testing.T) {
+	pkt := []byte{0x04, evtCommandStatus, 0x04, 0x00, 0x01, 0x0c, 0x20}
+	cc, ok := parseCommandComplete(pkt)
+	if !ok || cc.opcode != opLESetScanEnable || cc.status != 0 {
+		t.Fatalf("command status = %#v, ok=%v", cc, ok)
+	}
+	for _, bad := range [][]byte{{}, {0x01, 0x0e, 0x00}, {0x04, 0x0e, 0x01, 0x00}} {
+		if _, ok := parseCommandComplete(bad); ok {
+			t.Fatalf("malformed packet accepted: %x", bad)
+		}
+	}
+	if got := formatBdAddr([]byte{1, 2}); got != "" {
+		t.Fatalf("short address = %q", got)
+	}
+}
+
+func TestH4ParserHandlesIncompleteHeadersAndACL(t *testing.T) {
+	var p h4Parser
+	if got := p.Feed([]byte{h4TypeEvent, 0x3e}); len(got) != 0 {
+		t.Fatal("incomplete event emitted")
+	}
+	// A partial packet remains buffered; use a fresh stream for the ACL case.
+	p = h4Parser{}
+	acl := []byte{h4TypeACL, 0, 0, 2, 0, 9, 8}
+	if got := p.Feed(acl[:4]); len(got) != 0 {
+		t.Fatal("incomplete ACL emitted")
+	}
+	got := p.Feed(acl[4:])
+	if len(got) != 1 || !bytes.Equal(got[0], acl) {
+		t.Fatalf("ACL = %x", got)
+	}
+}
+
 func TestScanParamsUnits(t *testing.T) {
 	p := scanParams(100, 50)
 	if p[0] != 0x00 {
