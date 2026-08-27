@@ -121,9 +121,8 @@ class Turn:
     # _run_turn to skip the TTS wait and by the outcome-reporting callers to
     # record "no_speech" instead of "ok".
     no_speech: bool = False
-    # Real audio frames still to discard before forwarding to HA. This remains
-    # zero for normal wake turns: the listener consumed pre-trigger audio and
-    # device activation-sequence rewind supplies the post-trigger frames.
+    # Legacy discard knob retained for callers that still need it. Normal wake
+    # turns use initial_audio for sequence-addressed preroll instead.
     preroll_remaining: int = 0
     started_mono: float = field(default_factory=time.monotonic)
     endpoint_mono: float | None = None
@@ -386,7 +385,11 @@ async def _send_mic(turn: Turn) -> None:
                 log.warning("[%s] dropping non-80ms mic payload (%d bytes)",
                             getattr(turn.device, "device_id", "?"), len(payload))
                 continue
-            if turn.preroll_remaining > 0:
+            # Ring-backed audio already ends at the live boundary. Discarding
+            # here would remove the first live frames and create a gap after
+            # the prepended preroll; the discard is only for fallback wakes
+            # without an initial ring window.
+            if turn.preroll_remaining > 0 and not turn.initial_audio:
                 turn.preroll_remaining -= 1
                 continue
 
@@ -401,22 +404,62 @@ async def _send_mic(turn: Turn) -> None:
                               bytes(ns_debug_raw), bytes(ns_debug_out))
 
 
+class _StreamingUpsampler:
+    """Stateful 24->48kHz linear interpolator for streamed TTS.
+
+    Calling scipy.signal.resample_poly independently per HA TTS chunk resets
+    its FIR at every arbitrary network boundary, producing a transient in the
+    middle of speech. Hold one input sample so the interpolation across each
+    boundary is exactly the same as processing the concatenated response.
+    """
+
+    def __init__(self):
+        self._last: int | None = None
+
+    def process(self, payload: bytes) -> bytes:
+        samples = np.frombuffer(payload, dtype="<i2").astype(np.int32)
+        if samples.size == 0:
+            return b""
+        if self._last is not None:
+            samples = np.concatenate([
+                np.array([self._last], dtype=np.int32), samples,
+            ])
+        self._last = int(samples[-1])
+        if samples.size < 2:
+            return b""
+
+        out = np.empty((samples.size - 1) * 2, dtype=np.int32)
+        out[0::2] = samples[:-1]
+        out[1::2] = (samples[:-1] + samples[1:]) // 2
+        return out.astype(np.int16).tobytes()
+
+    def flush(self) -> bytes:
+        """Emit the final held sample and preserve the exact 2x length."""
+        if self._last is None:
+            return b""
+        last = self._last
+        self._last = None
+        return np.array([last, last], dtype=np.int16).tobytes()
+
+
 def _upsample_24_to_48(payload: bytes) -> bytes:
-    """Upsample mono S16 PCM by two using polyphase sinc FIR interpolation."""
-    from scipy.signal import resample_poly
-    samples = np.frombuffer(payload, dtype="<i2")
-    if samples.size == 0:
-        return b""
-    out = resample_poly(samples.astype(np.float32), 2, 1)
-    return np.clip(out, -32768, 32767).astype(np.int16).tobytes()
+    """Upsample a complete mono S16 response with the streaming algorithm."""
+    upsampler = _StreamingUpsampler()
+    return upsampler.process(payload) + upsampler.flush()
 
 
 async def _tts_chunks(turn: Turn):
+    upsampler = _StreamingUpsampler()
     while True:
         chunk = await turn.tts_queue.get()
         if chunk is None:
+            tail = upsampler.flush()
+            if tail:
+                yield tail
             return
-        yield _upsample_24_to_48(chunk)
+        output = upsampler.process(chunk)
+        if output:
+            yield output
 
 
 async def _run_turn(turn: Turn) -> bool:

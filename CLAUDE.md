@@ -387,10 +387,10 @@ switch, but the only device primitive is `mute_toggle`, which invokes the same
 device state transition as the hardware button. The switch checks live state
 before sending that toggle; it cannot silently set an impossible state.
 
-**`media_player` is capability-gated.** Devices declaring `music_sync` receive
-the HACS Sendspin media-player entity, which supports media commands, seek,
-volume, and mute. Devices without that capability expose no misleading music
-control.
+**Music Assistant owns music media players.** Native device Sendspin clients
+connect directly to Music Assistant, whose integration provides playback,
+queue, volume, and music mute. EchoMuse HACS retains only the privacy-mute
+switch; it does not create a competing music entity.
 
 ### HA entities beyond the voice satellite
 

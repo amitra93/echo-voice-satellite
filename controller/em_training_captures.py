@@ -39,10 +39,12 @@ from __future__ import annotations
 import io
 import json
 import logging
+import math
 import os
 import re
 import time
 import zipfile
+import wave
 from pathlib import Path
 
 import em_recordings
@@ -57,6 +59,10 @@ BUCKETS = ("untriaged", "positive", "negative")
 # What triggered the capture. "act" = the wake threshold was cleared; "miss" =
 # a near-miss (score above the near-miss floor but below threshold).
 KINDS = ("act", "miss")
+
+# Trim edits live beside the WAV rather than changing the source capture. This
+# keeps undo/relabel non-destructive while exports still contain edited audio.
+TRIM_SUFFIX = ".trim.json"
 
 # The near-miss floor em_controller already uses for its near-miss counter.
 # Anything at or below this is noise and is not worth a clip.
@@ -283,7 +289,70 @@ def resolve(model: str, name: str, bucket: str | None = None,
     return None
 
 
-def label(model: str, name: str, target: str, db_path: str | None = None) -> bool:
+def _trim_path(path: Path) -> Path:
+    return path.with_name(path.name + TRIM_SUFFIX)
+
+
+def _read_trim(path: Path) -> dict | None:
+    try:
+        data = json.loads(_trim_path(path).read_text())
+        start = float(data["start_ms"])
+        end = float(data["end_ms"])
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError):
+        return None
+    if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
+        return None
+    return {"start_ms": start, "end_ms": end}
+
+
+def _write_trim(path: Path, start_ms: float, end_ms: float) -> bool:
+    try:
+        start = float(start_ms)
+        end = float(end_ms)
+    except (TypeError, ValueError):
+        return False
+    if not math.isfinite(start) or not math.isfinite(end) or start < 0 or end <= start:
+        return False
+    try:
+        with wave.open(str(path), "rb") as source:
+            duration_ms = source.getnframes() * 1000 / source.getframerate()
+    except (OSError, wave.Error, ZeroDivisionError):
+        return False
+    if end > duration_ms or start >= duration_ms:
+        return False
+    meta = _trim_path(path)
+    tmp = meta.with_suffix(meta.suffix + ".part")
+    try:
+        tmp.write_text(json.dumps({"start_ms": start, "end_ms": end}))
+        tmp.replace(meta)
+    except OSError as e:
+        log.warning(f"[training] Could not write trim metadata for {path.name}: {e}")
+        return False
+    return True
+
+
+def _cropped_wav(path: Path, trim: dict | None) -> bytes:
+    """Return the original WAV or the exact frame range selected by the admin."""
+    if trim is None:
+        return path.read_bytes()
+    with wave.open(str(path), "rb") as source:
+        params = source.getparams()
+        start = max(0, int(trim["start_ms"] * params.framerate / 1000))
+        end = min(params.nframes, int(trim["end_ms"] * params.framerate / 1000))
+        if end <= start:
+            return path.read_bytes()
+        source.setpos(start)
+        frames = source.readframes(end - start)
+    out = io.BytesIO()
+    with wave.open(out, "wb") as dest:
+        dest.setparams(params)
+        dest.setnframes(0)
+        dest.writeframes(frames)
+    return out.getvalue()
+
+
+def label(model: str, name: str, target: str, db_path: str | None = None,
+          start_ms: float | None = None, end_ms: float | None = None) -> bool:
     """
     Move a capture into a bucket, from WHEREVER it currently is. Returns success.
 
@@ -304,12 +373,27 @@ def label(model: str, name: str, target: str, db_path: str | None = None) -> boo
     if src is None or dest_dir is None:
         return False
     dest = dest_dir / name
+    if (start_ms is None) != (end_ms is None):
+        return False
+    if start_ms is not None and not _write_trim(src, start_ms, end_ms):
+        return False
     if src == dest:
         return True
     dest_dir.mkdir(parents=True, exist_ok=True)
+    trim_src = _trim_path(src)
+    trim_dest = _trim_path(dest)
     try:
         src.replace(dest)
+        if trim_src.is_file():
+            trim_src.replace(trim_dest)
     except OSError as e:
+        # Keep the capture and its edit metadata together if the second rename
+        # fails (for example, on a full or read-only volume).
+        if dest.is_file() and not src.exists():
+            try:
+                dest.replace(src)
+            except OSError:
+                pass
         log.warning(f"[training] Could not move {name} → {target}: {e}")
         return False
     return True
@@ -322,6 +406,7 @@ def discard(model: str, name: str, db_path: str | None = None) -> bool:
         return False
     try:
         path.unlink()
+        _trim_path(path).unlink(missing_ok=True)
     except OSError as e:
         log.warning(f"[training] Could not discard {name}: {e}")
         return False
@@ -375,11 +460,13 @@ def export_zip(model: str, db_path: str | None = None) -> bytes:
             for entry in entries:
                 path = directory / entry["name"]
                 if path.is_file():
-                    z.write(path, arcname=f"{bucket}/{entry['name']}")
+                    trim = _read_trim(path)
+                    z.writestr(f"{bucket}/{entry['name']}", _cropped_wav(path, trim))
                     manifest["clips"].append({
                         "bucket": bucket, "name": entry["name"],
                         "kind": entry["kind"], "score": entry["score"],
                         "device_id": entry["device_id"], "ts_ms": entry["ts_ms"],
+                        "trim": trim,
                     })
                     written += 1
             manifest["buckets"][bucket] = written

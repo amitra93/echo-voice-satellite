@@ -44,6 +44,8 @@ def test_dashboard_bundle_is_cache_busted():
 
     assert "dashboard.js?v=" in handler, \
         "the bundle URL must carry a cache-busting token"
+    assert "dashboard_logic.js?v=" in handler, \
+        "dashboard helper changes must also carry a cache-busting token"
     assert "no-cache" in handler, \
         "dashboard.html itself must be revalidated, or the new URL is never seen"
     # A version-string token would not change between two local "dev" builds;

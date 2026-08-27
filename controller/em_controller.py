@@ -71,6 +71,8 @@ import em_pki
 import em_hostip
 import em_linkauth
 import em_eq
+import em_limiter
+import em_mbc
 import em_scenes
 import em_shadow
 import em_oww_warmup
@@ -85,7 +87,6 @@ import em_training_captures
 import em_player
 import em_volume
 import em_wake_audio
-import em_sendspin
 import em_clock
 
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s — %(message)s"
@@ -151,8 +152,7 @@ API_PORT     = int(os.environ.get("API_PORT", "8768"))
 SERVER_IP    = em_hostip.server_ip(os.environ.get("SERVER_IP"))
 MDNS_NAME    = os.environ.get("MDNS_NAME", "echomuse")
 DB_PATH      = os.environ.get("DB_PATH", "echomuse.db")
-SENDSPIN_ENABLED = os.environ.get("SENDSPIN_ENABLED", "1") == "1"
-MUSIC_ASSISTANT_URL = em_sendspin.normalize_server_url(
+MUSIC_ASSISTANT_URL = api.normalize_music_assistant_url(
     os.environ.get("MUSIC_ASSISTANT_URL", "")
 )
 
@@ -359,6 +359,13 @@ class Device:
         self._last_capture_mono: float = 0.0
         self.eq_bands:      list  = [0.0] * 8
         self.eq_loudness:   bool  = False
+        self.bass_shelf_hz: float = em_eq.DEFAULT_BASS_SHELF_HZ
+        self.subsonic_hz:  float = em_eq.DEFAULT_SUBSONIC_HZ
+        self.bass_guard_enabled: bool  = True
+        self.bass_guard_db:      float = em_mbc.DEFAULT_BASS_GUARD_DB
+        self.limiter_enabled:   bool  = True
+        self.limiter_threshold: float = em_limiter.DEFAULT_THRESHOLD_DB
+        self.limiter_release:   float = em_limiter.DEFAULT_RELEASE_MS
         # LED ring scene — render-ready palette/spinner from em_scenes,
         # refreshed on connect and on any config push carrying led* keys.
         self.led_scene:     dict  = em_scenes.resolve({})
@@ -466,6 +473,10 @@ class Device:
         self.barge_detected   = False
         self._barge_model     = None
         self._barge_model_key = None
+        # Controller-only TTS makeup gain. Applied before the output limiter,
+        # never to music, so it improves speech intelligibility/loudness
+        # without changing the user's media volume.
+        self.tts_gain_db: float = 0.0
 
         # Recent voice-turn traces (turn_record-shaped dicts, appended by
         # em_turn_engine._remember_turn at turn completion) — powers the
@@ -667,6 +678,16 @@ class Device:
         return "audio_mix" in (self.capabilities or [])
 
     @property
+    def sendspin_native_capable(self) -> bool:
+        """Whether this device connects to Music Assistant directly."""
+        return "sendspin_native" in (self.capabilities or [])
+
+    @property
+    def output_chain_capable(self) -> bool:
+        """Whether firmware owns voice-output DSP for its speaker path."""
+        return "output_chain" in (self.capabilities or [])
+
+    @property
     def button_hold_capable(self) -> bool:
         """Measures hold time — and so was offered the HA event entity."""
         return "button_hold" in (self.capabilities or [])
@@ -816,14 +837,15 @@ class Device:
             except BaseException:
                 pass  # WS gone / re-cancelled — device flush self-heals on reconnect
 
-    async def stream_speaker_chunks(self, pcm_chunks, stream_eq):
+    async def stream_speaker_chunks(self, pcm_chunks, stream_eq=None):
         """
         Stream an asynchronous PCM source as one device speaker session.
 
         StreamingEQ stays alive for the complete response so its biquad state
-        crosses HTTP chunk boundaries without clicks. Partial device periods
-        are retained until more PCM arrives and padded only once, at the true
-        end of the response.
+        crosses HTTP chunk boundaries without clicks. Devices with an
+        output_chain receive the decoded PCM directly instead. Partial device
+        periods are retained until more PCM arrives and padded only once, at
+        the true end of the response.
         """
         self.begin_data_stream()
         pending = bytearray()
@@ -842,9 +864,12 @@ class Device:
                 if self.cancel_event.is_set():
                     break
                 total_pcm += len(pcm)
-                eq_started = asyncio.get_event_loop().time()
-                pending.extend(stream_eq.process(pcm))
-                eq_seconds += asyncio.get_event_loop().time() - eq_started
+                if stream_eq is None:
+                    pending.extend(pcm)
+                else:
+                    eq_started = asyncio.get_event_loop().time()
+                    pending.extend(stream_eq.process(pcm))
+                    eq_seconds += asyncio.get_event_loop().time() - eq_started
 
                 while len(pending) >= SPEAKER_BYTES:
                     if self.cancel_event.is_set():
@@ -888,6 +913,11 @@ class Device:
 
         return total_pcm, int(eq_seconds * 1000), first_send_time, int(send_seconds * 1000)
 
+    # Delimits the speaker-stream methods from module-level playback runners.
+    # Those runners, not socket writers, clear speaking after playback_stats.
+    def _speaker_stream_methods_end(self) -> None:
+        pass
+
 
 # The live device registry — keyed by device_id (ro.serialno).
 # em_api receives a reference to this dict at startup.
@@ -911,6 +941,25 @@ _shell_dashboard:  dict[str, object]         = {}
 
 def get_device(device_id: str) -> Device | None:
     return _devices.get(device_id)
+
+
+def _limiter_for(device):
+    """Adapter: a Device's limiter config -> em_limiter.for_stream."""
+    return em_limiter.for_stream(
+        SPEAKER_RATE,
+        device.limiter_enabled,
+        device.limiter_threshold,
+        device.limiter_release,
+    )
+
+
+def _guard_for(device):
+    """Adapter: a Device's bass-guard config -> em_mbc.for_stream."""
+    return em_mbc.for_stream(
+        SPEAKER_RATE,
+        device.bass_guard_enabled,
+        device.bass_guard_db,
+    )
 
 
 async def _push_device_state(device: Device) -> None:
@@ -1223,26 +1272,44 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
     audio buffer has drained (or cancel_event fires), so the caller can
     safely restart the mic without acoustic feedback into the next turn.
     """
-    log.info(
-        f"[{device.device_id}] EQ: bands={device.eq_bands} "
-        f"loudness={device.eq_loudness}"
-    )
-    # EQ is a solid numpy crunch (hundreds of ms for a long response) — run
-    # it off the event loop, which otherwise freezes every device's LED
-    # frames, shell proxying, and WS handling right as playback starts
-    # (observed as spinner stutter and console typing judder).
-    def _prepare_pcm() -> bytes:
-        return em_eq.apply(voice_response, SPEAKER_RATE, device.eq_bands, device.eq_loudness)
+    if device.output_chain_capable:
+        # Firmware applies its own DSP. Keeping this exact buffer intact also
+        # keeps the controller's EQ metric truthful: no controller EQ ran.
+        speaker_pcm = voice_response
+        device.playback_eq_ms = 0
+        log.info(f"[{device.device_id}] Output chain: device")
+    else:
+        # Built here rather than inside _prepare_pcm so the stages survive the
+        # call and can be asked what they actually did — see em_eq.describe_*.
+        # One response is one buffer, so these are per-response instances and
+        # carry no state between turns.
+        _limiter = _limiter_for(device)
+        _guard   = _guard_for(device)
+        log.info(
+            f"[{device.device_id}] Output chain: "
+            f"{em_eq.describe_chain(device.eq_bands, device.eq_loudness, _limiter, _guard, device.tts_gain_db, device.bass_shelf_hz, device.subsonic_hz)}"
+        )
+        # EQ is a solid numpy crunch (hundreds of ms for a long response) — run
+        # it off the event loop, which otherwise freezes every device's LED
+        # frames, shell proxying, and WS handling right as playback starts
+        # (observed as spinner stutter and console typing judder).
+        def _prepare_pcm() -> bytes:
+            return em_eq.apply(voice_response, SPEAKER_RATE, device.eq_bands,
+                               device.eq_loudness, limiter=_limiter,
+                               guard=_guard, makeup_gain_db=device.tts_gain_db,
+                               bass_shelf_hz=device.bass_shelf_hz,
+                               subsonic_hz=device.subsonic_hz)
 
-    _t_eq0 = asyncio.get_event_loop().time()
-    speaker_pcm = await asyncio.get_event_loop().run_in_executor(None, _prepare_pcm)
-    device.playback_eq_ms = int(
-        (asyncio.get_event_loop().time() - _t_eq0) * 1000
-    )
-    log.info(
-        f"[{device.device_id}] Streaming {len(speaker_pcm)} bytes "
-        f"({len(speaker_pcm)//SPEAKER_BYTES} periods)"
-    )
+        _t_eq0 = asyncio.get_event_loop().time()
+        speaker_pcm = await asyncio.get_event_loop().run_in_executor(None, _prepare_pcm)
+        device.playback_eq_ms = int(
+            (asyncio.get_event_loop().time() - _t_eq0) * 1000
+        )
+        log.info(
+            f"[{device.device_id}] Streaming {len(speaker_pcm)} bytes "
+            f"({len(speaker_pcm)//SPEAKER_BYTES} periods) — "
+            f"{em_eq.describe_activity(_limiter, _guard)}"
+        )
     cancel_task    = asyncio.create_task(device.cancel_event.wait())
     device.playback_done.clear()
     done_task      = asyncio.create_task(device.playback_done.wait())
@@ -1323,6 +1390,7 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
     cancel_task.cancel()
     done_task.cancel()
 
+
 async def _meter_at_playback_start(pcm_chunks, on_start):
     """
     Pass PCM through untouched, firing `on_start` when the device will have
@@ -1362,15 +1430,26 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
     Closing any layer at an arbitrary network boundary would corrupt decoding,
     reset the EQ filters, or turn each chunk into a separate announcement.
     """
-    log.info(
-        f"[{device.device_id}] Streaming EQ: bands={device.eq_bands} "
-        f"loudness={device.eq_loudness}"
-    )
-    stream_eq = em_eq.StreamingEQ(
-        SPEAKER_RATE,
-        device.eq_bands,
-        device.eq_loudness,
-    )
+    if device.output_chain_capable:
+        stream_eq = None
+        log.info(f"[{device.device_id}] Output chain: device")
+    else:
+        _limiter = _limiter_for(device)
+        _guard   = _guard_for(device)
+        log.info(
+            f"[{device.device_id}] Output chain: "
+            f"{em_eq.describe_chain(device.eq_bands, device.eq_loudness, _limiter, _guard, device.tts_gain_db, device.bass_shelf_hz, device.subsonic_hz)}"
+        )
+        stream_eq = em_eq.StreamingEQ(
+            SPEAKER_RATE,
+            device.eq_bands,
+            device.eq_loudness,
+            limiter=_limiter,
+            guard=_guard,
+            makeup_gain_db=device.tts_gain_db,
+            bass_shelf_hz=device.bass_shelf_hz,
+            subsonic_hz=device.subsonic_hz,
+        )
     # Cleared BEFORE streaming starts: the device sets it when its audio
     # channel drains after EOS, and a stale set from the previous response
     # would end this turn the moment we started waiting.
@@ -1394,6 +1473,11 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
         total_pcm, eq_ms, first_send_time, send_ms = stream_task.result()
         device.playback_eq_ms = eq_ms
         device.playback_send_ms = send_ms
+        if stream_eq is not None:
+            log.info(
+                f"[{device.device_id}] Output chain activity: "
+                f"{em_eq.describe_activity(_limiter, _guard)}"
+            )
         stream_elapsed = asyncio.get_event_loop().time() - t_stream_start
         audio_duration = total_pcm / (SPEAKER_RATE * 2) + SPEAKER_PRIME_SECONDS
 
@@ -1681,11 +1765,15 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
             # C3 fix: preroll_discard is 0 for button/continuation turns
             # (no wake-word tail to remove — discarding real audio here
             # just clips the first word/words, the exact bug P0-1 fixed
-            # on the wake path) and VOICE_PREROLL_DISCARD only for the
-            # initial wakeword-triggered turn.
+            # on the wake path). A ring-backed wake already includes the
+            # frames before and through the crossing; discarding the next
+            # live frames would create a hole after the prepended audio.
             turn_label      = trigger_label
-            preroll_discard = turn_engine.VOICE_PREROLL_DISCARD if is_wakeword else 0
             turn_initial_audio = initial_audio or ()
+            preroll_discard = (
+                turn_engine.VOICE_PREROLL_DISCARD
+                if is_wakeword and not turn_initial_audio else 0
+            )
             while True:
                 should_continue = False
                 try:
@@ -2302,17 +2390,43 @@ async def wake_word_listener(device: Device):
                         initial_audio = None
                         if source == "device":
                             activation_seq = dev_wake["activation_seq"]
-                            initial_audio = tuple(device.wake_audio.after(activation_seq))
-                            if initial_audio:
+                            preroll = device.wake_audio.from_activation(activation_seq)
+                            initial_audio = preroll.frames
+                            if preroll.complete:
                                 log.info(
-                                    "[%s] Wake rewind: %d frame(s) after sequence %d",
-                                    device.device_id, len(initial_audio), activation_seq,
+                                    "[%s] Wake preroll: %d frame(s), start=%d, "
+                                    "activation=%d",
+                                    device.device_id, len(initial_audio),
+                                    preroll.start_sequence, activation_seq,
                                 )
                             else:
                                 log.warning(
-                                    "[%s] Wake rewind unavailable: activation sequence %d "
-                                    "is outside the PCM ring",
-                                    device.device_id, activation_seq,
+                                    "[%s] Wake preroll incomplete: start=%s, "
+                                    "activation=%d, using post-activation fallback (%s)",
+                                    device.device_id, preroll.start_sequence,
+                                    activation_seq, preroll.reason,
+                                )
+                        else:
+                            # Controller crossings do not carry a device frame
+                            # sequence. Use the latest retained PCM; the live
+                            # queue discards the same window below to avoid
+                            # sending these frames twice.
+                            preroll = device.wake_audio.from_latest()
+                            initial_audio = preroll.frames
+                            if preroll.complete:
+                                log.info(
+                                    "[%s] Wake preroll: %d frame(s), start=%s, "
+                                    "activation=controller",
+                                    device.device_id, len(initial_audio),
+                                    preroll.start_sequence,
+                                )
+                            else:
+                                log.warning(
+                                    "[%s] Wake preroll incomplete: start=%s, "
+                                    "activation=controller, using available "
+                                    "frames (%s)",
+                                    device.device_id, preroll.start_sequence,
+                                    preroll.reason,
                                 )
                         device.oww_paused.set()
                         device.oww_paused_since = loop.time()
@@ -2672,7 +2786,6 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         )
 
         device = Device(device_id, ip, capabilities, ws)
-        device.sendspin_name = row["label"] or device_id
         # Why the device has no ambient light sensor, when it has none. The
         # capability list says only that it is absent; without the reason,
         # an unfitted chip and an unbound driver are indistinguishable
@@ -2693,15 +2806,6 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         except Exception as e:
             log.warning(f"[{device_id}] Turn history hydration failed: {e}")
         _devices[device_id] = device
-
-        # Registration waits for the first accepted clock sample. The device
-        # must remain on the legacy music path until its scheduled renderer
-        # can translate controller timestamps safely.
-        if "music_sync" in capabilities and device.clock_sync.synchronized:
-            task = asyncio.create_task(
-                em_sendspin.register_device(device_id, row["label"] or device_id, device)
-            )
-            task.add_done_callback(_log_task_exception)
 
         log.info(
             f"[control] Device connected: {device_id} v={version} "
@@ -2732,6 +2836,12 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         config = await loop.run_in_executor(
             None, db.get_effective_device_config, device_id
         )
+        # The MA endpoint is system connection metadata for native Sendspin
+        # clients, which cache it and reconnect directly to MA.
+        if device.sendspin_native_capable:
+            config["sendspinServer"] = await loop.run_in_executor(
+                None, db.get_config, "music_assistant_url", MUSIC_ASSISTANT_URL
+            ) or ""
         await device.send_control({"type": "config", **config})
         device.oww_threshold = float(config.get("owwThreshold", OWW_THRESHOLD))
         device.oww_model     = config.get("owwModel", f"{OWW_MODEL}_v0.1")
@@ -2765,6 +2875,18 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         ).add_done_callback(_log_task_exception)
         device.eq_bands      = config.get("eqBands", [0.0] * 8)
         device.eq_loudness   = bool(config.get("eqLoudness", False))
+        device.bass_shelf_hz = float(config.get("bassShelfHz", em_eq.DEFAULT_BASS_SHELF_HZ))
+        device.subsonic_hz  = float(config.get("subsonicHz", em_eq.DEFAULT_SUBSONIC_HZ))
+        device.tts_gain_db   = min(em_eq.MAX_MAKEUP_GAIN_DB, max(
+            0.0, float(config.get("ttsGainDb", 0.0))))
+        device.bass_guard_enabled = bool(config.get("bassGuardEnabled", True))
+        device.bass_guard_db      = float(config.get(
+            "bassGuardDb", em_mbc.DEFAULT_BASS_GUARD_DB))
+        device.limiter_enabled   = bool(config.get("limiterEnabled", True))
+        device.limiter_threshold = float(config.get(
+            "limiterThreshold", em_limiter.DEFAULT_THRESHOLD_DB))
+        device.limiter_release   = float(config.get(
+            "limiterRelease", em_limiter.DEFAULT_RELEASE_MS))
         device.led_scene     = em_scenes.resolve(config)
         if device.led_anim_capable and device.led_scene.get("listening_anim"):
             await device.send_control({
@@ -3285,16 +3407,6 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                                     f"offset={device.clock_sync.offset_us:.0f}us "
                                     f"drift={device.clock_sync.drift_ppm:.1f}ppm"
                                 )
-                                if "music_sync" in device.capabilities:
-                                    task = asyncio.create_task(
-                                        em_sendspin.register_device(
-                                            device.device_id,
-                                            device.sendspin_name,
-                                            device,
-                                        )
-                                    )
-                                    task.add_done_callback(_log_task_exception)
-
                 else:
                     log.debug(
                         f"[{device_id}] Unknown control message: {msg_type}"
@@ -3341,7 +3453,6 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 # an offline device rather than up to one stats report stale.
                 db.touch_device_seen(device.device_id)
                 _devices.pop(device.device_id, None)
-                await em_sendspin.unregister_device(device.device_id)
                 await api.notify_device_disconnected(device.device_id)
                 em_player.device_gone(device.device_id)
 
@@ -3697,15 +3808,6 @@ async def main():
     )
     mdns_task = asyncio.create_task(_mdns_refresh_loop(azc, info))
 
-    sendspin_runtime = (
-        em_sendspin.SendspinRuntime(None, os.path.dirname(DB_PATH))
-        if SENDSPIN_ENABLED else None
-    )
-    if sendspin_runtime is not None:
-        music_assistant_url = db.get_config("music_assistant_url", MUSIC_ASSISTANT_URL)
-        await sendspin_runtime.configure(music_assistant_url or "")
-    em_sendspin.set_runtime(sendspin_runtime)
-
     log.info(f"WebSocket server starting on {SERVER_HOST}:{SERVER_PORT}")
 
     try:
@@ -3742,9 +3844,6 @@ async def main():
         mdns_task.cancel()
         await azc.async_unregister_service(info)
         await azc.async_close()
-        if sendspin_runtime is not None:
-            await sendspin_runtime.close()
-        em_sendspin.set_runtime(None)
         await runner.cleanup()
         log.info("EchoMuse Controller stopped")
 

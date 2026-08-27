@@ -34,7 +34,6 @@ _STATE_EVENT_FIELDS: dict[str, tuple[str, str]] = {
     "capabilities": ("capabilities", "capabilities"),
     "wake_model": ("model_id", "wake_model_id"),
     "mute_state": ("muted", "muted"),
-    "sendspin_state": ("state", "sendspin_state"),
 }
 
 

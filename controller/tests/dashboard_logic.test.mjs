@@ -46,6 +46,12 @@ test('device state priority and event accents', () => {
 
 test('turn, banner, configuration, and wake-mode decisions', () => {
   assert.deepEqual(JSON.parse(JSON.stringify(logic.turnSegments({ stt_latency_ms: -1, ha_latency_ms: 2, tts_latency_ms: 3 }))), { stt: 0, ha: 2, tts: 3, shown: 5 });
+  const values = [900, 100, 500, 300, 700];
+  assert.equal(logic.percentile(values, 0.50), 500);
+  assert.equal(logic.percentile(values, 0.90), 900);
+  assert.equal(logic.percentile(values, 0.99), 900);
+  assert.deepEqual(values, [900, 100, 500, 300, 700]);
+  assert.equal(logic.percentile([], 0.50), null);
   assert.equal(logic.bannerMode('omni_biscuit'), 'twrp');
   assert.equal(logic.bannerMode('CSM biscuit'), 'android');
   assert.equal(logic.bannerMode('unknown'), 'unknown');

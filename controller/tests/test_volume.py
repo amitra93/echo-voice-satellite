@@ -46,3 +46,9 @@ def test_device_level_above_the_cap_reports_as_full():
 def test_bad_input_does_not_raise():
     assert em_volume.device_level_to_ha(None) == 0.0
     assert em_volume.device_level_to_ha("nonsense") == 0.0
+
+
+def test_button_levels_extend_the_existing_first_level_downward():
+    for level in range(1, 11):
+        assert em_volume.device_level_to_button_level(73 + (level - 1) * 6) == level
+    assert em_volume.device_level_to_button_level(None) is None

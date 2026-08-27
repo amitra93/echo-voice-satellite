@@ -46,16 +46,11 @@ configuration:
       Log protocol-level detail for devices and the Home Assistant
       connection. Verbose — turn it on to diagnose something, then off
       again.
-  sendspin_enabled:
-    name: Enable synchronized music
-    description: >-
-      Connect each compatible Echo to Music Assistant for synchronized
-      playback. Disable it if this controller should not expose music players.
   music_assistant_url:
     name: Music Assistant Sendspin server
     description: >-
-      Music Assistant host and Sendspin port in one field, for example
-      192.168.1.10:8927. Leave empty to discover it over mDNS.
+      Music Assistant host and Sendspin port sent to native Echo devices, for
+      example 192.168.1.10:8927. Leave empty to use device discovery.
   extra_ca_cert:
     name: Private CA certificate
     description: >-

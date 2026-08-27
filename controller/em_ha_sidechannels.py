@@ -61,28 +61,6 @@ def mute_state(device_id: str, muted: bool) -> None:
     _emit({"type": "mute_state", "device_id": device_id, "muted": bool(muted)})
 
 
-def sendspin_state(
-    device_id: str,
-    state: str,
-    *,
-    volume: int,
-    muted: bool,
-    title: str | None,
-    artist: str | None,
-) -> None:
-    _emit({
-        "type": "sendspin_state",
-        "device_id": device_id,
-        "state": {
-            "state": state,
-            "volume": max(0, min(100, int(volume))) / 100,
-            "muted": bool(muted),
-            "title": title,
-            "artist": artist,
-        },
-    })
-
-
 def capabilities(device_id: str, values: list[str]) -> None:
     _emit({"type": "capabilities", "device_id": device_id, "capabilities": list(values or [])})
 

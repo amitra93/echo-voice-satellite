@@ -30,6 +30,8 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/bluetooth"
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
+	"github.com/wilbowes/EchoMuse/internal/outchain"
+	"github.com/wilbowes/EchoMuse/internal/sendspin"
 	"github.com/wilbowes/EchoMuse/internal/server"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
 	"github.com/wilbowes/EchoMuse/internal/wifi"
@@ -93,6 +95,15 @@ func main() {
 
 	s := server.NewServer(buttonController, microphone, pcmSpeaker)
 	srvPtr.Store(s)
+	// Native Sendspin owns only Music Assistant playback. Its volume is a
+	// player scale, while the device is capped at the codec's unity-gain index.
+	sendspinClient := sendspin.NewClient(deviceID, deviceID, pcmSpeaker)
+	sendspinClient.SetPlayerState(sendspin.DeviceVolumeToMA(s.VolumeLevel()), false)
+	sendspinClient.OnVolume = func(volume int) {
+		s.SetVolume(sendspin.MAVolumeToDevice(volume))
+	}
+	sendspinClient.OnMute = pcmSpeaker.SetMusicMuted
+	sendspinManager := sendspin.NewManager(sendspinClient)
 
 	buttonController.SetVolumeCallback(func(direction string) {
 		if direction == "up" {
@@ -301,7 +312,11 @@ func main() {
 		}
 		applyAecConfig(canceller)
 		applyBleConfig(bleScanner)
+		applyOutputChainConfig(pcmSpeaker)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
+		if msg.SendspinServer != "" {
+			sendspinManager.Configure(msg.SendspinServer)
+		}
 	})
 
 	// Speaker flush — barge-in: cut buffered TTS the moment the controller
@@ -513,6 +528,7 @@ func main() {
 	sig := <-sigCh
 	log.Printf("Received %v — shutting down (muting output, amp off)", sig)
 	bleScanner.SetEnabled(false) // scan off + /dev/stpbt closed so the chip idles
+	sendspinManager.Close()
 	pcmSpeaker.Close()
 	os.Exit(0)
 }
@@ -870,6 +886,23 @@ func applyAecConfig(canceller *aec.Canceller) {
 		delayMs = *snap.AecDelayMs
 	}
 	canceller.SetParams(enabled, delayMs, snap.AecTailMs)
+}
+
+// applyOutputChainConfig configures the speaker from the merged snapshot, not
+// the partial message, so omitted values retain the controller-aligned defaults.
+func applyOutputChainConfig(spk *speaker.PcmSpeaker) {
+	snap := config.Get().Snapshot()
+	spk.SetOutputChain(outchain.Params{
+		Bands:              snap.EqBands,
+		Loudness:           snap.EqLoudness != nil && *snap.EqLoudness,
+		BassShelfHz:        *snap.BassShelfHz,
+		SubsonicHz:         *snap.SubsonicHz,
+		GuardEnabled:       snap.BassGuardEnabled != nil && *snap.BassGuardEnabled,
+		GuardDB:            *snap.BassGuardDb,
+		LimiterEnabled:     snap.LimiterEnabled != nil && *snap.LimiterEnabled,
+		LimiterThresholdDB: *snap.LimiterThreshold,
+		LimiterReleaseMS:   *snap.LimiterRelease,
+	})
 }
 
 // applyBleConfig starts/stops the BLE proxy scanner from the current

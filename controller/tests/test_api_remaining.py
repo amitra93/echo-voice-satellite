@@ -178,10 +178,20 @@ def test_release_and_system_config_handlers(monkeypatch):
     assert stored[-1] == ("ha_api_key", None)
 
     monkeypatch.setattr(em_api.db, "set_config", lambda key, value: stored.append((key, value)))
-    monkeypatch.setattr(em_api.em_sendspin, "configure", lambda value: asyncio.sleep(0))
     response = run(em_api._patch_system_config.__wrapped__(request({"device_approval": "auto", "music_assistant_url": "ma.local"})))
     assert response.status == 200
     assert run(em_api._patch_system_config.__wrapped__(request({"immutable": True}))).status == 400
+
+
+def test_music_assistant_url_normalization():
+    assert em_api.normalize_music_assistant_url("ma.local") == "ws://ma.local:8927/sendspin"
+    assert em_api.normalize_music_assistant_url("wss://ma.local/custom") == "wss://ma.local:8927/custom"
+    try:
+        em_api.normalize_music_assistant_url("https://ma.local")
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("non-WebSocket Music Assistant URL was accepted")
 
 
 def test_ota_update_rollback_and_fleet_deploy_decisions(monkeypatch):

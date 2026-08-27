@@ -58,14 +58,18 @@ def new_device(capabilities=None):
 
 
 def test_capabilities_and_rtt_aggregation():
-    device = new_device(["led_anim", "audio_mix", "button_hold", "oww_shadow", "oww_trigger"])
+    device = new_device(["led_anim", "audio_mix", "button_hold", "oww_shadow", "oww_trigger", "sendspin_native", "output_chain"])
     assert device.led_anim_capable
     assert device.audio_mix_capable
     assert device.button_hold_capable
     assert device.oww_shadow_capable
     assert device.oww_trigger_capable
+    assert device.sendspin_native_capable
+    assert device.output_chain_capable
     empty = new_device()
     assert not empty.led_anim_capable and not empty.oww_trigger_capable
+    assert not empty.sendspin_native_capable
+    assert not empty.output_chain_capable
 
     assert device.drain_rtt() == {}
     device.record_rtt(50, False)
@@ -262,6 +266,25 @@ def test_stream_speaker_chunks_preserves_partial_data_and_reports_metrics():
     asyncio.run(run())
 
 
+def test_stream_speaker_chunks_without_dsp_preserves_pcm_and_reports_zero_eq_time():
+    async def chunks():
+        yield b"x" * em_controller.SPEAKER_BYTES
+
+    async def run():
+        device = new_device(["output_chain"])
+        frames = []
+        device.send_data = lambda frame: asyncio.sleep(0, result=frames.append(frame))
+        device._set_speaking = lambda value: asyncio.sleep(0)
+
+        total, eq_ms, _first, _send_ms = await device.stream_speaker_chunks(chunks())
+
+        assert total == em_controller.SPEAKER_BYTES
+        assert eq_ms == 0
+        assert frames[0] == bytes([em_controller.SPEAKER_FRAME_TYPE]) + b"x" * em_controller.SPEAKER_BYTES
+
+    asyncio.run(run())
+
+
 def test_button_handler_routes_hold_tap_mute_and_cancel(monkeypatch):
     events = []
     monkeypatch.setattr(em_controller.ha_sidechannels, "button_event", lambda *args: events.append(args))
@@ -417,7 +440,6 @@ def test_control_handler_processes_device_state_messages(monkeypatch):
         monkeypatch.setattr(em_controller.api, "wifi_record_result", lambda *args: ({"pending": None}, False))
         monkeypatch.setattr(em_controller.api, "notify_device_connected", no_op)
         monkeypatch.setattr(em_controller.api, "notify_device_disconnected", no_op)
-        monkeypatch.setattr(em_controller.em_sendspin, "unregister_device", no_op)
         monkeypatch.setattr(em_controller.em_player, "device_gone", lambda *args: None)
         monkeypatch.setattr(em_controller, "leds_off", no_op)
         monkeypatch.setattr(em_controller, "wake_word_listener", never_wake)
@@ -672,6 +694,49 @@ def test_voice_playback_helpers_wait_for_device_completion(monkeypatch):
 
         device.cancel_event.set()
         assert await em_controller._run_streaming_post_turn_playback(device, chunks()) == 0
+
+    asyncio.run(run())
+
+
+def test_output_chain_devices_bypass_controller_dsp(monkeypatch):
+    async def run():
+        device = new_device(["output_chain"])
+        device.eq_bands = [12.0] * 8
+        device.tts_gain_db = 12.0
+        buffered = []
+
+        def unexpected(*_args, **_kwargs):
+            raise AssertionError("controller DSP must not run for output_chain")
+
+        monkeypatch.setattr(em_controller.em_eq, "apply", unexpected)
+        monkeypatch.setattr(em_controller.em_eq, "StreamingEQ", unexpected)
+
+        async def stream_speaker(pcm):
+            buffered.append(pcm)
+            device.playback_done.set()
+
+        device.stream_speaker = stream_speaker
+        pcm = b"unaltered 48k PCM"
+        await em_controller._run_post_turn_playback(device, pcm)
+        assert buffered == [pcm]
+        assert device.playback_eq_ms == 0
+
+        seen = []
+
+        async def chunks():
+            yield pcm
+
+        async def stream_chunks(source, processor):
+            assert processor is None
+            async for chunk in source:
+                seen.append(chunk)
+            device.playback_done.set()
+            return len(pcm), 0, 0.0, 0
+
+        device.stream_speaker_chunks = stream_chunks
+        assert await em_controller._run_streaming_post_turn_playback(device, chunks()) == len(pcm)
+        assert seen == [pcm]
+        assert device.playback_eq_ms == 0
 
     asyncio.run(run())
 

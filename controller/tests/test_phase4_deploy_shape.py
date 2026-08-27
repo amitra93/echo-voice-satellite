@@ -125,6 +125,11 @@ def test_query_history_rows_are_filterable_and_paginated():
     assert "Previous</Pill>" in dashboard
     assert "Next</Pill>" in dashboard
     assert "HA response" in dashboard
+    assert 'label="HA response median"' in dashboard
+    assert 'label="HA response P90"' in dashboard
+    assert 'label="HA response P99"' in dashboard
+    assert "ha_latency_ms" in dashboard
+    assert "percentile(haResponse" in dashboard
     assert "stt_latency_ms" in dashboard
     assert "tts_latency_ms" in dashboard
     assert "Play ${kind.toUpperCase()}" in dashboard

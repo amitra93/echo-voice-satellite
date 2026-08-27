@@ -23,17 +23,17 @@ def test_apply_options_maps_values_without_overwriting_environment(monkeypatch, 
 
 def test_main_reads_options_and_execs_controller(monkeypatch, tmp_path):
     options_path = tmp_path / "options.json"
-    options_path.write_text(json.dumps({"mdns_name": "Echo", "sendspin_enabled": True}))
+    options_path.write_text(json.dumps({"mdns_name": "Echo", "music_assistant_url": "ma.local"}))
     monkeypatch.setattr(em_start, "OPTIONS_PATH", options_path)
     calls = []
     monkeypatch.setattr(em_start.os, "execvp", lambda *args: calls.append(args))
     monkeypatch.delenv("MDNS_NAME", raising=False)
-    monkeypatch.delenv("SENDSPIN_ENABLED", raising=False)
+    monkeypatch.delenv("MUSIC_ASSISTANT_URL", raising=False)
 
     em_start.main()
 
     assert em_start.os.environ["MDNS_NAME"] == "Echo"
-    assert em_start.os.environ["SENDSPIN_ENABLED"] == "1"
+    assert em_start.os.environ["MUSIC_ASSISTANT_URL"] == "ma.local"
     assert calls == [("python3", ["python3", "-u", "em_controller.py"])]
 
 

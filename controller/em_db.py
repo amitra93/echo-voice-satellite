@@ -232,6 +232,32 @@ DEFAULT_DEVICE_CONFIG = {
     "beamAngle":        -1,
     "eqBands":          [4.5, 3.0, -0.5, 0.0, 1.5, 1.0, 0.0, 1.5],
     "eqLoudness":       True,
+    # Bass shelf centre frequency (band 0). Default 125 Hz matches every
+    # existing device. Lower (60-80) for deeper sub-bass; higher (150-200)
+    # for punchier mid-bass. Clamped 40-300 Hz by em_eq._bass_shelf_hz.
+    "bassShelfHz":      125,
+    # Subsonic highpass cutoff. Default 85 Hz protects the driver from
+    # sub-bass excursion. Lower (50-60) to let sub-bass through when
+    # bassShelfHz is also set low. Clamped 20-120 Hz by em_eq.
+    "subsonicHz":       85,
+    # TTS sources are substantially less mastered than music. This makeup
+    # gain is applied before the existing guard and limiter, so it raises
+    # speech without restoring peaks the protection stages removed. Music
+    # deliberately never consumes this key.
+    "ttsGainDb":         0.0,
+    # Output limiter. On by default: the EQ chain hard-clipped anything it
+    # boosted past full scale (#231), and a default that leaves that in place
+    # protects nobody — least of all a fresh device starting on the boosted
+    # eqBands curve above. Threshold/release are config rather than constants
+    # because limiter character wants tuning by ear in a real room — the same
+    # reasoning as duckDb and the LED meter curve.
+    # Dynamic bass guard. Removes low-frequency content the driver cannot
+    # deliver, which is what makes the midrange clean — see em_mbc.
+    "bassGuardEnabled": True,
+    "bassGuardDb":      -30.0,
+    "limiterEnabled":   True,
+    "limiterThreshold": -1.0,
+    "limiterRelease":   150,
     # LED ring scene (controller-side rendering — see em_scenes.py).
     # ledListenColor/ledThinkColor only apply when ledScene is "custom".
     "ledScene":         "standard",

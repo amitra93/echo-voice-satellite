@@ -61,6 +61,8 @@ COPY em_api.py .
 COPY em_db.py .
 COPY em_auth.py .
 COPY em_eq.py .
+COPY em_limiter.py .
+COPY em_mbc.py .
 COPY em_scenes.py .
 COPY em_support.py .
 COPY em_shadow.py .
@@ -87,7 +89,6 @@ COPY em_runbarrier.py .
 COPY em_volume.py .
 COPY em_audio_frame.py .
 COPY em_clock.py .
-COPY em_music_sync.py .
 COPY em_sendspin.py .
 COPY em_sync_sim.py .
 COPY em_turn_engine.py .

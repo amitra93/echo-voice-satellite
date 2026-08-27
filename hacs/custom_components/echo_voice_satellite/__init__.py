@@ -94,6 +94,14 @@ def _remove_stale_mute_entities(hass, entry) -> None:
     )
 
 
+def _remove_stale_sendspin_music_entities(hass, entry) -> None:
+    """Remove the retired controller-provided Sendspin media player."""
+    _remove_matching_entities(
+        hass, entry,
+        lambda e: e.domain == "media_player" and (e.unique_id or "").endswith("_sendspin_music"),
+    )
+
+
 def _remove_stale_diagnostic_sensor_entities(hass, entry) -> None:
     """Firmware version and wake word model (sensor.py's EchoFirmwareSensor
     / EchoWakeModelSensor) were removed — that information already lives on
@@ -127,6 +135,7 @@ async def async_setup_entry(hass, entry) -> bool:
     _remove_stale_volume_number_entities(hass, entry)
     _remove_stale_volume_select_entities(hass, entry)
     _remove_stale_mute_entities(hass, entry)
+    _remove_stale_sendspin_music_entities(hass, entry)
     _remove_stale_diagnostic_sensor_entities(hass, entry)
 
     client = ControllerClient(entry.data[CONF_URL], entry.data[CONF_API_KEY])

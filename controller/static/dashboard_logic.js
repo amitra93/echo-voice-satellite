@@ -63,6 +63,14 @@
     return { stt, ha, tts, shown: stt + ha + tts };
   }
 
+  // Nearest-rank percentile. Keep the input untouched because callers may
+  // reuse the turn list for rendering and filtering.
+  function percentile(values, p) {
+    const sorted = values.filter(Number.isFinite).sort((a, b) => a - b);
+    if (!sorted.length) return null;
+    return sorted[Math.max(0, Math.ceil(sorted.length * p) - 1)];
+  }
+
   function bannerMode(banner) {
     const b = (banner || '').toLowerCase();
     if (b.includes('omni') || b.includes('twrp') || b.includes('recovery')) return 'twrp';
@@ -88,7 +96,7 @@
 
   root.EchoMuseDashboardLogic = {
     ingressPath, isIngress, ingressWebSocketUrl, wwModelLabel, uptime, relTime,
-    deviceState, eventAccent, wifiBand, turnSegments, bannerMode,
+    deviceState, eventAccent, wifiBand, turnSegments, percentile, bannerMode,
     effectiveConfig, onDeviceMode,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

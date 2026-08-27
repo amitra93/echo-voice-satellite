@@ -43,7 +43,6 @@ services:
       - SERVER_IP=192.168.0.71
       - OWW_MODEL=hey_jarvis
       - REQUIRE_DEVICE_TLS=0
-      - SENDSPIN_ENABLED=1
       - MUSIC_ASSISTANT_URL=192.168.0.3:8927
     volumes:
       - /home/amitra/echomuse-v2/controller/data:/app/data

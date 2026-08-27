@@ -148,6 +148,54 @@ func TestApplySetsProvidedFields(t *testing.T) {
 	}
 }
 
+func TestSendspinServerSurvivesConfigSnapshot(t *testing.T) {
+	d := &Device{initialised: true}
+	d.Apply(ConfigMessage{SendspinServer: "ws://ma.local:8927/sendspin"})
+	if got := d.Snapshot().SendspinServer; got != "ws://ma.local:8927/sendspin" {
+		t.Fatalf("SendspinServer = %q", got)
+	}
+}
+
+func TestOutputChainDefaultsMatchController(t *testing.T) {
+	d := &Device{}
+	d.Apply(ConfigMessage{})
+	snap := d.Snapshot()
+	wantBands := []float64{4.5, 3.0, -0.5, 0.0, 1.5, 1.0, 0.0, 1.5}
+	if !equalFloats(snap.EqBands, wantBands) || !*snap.EqLoudness ||
+		*snap.BassShelfHz != 125 || *snap.SubsonicHz != 85 ||
+		!*snap.BassGuardEnabled || *snap.BassGuardDb != -30 ||
+		!*snap.LimiterEnabled || *snap.LimiterThreshold != -1 || *snap.LimiterRelease != 150 {
+		t.Fatalf("output chain defaults = %+v, want controller defaults", snap)
+	}
+}
+
+func TestApplyOutputChainPreservesPartialConfigAndSnapshotDoesNotAliasBands(t *testing.T) {
+	d := &Device{}
+	d.Apply(ConfigMessage{EqBands: []float64{1, 2}, LimiterEnabled: boolPtr(false), BassGuardDb: floatPtr(0)})
+	d.Apply(ConfigMessage{SubsonicHz: floatPtr(60)})
+	snap := d.Snapshot()
+	if !equalFloats(snap.EqBands, []float64{1, 2}) || *snap.LimiterEnabled ||
+		*snap.BassGuardDb != 0 || *snap.SubsonicHz != 60 || *snap.BassShelfHz != 125 {
+		t.Fatalf("output chain config = %+v, want merged values", snap)
+	}
+	snap.EqBands[0] = 99
+	if got := d.Snapshot().EqBands[0]; got != 1 {
+		t.Fatalf("Snapshot EqBands aliased live field: got %v, want 1", got)
+	}
+}
+
+func equalFloats(got, want []float64) bool {
+	if len(got) != len(want) {
+		return false
+	}
+	for i := range got {
+		if got[i] != want[i] {
+			return false
+		}
+	}
+	return true
+}
+
 func TestApplyClampsMicGainDb(t *testing.T) {
 	d := &Device{initialised: true}
 	d.Apply(ConfigMessage{MicGainDb: intPtr(100)})

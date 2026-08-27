@@ -221,9 +221,8 @@ def test_api_successful_turn_audio_activity_and_media_dispatch(monkeypatch, tmp_
         assert run(em_api._post_media_command.__wrapped__(request(
             {"command": "stop"}, match_info={"id": "dev"}))).status == 200
         monkeypatch.setattr(em_api.ha_sidechannels, "volume", lambda *_: None)
-        monkeypatch.setattr(em_api.em_sendspin, "command", lambda *args, **kwargs: asyncio.sleep(0))
         assert run(em_api._post_media_command.__wrapped__(request(
-            {"volume": 2, "sendspin": True}, match_info={"id": "dev"}))).status == 200
+            {"volume": 2}, match_info={"id": "dev"}))).status == 200
     finally:
         em_api._devices = old_devices
 
@@ -323,7 +322,6 @@ def test_controller_approved_registration_initialises_and_cleans_up(monkeypatch)
         monkeypatch.setattr(controller, "_push_device_state", noop)
         monkeypatch.setattr(controller, "leds_off", noop)
         monkeypatch.setattr(controller, "wake_word_listener", fake_wake)
-        monkeypatch.setattr(controller.em_sendspin, "unregister_device", noop)
         monkeypatch.setattr(controller.ha_sidechannels, "capabilities", lambda *_: None)
         monkeypatch.setattr(controller.ha_sidechannels, "wake_model", lambda *_: None)
         monkeypatch.setattr(controller.em_scenes, "resolve", lambda *_: {"listening": []})

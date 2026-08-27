@@ -134,6 +134,7 @@ def _patch_collaborators(monkeypatch, *, connect_error=None, register_scanner=No
     monkeypatch.setattr(module, "_remove_stale_button_entities", lambda hass, entry: None)
     monkeypatch.setattr(module, "_remove_stale_volume_number_entities", lambda hass, entry: None)
     monkeypatch.setattr(module, "_remove_stale_mute_entities", lambda hass, entry: None)
+    monkeypatch.setattr(module, "_remove_stale_sendspin_music_entities", lambda hass, entry: None)
     monkeypatch.setattr(module, "_remove_stale_diagnostic_sensor_entities", lambda hass, entry: None)
     return registered
 
@@ -387,6 +388,24 @@ def test_remove_stale_mute_entities_is_a_quiet_no_op_when_nothing_matches(monkey
     module._remove_stale_mute_entities(_FakeHass(), _FakeEntry())  # must not raise
 
     assert registry.removed == []
+
+
+def test_remove_stale_sendspin_music_entities_removes_only_the_retired_player(monkeypatch):
+    import homeassistant.helpers.entity_registry as er
+
+    registry = _FakeEntityRegistry([
+        _FakeEntityEntry("media_player.a_music", "media_player", unique_id="A_sendspin_music"),
+        _FakeEntityEntry("media_player.a_other", "media_player", unique_id="A_other"),
+        _FakeEntityEntry(
+            "media_player.other_music", "media_player", config_entry_id="entry-OTHER",
+            unique_id="B_sendspin_music",
+        ),
+    ])
+    monkeypatch.setattr(er, "async_get", lambda hass: registry)
+
+    module._remove_stale_sendspin_music_entities(_FakeHass(), _FakeEntry("entry-1"))
+
+    assert registry.removed == ["media_player.a_music"]
 
 
 # ── _remove_stale_diagnostic_sensor_entities ────────────────────────────────

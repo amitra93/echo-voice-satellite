@@ -129,7 +129,7 @@ Echo -> EchoMuse controller -> HACS audio backend
 - Add quiet hours, do-not-disturb, and per-room volume policies.
 - Normalize announcement volume across devices.
 
-**Relevant code:** `controller/em_player.py`, `controller/em_turn_engine.py`, `controller/em_sendspin.py`, `controller/em_ha_sidechannels.py`, `device/internal/bindings/speaker/`
+**Relevant code:** `controller/em_player.py`, `controller/em_turn_engine.py`, `controller/em_ha_sidechannels.py`, `device/internal/bindings/speaker/`
 
 ### 7. Add Fast Local Commands
 
@@ -195,7 +195,7 @@ the device, without changing the current tonal profile prematurely.
   change; evaluate it separately against the current high-pass.
 
 **Relevant code:** `controller/em_eq.py`, `controller/em_controller.py`,
-`controller/em_player.py`, `controller/em_sendspin.py`,
+`controller/em_player.py`,
 `device/internal/bindings/speaker/`
 
 ## Implementation Order

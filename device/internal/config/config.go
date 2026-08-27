@@ -27,6 +27,21 @@ type Device struct {
 
 	// Speaker
 	StartupVolume int
+	// Output chain settings mirror the controller's playback config. They are
+	// retained here so partial config pushes update the live chain safely.
+	EqBands          []float64
+	EqLoudness       bool
+	BassShelfHz      float64
+	SubsonicHz       float64
+	BassGuardEnabled bool
+	BassGuardDb      float64
+	LimiterEnabled   bool
+	LimiterThreshold float64
+	LimiterRelease   float64
+	// SendspinServer is the controller-selected Music Assistant Sendspin URL.
+	// It is deliberately outside the fleet/device settings sections: it is
+	// controller connection metadata, not an audio preference.
+	SendspinServer string
 
 	// Wake word
 	OwwThreshold float64
@@ -139,6 +154,15 @@ func (d *Device) loadDefaults() {
 	d.VadSpeechMs = envInt("VAD_SPEECH_MS", 80)
 	d.VadSilenceMs = envInt("VAD_SILENCE_MS", 600)
 	d.StartupVolume = envInt("STARTUP_VOLUME", 85)
+	d.EqBands = []float64{4.5, 3.0, -0.5, 0.0, 1.5, 1.0, 0.0, 1.5}
+	d.EqLoudness = true
+	d.BassShelfHz = 125
+	d.SubsonicHz = 85
+	d.BassGuardEnabled = true
+	d.BassGuardDb = -30
+	d.LimiterEnabled = true
+	d.LimiterThreshold = -1
+	d.LimiterRelease = 150
 	d.OwwThreshold = envFloat("OWW_THRESHOLD", 0.5)
 	d.OwwModel = envStr("OWW_MODEL", "hey_jarvis_v0.1")
 	d.OwwOnDevice = normaliseOnDevice(envStr("OWW_ON_DEVICE", OnDeviceOff))
@@ -207,6 +231,36 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.StartupVolume > 0 {
 		d.StartupVolume = msg.StartupVolume
 	}
+	if msg.EqBands != nil {
+		d.EqBands = append(d.EqBands[:0], msg.EqBands...)
+	}
+	if msg.EqLoudness != nil {
+		d.EqLoudness = *msg.EqLoudness
+	}
+	if msg.BassShelfHz != nil {
+		d.BassShelfHz = *msg.BassShelfHz
+	}
+	if msg.SubsonicHz != nil {
+		d.SubsonicHz = *msg.SubsonicHz
+	}
+	if msg.BassGuardEnabled != nil {
+		d.BassGuardEnabled = *msg.BassGuardEnabled
+	}
+	if msg.BassGuardDb != nil {
+		d.BassGuardDb = *msg.BassGuardDb
+	}
+	if msg.LimiterEnabled != nil {
+		d.LimiterEnabled = *msg.LimiterEnabled
+	}
+	if msg.LimiterThreshold != nil {
+		d.LimiterThreshold = *msg.LimiterThreshold
+	}
+	if msg.LimiterRelease != nil {
+		d.LimiterRelease = *msg.LimiterRelease
+	}
+	if msg.SendspinServer != "" {
+		d.SendspinServer = msg.SendspinServer
+	}
 	if msg.AdcDigitalGain > 0 {
 		d.AdcDigitalGain = msg.AdcDigitalGain
 	}
@@ -247,6 +301,15 @@ func (d *Device) Snapshot() ConfigMessage {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	beamAngle := d.BeamAngle
+	eqBands := append([]float64(nil), d.EqBands...)
+	eqLoudness := d.EqLoudness
+	bassShelfHz := d.BassShelfHz
+	subsonicHz := d.SubsonicHz
+	bassGuardEnabled := d.BassGuardEnabled
+	bassGuardDb := d.BassGuardDb
+	limiterEnabled := d.LimiterEnabled
+	limiterThreshold := d.LimiterThreshold
+	limiterRelease := d.LimiterRelease
 	// C4 fix (2026-07-05 review): previously &d.BeamformingEnabled leaked a
 	// pointer into the live mutex-guarded struct — the caller (streamMic,
 	// every period) dereferences it after RUnlock, racing with Apply()
@@ -280,6 +343,16 @@ func (d *Device) Snapshot() ConfigMessage {
 		BargeInEnabled:     &bargeInEnabled,
 		BargeInThreshold:   d.BargeInThreshold,
 		StartupVolume:      d.StartupVolume,
+		EqBands:            eqBands,
+		EqLoudness:         &eqLoudness,
+		BassShelfHz:        &bassShelfHz,
+		SubsonicHz:         &subsonicHz,
+		BassGuardEnabled:   &bassGuardEnabled,
+		BassGuardDb:        &bassGuardDb,
+		LimiterEnabled:     &limiterEnabled,
+		LimiterThreshold:   &limiterThreshold,
+		LimiterRelease:     &limiterRelease,
+		SendspinServer:     d.SendspinServer,
 		AdcDigitalGain:     d.AdcDigitalGain,
 		AdcMicpga:          d.AdcMicpga,
 		MicGainDb:          &micGainDb,
@@ -297,28 +370,38 @@ func (d *Device) Snapshot() ConfigMessage {
 // ConfigMessage mirrors the JSON shape of the config control message
 // sent by the controller. JSON tags must match em_controller.py exactly.
 type ConfigMessage struct {
-	Type               string   `json:"type,omitempty"`
-	AdcDigitalGain     int      `json:"adcDigitalGain,omitempty"`
-	AdcMicpga          int      `json:"adcMicpga,omitempty"`
-	MicGainDb          *int     `json:"micGainDb,omitempty"`
-	StartupVolume      int      `json:"startupVolume,omitempty"`
-	VadThreshold       float64  `json:"vadThreshold,omitempty"`
-	VadSpeechMs        int      `json:"vadSpeechMs,omitempty"`
-	VadSilenceMs       int      `json:"vadSilenceMs,omitempty"`
-	OwwThreshold       float64  `json:"owwThreshold,omitempty"`
-	OwwModel           string   `json:"owwModel,omitempty"`
-	OwwOnDevice        string   `json:"owwOnDevice,omitempty"`
-	BargeInEnabled     *bool    `json:"bargeInEnabled,omitempty"`
-	BargeInThreshold   float64  `json:"bargeInThreshold,omitempty"`
-	DuckDb             *float64 `json:"duckDb,omitempty"`
-	BeamAngle          *float64 `json:"beamAngle,omitempty"`
-	BeamformingEnabled *bool    `json:"beamformingEnabled,omitempty"`
-	HasBeamforming     bool     `json:"hasBeamforming,omitempty"`
-	AgcEnabled         *bool    `json:"agcEnabled,omitempty"`
-	AecEnabled         *bool    `json:"aecEnabled,omitempty"`
-	AecDelayMs         *int     `json:"aecDelayMs,omitempty"`
-	AecTailMs          int      `json:"aecTailMs,omitempty"`
-	BleProxyEnabled    *bool    `json:"bleProxyEnabled,omitempty"`
+	Type               string    `json:"type,omitempty"`
+	AdcDigitalGain     int       `json:"adcDigitalGain,omitempty"`
+	AdcMicpga          int       `json:"adcMicpga,omitempty"`
+	MicGainDb          *int      `json:"micGainDb,omitempty"`
+	StartupVolume      int       `json:"startupVolume,omitempty"`
+	EqBands            []float64 `json:"eqBands,omitempty"`
+	EqLoudness         *bool     `json:"eqLoudness,omitempty"`
+	BassShelfHz        *float64  `json:"bassShelfHz,omitempty"`
+	SubsonicHz         *float64  `json:"subsonicHz,omitempty"`
+	BassGuardEnabled   *bool     `json:"bassGuardEnabled,omitempty"`
+	BassGuardDb        *float64  `json:"bassGuardDb,omitempty"`
+	LimiterEnabled     *bool     `json:"limiterEnabled,omitempty"`
+	LimiterThreshold   *float64  `json:"limiterThreshold,omitempty"`
+	LimiterRelease     *float64  `json:"limiterRelease,omitempty"`
+	SendspinServer     string    `json:"sendspinServer,omitempty"`
+	VadThreshold       float64   `json:"vadThreshold,omitempty"`
+	VadSpeechMs        int       `json:"vadSpeechMs,omitempty"`
+	VadSilenceMs       int       `json:"vadSilenceMs,omitempty"`
+	OwwThreshold       float64   `json:"owwThreshold,omitempty"`
+	OwwModel           string    `json:"owwModel,omitempty"`
+	OwwOnDevice        string    `json:"owwOnDevice,omitempty"`
+	BargeInEnabled     *bool     `json:"bargeInEnabled,omitempty"`
+	BargeInThreshold   float64   `json:"bargeInThreshold,omitempty"`
+	DuckDb             *float64  `json:"duckDb,omitempty"`
+	BeamAngle          *float64  `json:"beamAngle,omitempty"`
+	BeamformingEnabled *bool     `json:"beamformingEnabled,omitempty"`
+	HasBeamforming     bool      `json:"hasBeamforming,omitempty"`
+	AgcEnabled         *bool     `json:"agcEnabled,omitempty"`
+	AecEnabled         *bool     `json:"aecEnabled,omitempty"`
+	AecDelayMs         *int      `json:"aecDelayMs,omitempty"`
+	AecTailMs          int       `json:"aecTailMs,omitempty"`
+	BleProxyEnabled    *bool     `json:"bleProxyEnabled,omitempty"`
 
 	// ListeningAnim: raw led_anim spec for the listening ring (#263).
 	// Carried as raw JSON so this package does not depend on the

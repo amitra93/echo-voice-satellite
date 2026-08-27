@@ -21,6 +21,12 @@ FireOS never touches this control).
 # this clips. See the module docstring.
 DEVICE_VOLUME_MAX = 127
 
+# The device's physical buttons use ten 3dB steps. Keep this mapping here so
+# dashboard state derives from the same scale that the firmware and HACS use.
+DEVICE_VOLUME_BUTTON_FLOOR = 73
+DEVICE_VOLUME_BUTTON_STEP = 6
+DEVICE_VOLUME_BUTTON_LEVELS = 10
+
 # 0.5dB per index step, 0dB at DEVICE_VOLUME_MAX.
 DB_PER_STEP = 0.5
 
@@ -45,3 +51,13 @@ def ha_volume_to_device(volume: float) -> int:
     put the DAC into positive digital gain.
     """
     return max(0, min(DEVICE_VOLUME_MAX, round(float(volume) * DEVICE_VOLUME_MAX)))
+
+
+def device_level_to_button_level(level: int | float | None) -> int | None:
+    """Return the nearest physical volume level (1-10), or None when unknown."""
+    try:
+        raw = float(level)
+    except (TypeError, ValueError):
+        return None
+    return max(1, min(DEVICE_VOLUME_BUTTON_LEVELS,
+                      round((raw - DEVICE_VOLUME_BUTTON_FLOOR) / DEVICE_VOLUME_BUTTON_STEP) + 1))

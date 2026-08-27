@@ -65,7 +65,6 @@ options:
   require_device_tls: false
   device_approval: "strict"
   debug: false
-  sendspin_enabled: true
   music_assistant_url: ""
   extra_ca_cert: ""
 schema:
@@ -77,6 +76,5 @@ schema:
   require_device_tls: "bool"
   device_approval: "list(strict|auto)"
   debug: "bool"
-  sendspin_enabled: "bool"
   music_assistant_url: "str"
   extra_ca_cert: "str?"

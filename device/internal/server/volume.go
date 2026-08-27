@@ -41,20 +41,24 @@ const (
 	volumeMax = 127
 
 	// volumeButtonFloor is the bottom of the band the PHYSICAL buttons
-	// traverse. The scale is dB-linear, so index 0 is -63.5dB and roughly the
-	// bottom third of the control is indistinguishable from silence; stepping
-	// across it spends presses to go nowhere. Silencing the device is the
-	// mute button's job, not the volume button's.
+	// traverse. The scale is dB-linear, so index 0 is -63.5dB. Start at -27dB
+	// rather than -40dB: the lower band was effectively inaudible after the
+	// output chain was tuned for loud speech. This leaves ten useful levels
+	// from -27dB through 0dB. Silencing the device is the mute button's
+	// job, not the volume button's.
 	//
 	// Explicit Set() calls are deliberately NOT floored — HA's volume 0.0
 	// has to still mean silent. A press from below the floor lands ON the
 	// floor rather than adding a step, so one press always reaches audible.
-	volumeButtonFloor = 47 // -40dB
+	volumeButtonFloor = 73 // -27dB
 
-	// volumeStep is 4dB per press: 10 presses to cross the button band.
-	volumeStep    = 8
-	volumeLEDSecs = 2 // how long to show volume ring
-	numLEDs       = 12
+	// volumeStep is 3dB per press: nine intervals make ten useful levels
+	// from -27dB through 0dB. The old level one (79, -24dB) is now level two.
+	volumeStep       = 6
+	volumeDisplayMax = 12 // level 10 fills all twelve physical LEDs
+	volumeLEDStart   = 11 // volume arc begins at the physical ring position 11
+	volumeLEDSecs    = 2  // how long to show volume ring
+	numLEDs          = 12
 )
 
 type volumeController struct {
@@ -199,17 +203,17 @@ func (vc *volumeController) Get() int {
 // StepUp increases volume by one step, within the button band.
 func (vc *volumeController) StepUp() {
 	vc.mu.Lock()
-	level := vc.level + volumeStep
+	level := vc.level
 	vc.mu.Unlock()
-	vc.Set(clampToButtonBand(level), true)
+	vc.Set(nextButtonLevel(level), true)
 }
 
 // StepDown decreases volume by one step, within the button band.
 func (vc *volumeController) StepDown() {
 	vc.mu.Lock()
-	level := vc.level - volumeStep
+	level := vc.level
 	vc.mu.Unlock()
-	vc.Set(clampToButtonBand(level), true)
+	vc.Set(previousButtonLevel(level), true)
 }
 
 // clampToButtonBand holds a stepped level inside [volumeButtonFloor,
@@ -226,6 +230,24 @@ func clampToButtonBand(level int) int {
 	return level
 }
 
+// nextButtonLevel and previousButtonLevel keep physical presses on the ten
+// canonical values even when a legacy controller state or remote raw set left
+// the codec between them.
+func nextButtonLevel(level int) int {
+	if level < volumeButtonFloor {
+		return volumeButtonFloor
+	}
+	return clampToButtonBand(volumeButtonFloor +
+		((level-volumeButtonFloor)/volumeStep+1)*volumeStep)
+}
+
+func previousButtonLevel(level int) int {
+	if level <= volumeButtonFloor {
+		return volumeButtonFloor
+	}
+	return volumeButtonFloor + ((level-volumeButtonFloor-1)/volumeStep)*volumeStep
+}
+
 // showLEDs lights N of 12 LEDs in cyan proportional to volume, then clears after 2s.
 func (vc *volumeController) showLEDs(level int) {
 	lc := vc.ledCtrl()
@@ -233,24 +255,24 @@ func (vc *volumeController) showLEDs(level int) {
 		return
 	}
 
-	// The arc spans the BUTTON band, not the full control: over 0..volumeMax
-	// the audible range crowds into the top LEDs and a press often moves
-	// nothing. One LED stays lit anywhere above silence so the ring never
-	// reads as "off" when the device is merely quiet.
-	span := volumeMax - volumeButtonFloor
-	lit := (level - volumeButtonFloor) * numLEDs / span
+	// Spread the ten volume positions across all twelve physical LEDs: level 1
+	// lights one LED and level 10 fills the ring. Round to the nearest LED so
+	// the unused two positions are distributed across the range.
+	volumeLevel := (level-volumeButtonFloor)/volumeStep + 1
+	lit := 1 + ((volumeLevel-1)*(numLEDs-1)+4)/9
 	if lit < 1 && level > volumeMin {
 		lit = 1
 	}
-	if lit > numLEDs {
-		lit = numLEDs
+	if lit > volumeDisplayMax {
+		lit = volumeDisplayMax
 	}
 	leds := make([]led.Led, numLEDs)
 	for i := 0; i < numLEDs; i++ {
+		id := (volumeLEDStart + i) % numLEDs
 		if i < lit {
-			leds[i] = led.Led{ID: i, R: 0, G: 200, B: 200} // cyan
+			leds[id] = led.Led{ID: id, R: 0, G: 200, B: 200} // cyan
 		} else {
-			leds[i] = led.Led{ID: i, R: 0, G: 0, B: 0}
+			leds[id] = led.Led{ID: id, R: 0, G: 0, B: 0}
 		}
 	}
 	if err := lc.SetLEDs(leds...); err != nil {

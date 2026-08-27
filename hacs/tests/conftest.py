@@ -12,7 +12,6 @@ import types
 import asyncio
 import inspect
 from enum import Enum
-from enum import IntFlag
 from pathlib import Path
 
 
@@ -88,10 +87,6 @@ class SelectEntity(Entity):
     pass
 
 
-class MediaPlayerEntity(Entity):
-    pass
-
-
 def _enum(name, values):
     return Enum(name, values)
 
@@ -107,28 +102,6 @@ switch = _module("homeassistant.components.switch")
 switch.SwitchEntity = SwitchEntity
 select = _module("homeassistant.components.select")
 select.SelectEntity = SelectEntity
-media = _module("homeassistant.components.media_player")
-media.MediaPlayerEntity = MediaPlayerEntity
-media.MediaPlayerDeviceClass = _enum("MediaPlayerDeviceClass", {"SPEAKER": "speaker"})
-class MediaPlayerEntityFeature(IntFlag):
-    PLAY = 1
-    PAUSE = 2
-    STOP = 512
-    VOLUME_SET = 4
-    VOLUME_MUTE = 8
-    NEXT_TRACK = 16
-    PREVIOUS_TRACK = 32
-    SEEK = 64
-    PLAY_MEDIA = 128
-    BROWSE_MEDIA = 256
-
-
-media.MediaPlayerEntityFeature = MediaPlayerEntityFeature
-media.MediaPlayerState = _enum("MediaPlayerState", {
-    "IDLE": "idle", "PLAYING": "playing", "PAUSED": "paused",
-})
-
-
 pipeline = _module("homeassistant.components.assist_pipeline")
 pipeline.PipelineEventType = _enum("PipelineEventType", {
     "STT_END": "stt_end", "INTENT_END": "intent_end", "TTS_END": "tts_end", "ERROR": "error",

@@ -48,6 +48,8 @@ import logging
 from collections import deque
 
 import em_eq
+import em_limiter
+import em_mbc
 
 log = logging.getLogger("player")
 
@@ -171,27 +173,6 @@ def _session(device_id: str) -> "MediaSession":
     return s
 
 
-async def _sendspin_yield(device_id: str) -> None:
-    """Tell any Sendspin session to leave the group — a direct 0x04 request
-    (HA "play jazz") owns the device's music plane (HA wins). Best-effort and
-    lazily imported so em_player has no hard dependency on the Sendspin runtime.
-    """
-    try:
-        import em_sendspin
-        await em_sendspin.yield_device(device_id)
-    except Exception as exc:  # pragma: no cover - defensive
-        log.warning(f"[{device_id}] Sendspin yield failed: {exc}")
-
-
-async def _sendspin_release(device_id: str) -> None:
-    """Legacy playback ended — let the Sendspin player become available again."""
-    try:
-        import em_sendspin
-        await em_sendspin.release_device(device_id)
-    except Exception as exc:  # pragma: no cover - defensive
-        log.warning(f"[{device_id}] Sendspin release failed: {exc}")
-
-
 def state(device_id: str) -> str:
     s = _sessions.get(device_id)
     return s.state if s else IDLE
@@ -232,10 +213,6 @@ def reported_state(device_id: str) -> str:
 
 
 async def play(device_id: str, url: str) -> None:
-    # A direct play request wins the music plane over any Sendspin group (HA
-    # wins), even when a turn defers the actual playback: the user asked for
-    # this, so leave the group now rather than letting it be silently swallowed.
-    await _sendspin_yield(device_id)
     s = _session(device_id)
     if s.owned_by_turn:
         # The common collision: "play some jazz" runs the intent BEFORE Home
@@ -278,7 +255,6 @@ async def stop(device_id: str) -> None:
         await s.push_intent(IDLE)
         return
     await s.stop()
-    await _sendspin_release(device_id)
 
 
 async def interrupt(device_id: str) -> None:
@@ -582,7 +558,30 @@ class MediaSession:
         # gain or lose the capability mid-stream, and this runs ~23×/s.
         frame_type, eos_type = _frame_types(device)
 
-        eq = em_eq.StreamingEQ(SPEAKER_RATE, device.eq_bands, device.eq_loudness)
+        # Built once for the whole feed and then UPDATED in place, never
+        # rebuilt: both processors carry filter and gain state, so a new
+        # instance mid-track restarts the crossover and clicks. Constructed
+        # even when disabled — a bypassed instance keeps its state warm, which
+        # is what makes toggling one mid-song silent.
+        #
+        # In place because these are taste parameters tuned by ear in a real
+        # room. Reading them once per stream meant every A/B cost a track
+        # skip, which is long enough that nobody can hold the two in their
+        # head (measured against a listening test on 2026-08-19: no audible
+        # difference reported, because none of the changes were reaching the
+        # audio at all).
+        eq = em_eq.StreamingEQ(SPEAKER_RATE, device.eq_bands, device.eq_loudness,
+                               limiter=em_limiter.Limiter(
+                                   SPEAKER_RATE,
+                                   threshold_db=device.limiter_threshold,
+                                   release_ms=device.limiter_release,
+                                   enabled=device.limiter_enabled),
+                               guard=em_mbc.BassGuard(
+                                   SPEAKER_RATE,
+                                   bass_guard_db=device.bass_guard_db,
+                                   enabled=device.bass_guard_enabled),
+                               bass_shelf_hz=device.bass_shelf_hz,
+                               subsonic_hz=device.subsonic_hz)
         start_pos = self._pos
         proc = None
         seg_start = loop.time()
@@ -655,6 +654,28 @@ class MediaSession:
             await self._push_state()
 
             while True:
+                # Config is pushed live (_apply_live_config), so re-read it
+                # per chunk. update() compares before it touches anything, so
+                # the steady-state cost is a tuple comparison ~23×/s.
+                #
+                # Logged whenever it MOVES, which is once at the start of the
+                # stream and once per dashboard change. That line is the only
+                # proof that a setting reached the audio: the stages cancel
+                # each other's most obvious cue, so "I heard nothing" cannot
+                # distinguish a working chain from a config that never
+                # arrived. See em_eq.describe_chain.
+                if eq.update(bands=device.eq_bands,
+                             loudness=device.eq_loudness,
+                             limiter_enabled=device.limiter_enabled,
+                             limiter_threshold=device.limiter_threshold,
+                             limiter_release=device.limiter_release,
+                             guard_enabled=device.bass_guard_enabled,
+                             guard_db=device.bass_guard_db,
+                             bass_shelf_hz=device.bass_shelf_hz,
+                             subsonic_hz=device.subsonic_hz):
+                    log.info(f"[{self.device_id}] Output chain: "
+                             f"{em_eq.describe_chain(device.eq_bands, device.eq_loudness, eq.limiter, eq.guard, bass_shelf_hz=device.bass_shelf_hz, subsonic_hz=device.subsonic_hz)}")
+
                 try:
                     if pending is not None:
                         chunk, pending = pending, None
@@ -737,9 +758,6 @@ class MediaSession:
                 log.info(f"[{self.device_id}] Media finished "
                          f"({sent // SPEAKER_BYTES} periods)")
             await self._push_state()
-            # Media ran to its natural end — the device is free again, so let a
-            # yielded Sendspin session reconnect (not a rejoin of old audio).
-            await _sendspin_release(self.device_id)
         except asyncio.CancelledError:
             # pause()/stop() tearing us down. Bookmark ≈ what has audibly
             # played: the device plays realtime once primed, so wall time
@@ -762,7 +780,8 @@ class MediaSession:
                     f"[{self.device_id}] Media feed done: "
                     f"{sent // SPEAKER_BYTES} periods, source max read "
                     f"{src_max_ms:.0f}ms, {src_stalls} stall(s) over "
-                    f"{SOURCE_STALL_MS:.0f}ms")
+                    f"{SOURCE_STALL_MS:.0f}ms, "
+                    f"{em_eq.describe_activity(eq.limiter, eq.guard)}")
             if not eos_sent:
                 # The flush discard stays armed until it sees this stream's
                 # EOS — same contract as barge-in aborting stream_speaker.

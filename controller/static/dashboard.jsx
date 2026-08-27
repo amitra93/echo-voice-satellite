@@ -1,7 +1,8 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 const DashboardLogic = window.EchoMuseDashboardLogic;
 const { ingressPath, isIngress, ingressWebSocketUrl, wwModelLabel, uptime,
-  relTime, deviceState, eventAccent, wifiBand, turnSegments, onDeviceMode } = DashboardLogic;
+  relTime, deviceState, eventAccent, wifiBand, turnSegments, percentile,
+  onDeviceMode } = DashboardLogic;
 
 // ─── API ──────────────────────────────────────────────────────────────────────
 
@@ -803,8 +804,10 @@ function TurnObservability({ turns, devices, isAdmin }) {
   const displayed = recent.slice(currentPage * HISTORY_PAGE_SIZE, (currentPage + 1) * HISTORY_PAGE_SIZE);
   const ok = filtered.filter(t => t.outcome === 'ok');
   const successPct = filtered.length ? Math.round(ok.length / filtered.length * 100) : null;
-  const replies = ok.map(t => t.tts_url_ms).filter(v => v >= 0).sort((a, b) => a - b);
-  const medianReply = replies.length ? replies[Math.floor(replies.length / 2)] : null;
+  const haResponse = ok.map(t => t.ha_latency_ms).filter(v => Number.isFinite(v) && v >= 0);
+  const haResponseP50 = percentile(haResponse, 0.50);
+  const haResponseP90 = percentile(haResponse, 0.90);
+  const haResponseP99 = percentile(haResponse, 0.99);
   const fmtS = ms => (ms / 1000).toFixed(1) + 's';
   const scale = Math.max(3000, ...recent.map(t => turnSegments(t).shown));
   const filterStyle = { fontFamily:mono, fontSize:10, color:'var(--text2)', background:'var(--sunken)', border:'1px solid var(--border)', borderRadius:5, padding:'6px 8px' };
@@ -824,7 +827,9 @@ function TurnObservability({ turns, devices, isAdmin }) {
         <Lcd label="Queries" value={filtered.length} color="var(--lcd-green)" size={16}/>
         <Lcd label="Success" value={successPct != null ? successPct + '%' : '—'}
              color={successPct == null ? 'var(--lcd-dim)' : successPct >= 80 ? 'var(--lcd-green)' : 'var(--lcd-amber)'} size={16}/>
-        <Lcd label="Median reply" value={medianReply != null ? fmtS(medianReply) : '—'} color="var(--lcd-dim)" size={16}/>
+        <Lcd label="HA response median" value={haResponseP50 != null ? fmtS(haResponseP50) : '—'} color="var(--lcd-dim)" size={16}/>
+        <Lcd label="HA response P90" value={haResponseP90 != null ? fmtS(haResponseP90) : '—'} color="var(--lcd-dim)" size={16}/>
+        <Lcd label="HA response P99" value={haResponseP99 != null ? fmtS(haResponseP99) : '—'} color="var(--lcd-dim)" size={16}/>
         <Lcd label="Underruns" value={filtered.reduce((s, t) => s + (t.underruns || 0), 0)}
              color={filtered.some(t => t.underruns > 0) ? 'var(--lcd-amber)' : 'var(--lcd-dim)'} size={16}/>
       </div>
@@ -1714,7 +1719,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                          device.connected ? 'Online' : `Offline · last seen ${relTime(device.last_seen)}`,
                          device.connected ? 'var(--ok)' : 'var(--warn)')}
                     {row('Volume', device.volume != null
-                         ? `${Math.round(device.volume * 100)}%`
+                         ? `Level ${device.volumeLevel ?? '—'} / 10`
                          : (s?.volumePct != null ? `${s.volumePct}%` : '—'))}
                     {row('Link', device.connected ? (device.linkTls ? 'wss (TLS)' : 'plain ws') : '—',
                          device.connected ? (device.linkTls ? 'var(--ok)' : 'var(--warn)') : undefined)}
@@ -4915,7 +4920,7 @@ const STAGE_MONO = "'DM Mono',monospace";
 // control sitting under a toggle that does not govern it would look fine and
 // be silently wrong.
 const CONFIG_SECTIONS = {
-  "playback": ["eqBands", "eqLoudness", "duckDb"],
+  "playback": ["eqBands", "eqLoudness", "ttsGainDb", "duckDb", "bassShelfHz", "subsonicHz", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb"],
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "saveWakeCaptures", "wakeCaptureSec", "wakeNearMissFloor"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
@@ -5140,6 +5145,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
 
   const [advMics, setAdvMics] = useState(false);
   const [advRing, setAdvRing] = useState(false);
+  const [advPlay, setAdvPlay] = useState(false);
 
   const inputStyle = disabled ? { opacity: 0.45, pointerEvents: 'none' } : {};
   const mono = "'DM Mono',monospace";
@@ -5181,6 +5187,33 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
               <Toggle label="Speech boost" sub="presence boost for voice" value={config.eqLoudness ?? false} onChange={v => set('eqLoudness', v)}/>
             </div>
             <div style={inputStyle}>
+              <Slider label="TTS loudness"
+                sub="voice-only makeup gain; music is unchanged and peaks remain limited"
+                value={config.ttsGainDb ?? 0} min={0} max={12} step={0.5} unit="dB"
+                disabled={disabled}
+                onChange={v => set('ttsGainDb', v)}/>
+            </div>
+            {/* Speaker protection: ONE toggle for the bass guard here, plus
+                the limiter CEILING in the advanced panel below. The limiter's
+                enable and release stay API-only.
+
+                These were four controls until 2026-08-20, and most cannot be
+                judged by ear. The guard and the limiter cancel each other's
+                most obvious cue — guard on/off is 7.7dB of overall level at a
+                flat EQ and 0.2dB with the bands boosted, because the limiter
+                gives back exactly what the guard takes. The depth moves the
+                overall level 0.14dB across its ENTIRE range. And the guard
+                mostly removes content this driver cannot radiate, so what
+                remains is a second-order cleanliness gain.
+
+                The limiter THRESHOLD is the exception and is exposed below: it
+                sets the peak ceiling, so a low value audibly squashes an EQ or
+                bass boost (a fleet left at -10dBFS is exactly that) and is a
+                genuine taste call. The limiter enable in particular must stay
+                on — it is what stops the EQ hard-clipping what it boosts
+                (#231), and that is not a preference. Every key still exists
+                and is settable through the API. */}
+            <div style={inputStyle}>
               <Slider label="Duck depth" disabled={!mixCapable}
                 sub={mixCapable
                   ? "how far music drops under a voice response — it keeps playing instead of pausing"
@@ -5202,6 +5235,46 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             </div>
           </div>
         </div>
+        <StageAdvanced open={advPlay} onToggle={() => setAdvPlay(o => !o)} disabledStyle={inputStyle}>
+          <div style={inputStyle}>
+            <Toggle label="Speaker protection"
+              sub="keeps bass the driver can't deliver from muddying the midrange — leave on"
+              value={config.bassGuardEnabled ?? true} onChange={v => set('bassGuardEnabled', v)}/>
+          </div>
+          <div style={{ marginTop: 8, fontFamily: mono, fontSize: 10, color: 'var(--muted)', lineHeight: 1.6 }}>
+            The speaker cannot reproduce the lowest frequencies, and feeding
+            them to it costs cone movement that muddies everything above.
+            Removing them is what keeps the midrange clean. The change is
+            subtle by design and there is no reason to turn it off.
+          </div>
+          {/* The limiter's on/off and release stay API-only (see the note in
+              the main Playback pane): the limiter must stay ON. The CEILING is
+              exposed because it is the one limiter parameter that is a taste
+              call — it sets how loud the output is allowed to get before peaks
+              are held, so a low ceiling squashes an EQ/bass boost and a high
+              one lets it through at the cost of headroom. Judged by ear. */}
+          <div style={inputStyle}>
+            <Slider label="Bass shelf"
+              sub="centre frequency of the bass boost — lower for deeper bass, higher for punchier mid-bass"
+              value={config.bassShelfHz ?? 125} min={40} max={300} step={5} unit="Hz"
+              disabled={disabled}
+              onChange={v => set('bassShelfHz', v)}/>
+          </div>
+          <div style={inputStyle}>
+            <Slider label="Subsonic cutoff"
+              sub="removes rumble below this — lower to let deep bass through, higher to protect the driver"
+              value={config.subsonicHz ?? 85} min={20} max={120} step={5} unit="Hz"
+              disabled={disabled}
+              onChange={v => set('subsonicHz', v)}/>
+          </div>
+          <div style={inputStyle}>
+            <Slider label="Output ceiling"
+              sub="peak limit — raise to let EQ/bass boosts through, lower for more headroom"
+              value={config.limiterThreshold ?? -1} min={-20} max={0} step={0.5} unit="dB"
+              disabled={disabled}
+              onChange={v => set('limiterThreshold', v)}/>
+          </div>
+        </StageAdvanced>
       </Stage>
 
       {/* 02 WAKE WORD */}
@@ -5656,6 +5729,112 @@ function DeployAllModal({ release, devices, deployState, onStarted, onDismiss, o
 //
 // The audio is recognisable speech, so every request is admin-only server-side;
 // clips are fetched via API.blob (Bearer-only, no cookie) as object URLs.
+function TrainingTrimEditor({ blob, audioRef, disabled, onTrim }) {
+  const canvasRef = useRef(null);
+  const [duration, setDuration] = useState(0);
+  const [range, setRange] = useState([0, 1000]);
+  const [playingSelection, setPlayingSelection] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setDuration(0); setRange([0, 1000]); setPlayingSelection(false);
+    if (!blob) return;
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    let closed = false;
+    const close = () => { if (!closed) { closed = true; ctx.close().catch(() => {}); } };
+    blob.arrayBuffer().then(data => ctx.decodeAudioData(data)).then(buffer => {
+      if (cancelled) return;
+      setDuration(buffer.duration);
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const scale = window.devicePixelRatio || 1;
+      const width = canvas.clientWidth || 560;
+      const height = 76;
+      canvas.width = width * scale; canvas.height = height * scale;
+      const g = canvas.getContext('2d');
+      g.scale(scale, scale);
+      g.clearRect(0, 0, width, height);
+      g.fillStyle = 'var(--sunken)'; g.fillRect(0, 0, width, height);
+      const samples = buffer.getChannelData(0);
+      const step = Math.max(1, Math.floor(samples.length / width));
+      g.strokeStyle = 'var(--accent)'; g.lineWidth = 1;
+      g.beginPath();
+      for (let x = 0; x < width; x++) {
+        let lo = 1, hi = -1;
+        for (let i = x * step; i < Math.min(samples.length, (x + 1) * step); i++) {
+          lo = Math.min(lo, samples[i]); hi = Math.max(hi, samples[i]);
+        }
+        g.moveTo(x, (1 + lo) * height / 2); g.lineTo(x, (1 + hi) * height / 2);
+      }
+      g.stroke();
+    }).catch(() => {}).finally(close);
+    return () => { cancelled = true; close(); };
+  }, [blob]);
+
+  useEffect(() => {
+    if (!duration || !onTrim) return;
+    onTrim({ start_ms: range[0] * duration / 1000, end_ms: range[1] * duration / 1000 });
+  }, [duration, range, onTrim]);
+
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el) return undefined;
+    const stop = () => {
+      if (playingSelection && el.currentTime >= range[1] * duration / 1000) {
+        el.pause(); setPlayingSelection(false);
+      }
+    };
+    el.addEventListener('timeupdate', stop);
+    return () => el.removeEventListener('timeupdate', stop);
+  }, [audioRef, duration, range, playingSelection]);
+
+  function setStart(value) {
+    setRange(([_, end]) => [Math.min(Number(value), end - 1), end]);
+  }
+  function setEnd(value) {
+    setRange(([start, _]) => [start, Math.max(Number(value), start + 1)]);
+  }
+  function playSelection() {
+    const el = audioRef.current;
+    if (!el || !duration) return;
+    el.currentTime = range[0] * duration / 1000;
+    setPlayingSelection(true);
+    el.play().catch(() => setPlayingSelection(false));
+  }
+
+  const start = duration ? range[0] * duration / 1000 : 0;
+  const end = duration ? range[1] * duration / 1000 : 0;
+  return (
+    <div style={{ marginTop: 14 }}>
+      <canvas ref={canvasRef} aria-label="Audio waveform"
+        style={{ width: '100%', height: 76, display: 'block', borderRadius: 4 }} />
+      <div style={{ marginTop: 8, display: 'grid', gap: 4 }}>
+        <label style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>
+          Start
+          <input type="range" min="0" max="999" value={range[0]} disabled={disabled}
+            aria-label="Trim start" onChange={e => setStart(e.target.value)}
+            style={{ width: '100%', display: 'block', accentColor: 'var(--accent)' }} />
+        </label>
+        <label style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>
+          End
+          <input type="range" min="1" max="1000" value={range[1]} disabled={disabled}
+            aria-label="Trim end" onChange={e => setEnd(e.target.value)}
+            style={{ width: '100%', display: 'block', accentColor: 'var(--accent)' }} />
+        </label>
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)' }}>
+        <span>Keep {start.toFixed(2)}s – {end.toFixed(2)}s ({Math.max(0, end - start).toFixed(2)}s)</span>
+        <button onClick={playSelection} disabled={disabled || !duration}
+          style={{ background: 'transparent', border: 0, color: 'var(--accent)', cursor: 'pointer', fontFamily: 'inherit', fontSize: 10 }}>
+          Play selection
+        </button>
+      </div>
+    </div>
+  );
+}
+
 function WakeTrainingTab({ onBacklog }) {
   const [models, setModels]   = useState(null);   // [{model, counts}]
   const [model, setModel]     = useState(null);   // selected stem
@@ -5666,6 +5845,8 @@ function WakeTrainingTab({ onBacklog }) {
   const [msg, setMsg]         = useState(null);
   const [exporting, setExporting] = useState(false);
   const [lastAction, setLastAction] = useState(null); // {name, label} — undo target
+  const [trim, setTrim] = useState(null);
+  const [audioBlob, setAudioBlob] = useState(null);
   const urlRef = useRef(null);
   const audioRef = useRef(null);
 
@@ -5706,9 +5887,10 @@ function WakeTrainingTab({ onBacklog }) {
     let cancelled = false;
     if (urlRef.current) { URL.revokeObjectURL(urlRef.current); urlRef.current = null; }
     setAudioUrl(null);
+    setAudioBlob(null); setTrim(null);
     if (!model || !current) return;
     API.blob(`/api/training_captures/${encodeURIComponent(model)}/audio/${encodeURIComponent(current.name)}`)
-      .then(b => { if (cancelled) return; const u = URL.createObjectURL(b); urlRef.current = u; setAudioUrl(u); })
+       .then(b => { if (cancelled) return; const u = URL.createObjectURL(b); urlRef.current = u; setAudioBlob(b); setAudioUrl(u); })
       .catch(() => {});
     return () => { cancelled = true; };
   }, [model, current]);
@@ -5723,7 +5905,7 @@ function WakeTrainingTab({ onBacklog }) {
         await API.del(`/api/training_captures/${encodeURIComponent(model)}/${encodeURIComponent(clip.name)}`);
         setLastAction(null); // a discarded clip is gone — not undoable
       } else {
-        await API.post(`/api/training_captures/${encodeURIComponent(model)}/${encodeURIComponent(clip.name)}/label`, { label });
+         await API.post(`/api/training_captures/${encodeURIComponent(model)}/${encodeURIComponent(clip.name)}/label`, { label, ...(trim || {}) });
         setLastAction({ name: clip.name, label });
       }
       // Drop it from the queue in place so the next clip slides into view
@@ -5841,8 +6023,11 @@ function WakeTrainingTab({ onBacklog }) {
             <span>{current.kind === 'act' ? 'Activation' : 'Near-miss'} · score {current.score.toFixed(3)}</span>
             <span style={{ color: 'var(--muted)' }}>{current.device_id} · {new Date(current.ts_ms).toLocaleString()}</span>
           </div>
-          {audioUrl
-            ? <audio ref={audioRef} src={audioUrl} controls autoPlay style={{ width: '100%' }} />
+           {audioUrl
+             ? <>
+                 <audio ref={audioRef} src={audioUrl} controls autoPlay style={{ width: '100%' }} />
+                 <TrainingTrimEditor blob={audioBlob} audioRef={audioRef} disabled={busy} onTrim={setTrim} />
+               </>
             : <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--muted)' }}>Loading audio…</div>}
           <div style={{ display: 'flex', gap: 10, marginTop: 16, flexWrap: 'wrap' }}>
             <Pill accent disabled={busy} onClick={() => act('positive')}>Should have activated</Pill>
@@ -5900,7 +6085,6 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
   const [musicAssistantUrl, setMusicAssistantUrl] = useState('');
   const [musicAssistantBusy, setMusicAssistantBusy] = useState(false);
   const [musicAssistantMsg, setMusicAssistantMsg] = useState(null);
-  const [sendspinStatus, setSendspinStatus] = useState(null);
   // Total untriaged wake captures across all wake words — drives the badge on
   // the Training tab so the labelling backlog is visible without opening it.
   const [trainingBacklog, setTrainingBacklog] = useState(null);
@@ -5939,16 +6123,6 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
       setApiKeyConfigured(Boolean(cfg.ha_api_key_configured));
       setMusicAssistantUrl(cfg.music_assistant_url || '');
     }).catch(() => {});
-  }, []);
-
-  async function refreshSendspin() {
-    try { setSendspinStatus(await API.get('/api/system/sendspin')); } catch (_) {}
-  }
-
-  useEffect(() => {
-    refreshSendspin();
-    const timer = setInterval(refreshSendspin, 2000);
-    return () => clearInterval(timer);
   }, []);
 
   async function collectBundle() {
@@ -6031,8 +6205,7 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
       setMusicAssistantUrl(result.music_assistant_url || '');
       setMusicAssistantMsg({ ok: true, text: result.music_assistant_url
         ? `Saved ${result.music_assistant_url}`
-        : 'Saved — Music Assistant will be discovered over mDNS' });
-      await refreshSendspin();
+        : 'Saved — native devices will use their configured discovery fallback' });
     } catch (e) {
       setMusicAssistantMsg({ ok: false, text: e.error || 'Failed to save Music Assistant server' });
     }
@@ -6172,9 +6345,9 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
 
           {tab === 'music' && isAdmin && (
             <div style={{ maxWidth: 560 }}>
-              <div className="em-label" style={{ marginBottom:12 }}>Music Assistant · Sendspin</div>
+              <div className="em-label" style={{ marginBottom:12 }}>Music Assistant</div>
               <div style={{ fontFamily:"'DM Sans',sans-serif", color:'var(--text2)', lineHeight:1.6, marginBottom:18 }}>
-                Address of Music Assistant's Sendspin server. Keep the host and port in this one field. Leave it empty to discover <code>_sendspin-server._tcp.local.</code> over mDNS.
+                Address of Music Assistant's Sendspin server, sent directly to native Echo devices. Music Assistant provides their media players and music controls.
               </div>
               <div style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color:'var(--text2)', marginBottom:6 }}>Server URL</div>
               <input value={musicAssistantUrl}
@@ -6189,23 +6362,6 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
               <Pill accent disabled={musicAssistantBusy} onClick={saveMusicAssistant}>
                 {musicAssistantBusy ? 'Saving…' : 'Save server'}
               </Pill>
-              <div className="em-label" style={{ marginTop:28, marginBottom:10 }}>Players</div>
-              <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', marginBottom:12 }}>
-                {sendspinStatus?.resolved_url ? `Server: ${sendspinStatus.resolved_url}` : 'Server not discovered'}
-              </div>
-              {(sendspinStatus?.devices || []).map(device => (
-                <div key={device.device_id} className="em-panel" style={{ padding:'12px 14px', marginBottom:10 }}>
-                  <div style={{ display:'flex', justifyContent:'space-between', gap:12, alignItems:'center' }}>
-                    <div>
-                      <div style={{ fontFamily:"'DM Sans',sans-serif", color:'var(--text)', fontWeight:600 }}>{device.name}</div>
-                      <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:device.error ? 'var(--error)' : 'var(--muted)', marginTop:4 }}>
-                        {device.connected ? 'Connected' : 'Disconnected'}
-                        {device.error ? ` · ${device.error}` : ''}
-                      </div>
-                    </div>
-                  </div>
-                </div>
-              ))}
             </div>
           )}
 

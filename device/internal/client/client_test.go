@@ -44,6 +44,15 @@ func TestLoadLinkCredsWithoutFilesIsPlainAndUnauthenticated(t *testing.T) {
 	}
 }
 
+func TestCapabilitiesAnnounceNativeSendspin(t *testing.T) {
+	for _, capability := range capabilities() {
+		if capability == "sendspin_native" {
+			return
+		}
+	}
+	t.Fatal("sendspin_native capability is not announced")
+}
+
 func TestLoadLinkCredsLoadsPinnedCAAndTrimmedToken(t *testing.T) {
 	oldCA, oldToken := credCAPath, credTokenPath
 	t.Cleanup(func() { credCAPath, credTokenPath = oldCA, oldToken })

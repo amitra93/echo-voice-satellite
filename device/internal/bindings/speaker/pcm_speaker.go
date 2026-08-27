@@ -15,11 +15,12 @@ import (
 	"github.com/Binozo/GoTinyAlsa/pkg/pcm"
 	"github.com/Binozo/GoTinyAlsa/pkg/tinyalsa"
 	deviceclock "github.com/wilbowes/EchoMuse/internal/clock"
+	"github.com/wilbowes/EchoMuse/internal/sendspin"
 )
 
 // cardNr/deviceNr live in pcmstatus.go so the host test can pin them against
 // the status path — this file is ARM-only (build tag `server`).
-const periodSize  = 2048
+const periodSize = 2048
 const periodBytes = periodSize * 2 * 2 // 2 channels * 2 bytes = 8192
 
 // The wire carries MONO 48kHz — PumpPeriod duplicates L=R before queueing.
@@ -74,12 +75,26 @@ type PcmSpeaker struct {
 	// musicSync is the timestamp-paced music plane. It remains separate from
 	// the legacy arrival-paced music stream for backward compatibility.
 	musicSync *scheduledMusic
+	// musicClock is the scheduled plane's presentation timeline: one rendered
+	// period of playback time per rendered period, at the measured DAC rate.
+	musicClock *scheduledClock
+	// musicSyncLogTick counts periods for the periodic [music] telemetry line;
+	// only ever touched by silenceLoop, so it needs no synchronisation.
+	musicSyncLogTick int
+	musicClockTick   int
+	// musicStereo is the reused L=R period for the scheduled plane, owned by
+	// the ALSA goroutine.
+	musicStereo []byte
+	oc          chainState
 
 	// duckTarget is the gain applied to MUSIC while it plays under a voice
 	// turn, Q15. Written from the control plane (SetDuck) and read by the
 	// ALSA goroutine every period, hence atomic; the ramp toward it lives in
 	// the Mixer, which is single-consumer and needs no synchronisation.
 	duckTarget atomic.Int32
+	// musicMuted is controlled by Music Assistant's Sendspin player mute. It
+	// only suppresses the music plane; privacy mute remains owned by Server.
+	musicMuted atomic.Bool
 	mixer      Mixer
 
 	// echoTap, when non-nil, receives every period pumped to ALSA — real
@@ -127,6 +142,7 @@ func NewPcmSpeaker(echoTap func([]byte), levelTap func(rms float64)) (*PcmSpeake
 	s.voice = newAudioStream(audioChanDepth, s.deadCh)
 	s.music = newAudioStream(audioChanDepth, s.deadCh)
 	s.musicSync = &scheduledMusic{}
+	s.musicClock = newScheduledClock(deviceclock.NowUs)
 	s.duckTarget.Store(unityGain)
 	s.mixer.SetGainImmediate(unityGain)
 	if err := s.Init(); err != nil {
@@ -172,12 +188,23 @@ func (p *PcmSpeaker) Init() error {
 
 	go p.silenceLoop()
 
-	time.Sleep(100 * time.Millisecond)                            // silence reaches the DAC (~2 periods)
-	exec.Command("tinymix", "-D", "0", "62", "24", "24").Run()    // set HP driver analog gain (+18dB)
-	exec.Command("tinymix", "-D", "0", "67", "1", "1").Run()      // enable codec hardware DRC peak limiter
-	exec.Command("tinymix", "-D", "0", "5", "On").Run()           // enable amp onto a clocked, silent DAC
-	time.Sleep(50 * time.Millisecond)                             // let amp settle
-	exec.Command("tinymix", "-D", "0", "61", "100", "100").Run()  // unmute
+	time.Sleep(100 * time.Millisecond) // silence reaches the DAC (~2 periods)
+	// HP Driver Gain (ctl 62) is the analog gain stage AFTER the digital
+	// volume (ctl 61). It was 15 (+15dB), which clips the DAC by ~12dB when
+	// the controller sends a -1dBFS signal at max digital volume — the
+	// analog stage saturates, which is what "muddy and flat, no bass"
+	// sounds like: clipping destroys dynamics and intermodulates the
+	// bass into the midrange. Set to 3 (+3dB): the controller's limiter
+	// ceiling is -1dBFS, so the amp sees +2dBFS on peaks — mild soft
+	// clipping that trades a small amount of distortion for ~3dB more
+	// loudness. CLAUDE.md measured 2.25% THD at +18dB, so +3dB is well
+	// within the amp's usable range. Raising this further increases
+	// distortion; lowering it reduces loudness.
+	exec.Command("tinymix", "-D", "0", "62", "3", "3").Run()
+	exec.Command("tinymix", "-D", "0", "85", "1").Run()          // enable DAC soft stepping (1 step/2 samples) — ramps silence↔audio transitions, eliminating clicks
+	exec.Command("tinymix", "-D", "0", "5", "On").Run()          // enable amp onto a clocked, silent DAC
+	time.Sleep(50 * time.Millisecond)                            // let amp settle
+	exec.Command("tinymix", "-D", "0", "61", "100", "100").Run() // unmute
 
 	log.Println("PcmSpeaker initialised — silence stream running")
 	return nil
@@ -254,6 +281,7 @@ func (p *PcmSpeaker) EnableSpeakerAmp() {
 // rather than hanging.
 func (p *PcmSpeaker) silenceLoop() {
 	defer close(p.deadCh)
+	var musicRenderMax, outputChainMax, pumpMax time.Duration
 	for {
 		select {
 		case <-p.stopCh:
@@ -262,19 +290,52 @@ func (p *PcmSpeaker) silenceLoop() {
 		}
 
 		var voice, music []byte
+		logMusic := false
+		renderStart := time.Now()
 		if p.voice.ready(primePeriods) {
 			voice = p.voice.take()
 		} else if p.voice.playing {
 			p.report(p.voice.drained(), "voice")
 		}
 		if p.musicSync.hasStream() {
-			if mono := p.musicSync.render(deviceclock.NowUs(), periodSize); mono != nil {
-				music = toStereo(mono)
+			p.musicClockTick++
+			if p.musicClockTick >= 24 {
+				p.musicClockTick = 0
+				p.sampleMusicClock()
+			}
+			// Advance is the timeline, so it is called once per rendered
+			// period and its result is what the renderer positions against.
+			// Stride carries the DAC-vs-source rate ratio into the render so
+			// the read phase moves smoothly across the period rather than
+			// being corrected in a step at each boundary.
+			mono := p.musicSync.render(
+				p.musicClock.Advance(periodSize), p.musicClock.Stride(), periodSize)
+			if mono != nil {
+				if !p.musicMuted.Load() {
+					p.musicStereo = toStereoInto(p.musicStereo, mono)
+					music = p.musicStereo
+				}
+			}
+			// Periodic scheduled-music telemetry (~5s at 42.7ms periods). This
+			// plane had none, so a click or drift was invisible: buffer depth
+			// answers starvation, interp/late/drift answer the rendering.
+			p.musicSyncLogTick++
+			if p.musicSyncLogTick >= 117 {
+				p.musicSyncLogTick = 0
+				logMusic = true
 			}
 		} else if p.music.ready(primePeriods) {
+			p.musicSyncLogTick = 0
+			p.musicClockTick = 0
 			music = p.music.take()
 		} else if p.music.playing {
 			p.report(p.music.drained(), "music")
+		} else {
+			p.musicSyncLogTick = 0
+			p.musicClockTick = 0
+		}
+		if elapsed := time.Since(renderStart); elapsed > musicRenderMax {
+			musicRenderMax = elapsed
 		}
 
 		// The ring's level must be measured BEFORE mixing: Mix sums into the
@@ -288,6 +349,11 @@ func (p *PcmSpeaker) silenceLoop() {
 		out := p.mixer.Mix(voice, music, p.duckTarget.Load())
 		if out == nil {
 			out = silencePeriod
+		}
+		chainStart := time.Now()
+		out = p.applyOutputChain(out)
+		if elapsed := time.Since(chainStart); elapsed > outputChainMax {
+			outputChainMax = elapsed
 		}
 
 		// Taps see the MIXED output, which is what the speaker actually
@@ -305,9 +371,24 @@ func (p *PcmSpeaker) silenceLoop() {
 		if p.levelTap != nil {
 			p.levelTap(level)
 		}
+		pumpStart := time.Now()
 		if err := p.session.Pump(out); err != nil {
 			log.Printf("silenceLoop: pump error: %v", err)
 			return
+		}
+		if elapsed := time.Since(pumpStart); elapsed > pumpMax {
+			pumpMax = elapsed
+		}
+		if logMusic {
+			st := p.musicSync.stats()
+			log.Printf("[music] sched buffered=%dms underruns=%d holds=%d "+
+				"late=%d startErr=%dus drift=%dus(max %dus) rate=%.1f resync=%d "+
+				"renderMax=%s chainMax=%s pumpMax=%s",
+				st.BufferedMs, st.Underruns, st.Holds, st.LateSamples,
+				st.StartErrorUs, st.LastErrorUs, st.MaxDriftUs,
+				p.musicClock.Rate(), p.musicClock.Resyncs(),
+				musicRenderMax.Round(time.Microsecond), outputChainMax.Round(time.Microsecond), pumpMax.Round(time.Microsecond))
+			musicRenderMax, outputChainMax, pumpMax = 0, 0, 0
 		}
 	}
 }
@@ -341,6 +422,23 @@ func (p *PcmSpeaker) report(st *StreamStats, plane string) {
 // device requires. The stereo config is an I2S/codec-path constraint, not a
 // wire one — shipping two identical channels would double bandwidth for
 // nothing on links that are already marginal.
+// toStereoInto duplicates L=R into a caller-owned buffer. The scheduled music
+// path renders every 42.7ms on the ALSA writer, so allocating a period here
+// was 8KB of garbage per period on the one goroutine with a hard deadline.
+func toStereoInto(dst, data []byte) []byte {
+	n := len(data) / 2
+	if cap(dst) < n*4 {
+		dst = make([]byte, n*4)
+	}
+	period := dst[:n*4]
+	for i := 0; i < n; i++ {
+		lo, hi := data[i*2], data[i*2+1]
+		period[i*4+0], period[i*4+1] = lo, hi // L
+		period[i*4+2], period[i*4+3] = lo, hi // R
+	}
+	return period
+}
+
 func toStereo(data []byte) []byte {
 	n := len(data) / 2
 	period := make([]byte, n*4)
@@ -378,6 +476,11 @@ func (p *PcmSpeaker) SetDuck(db float64) {
 	p.duckTarget.Store(DuckGain(db))
 }
 
+// SetMusicMuted changes only the music plane. MA's player mute must never
+// call the privacy-mute path: that would stop the microphone, change LEDs,
+// and persist a privacy state for what was merely a music command.
+func (p *PcmSpeaker) SetMusicMuted(muted bool) { p.musicMuted.Store(muted) }
+
 // IsStreaming reports whether a VOICE stream is currently mid-flight.
 //
 // Added for on-device wake word scoring: while the speaker is playing, the
@@ -406,15 +509,15 @@ func (p *PcmSpeaker) EndStream() { p.voice.endStream() }
 func (p *PcmSpeaker) EndMusicStream() { p.music.endStream() }
 
 // Flush cuts a playing VOICE stream immediately (barge-in). Two parts:
-//   1. Drain the buffer — kills up to ~5.5s already queued on-device.
-//   2. Arm discarding (if a stream is mid-flight) — subsequent periods of
-//      this stream are dropped until its EOS arrives. Necessary because the
-//      controller writes the whole response into the WebSocket ahead of
-//      playback: at barge time the rest of the stream is already in TCP
-//      buffers and would refill the channel right after the drain (the
-//      pre-2026-07-08 version drained only, and playback resumed after a
-//      ~1.3s skip). The controller sends the EOS on the cancel path too, so
-//      the discard always terminates.
+//  1. Drain the buffer — kills up to ~5.5s already queued on-device.
+//  2. Arm discarding (if a stream is mid-flight) — subsequent periods of
+//     this stream are dropped until its EOS arrives. Necessary because the
+//     controller writes the whole response into the WebSocket ahead of
+//     playback: at barge time the rest of the stream is already in TCP
+//     buffers and would refill the channel right after the drain (the
+//     pre-2026-07-08 version drained only, and playback resumed after a
+//     ~1.3s skip). The controller sends the EOS on the cancel path too, so
+//     the discard always terminates.
 //
 // Up to PeriodCount ALSA periods (~170ms) already handed to the hardware
 // still play — cutting those needs a stream restart, which costs more in
@@ -431,7 +534,15 @@ func (p *PcmSpeaker) FlushMusic() { p.music.flush() }
 // MusicSyncStart begins a timestamp-paced stream and clears any previous
 // scheduled data. It does not touch the legacy music plane.
 func (p *PcmSpeaker) MusicSyncStart(generation uint32) bool {
-	return p.musicSync.start(generation)
+	started := p.musicSync.start(generation)
+	if started {
+		// A stream's timestamps are relative to the device clock, so the
+		// timeline is re-anchored to it rather than continuing from wherever
+		// the previous stream's period count had reached.
+		p.musicClock.Reset()
+		p.sampleMusicClock()
+	}
+	return started
 }
 
 func (p *PcmSpeaker) MusicSyncPCM(generation, sequence uint32, targetUs int64, pcm []byte) bool {
@@ -446,11 +557,27 @@ func (p *PcmSpeaker) MusicSyncEnd(generation uint32) bool {
 	return p.musicSync.end(generation)
 }
 
+// sampleMusicClock reads ALSA's status snapshot outside the renderer's lock.
+// It only refines the measured DAC rate — the timeline itself is counted, not
+// derived from hw_ptr — so a failed read is ignored: it costs a little rate
+// accuracy, which is a slow drift, never a discontinuity.
+func (p *PcmSpeaker) sampleMusicClock() {
+	b, err := os.ReadFile(statusPath(cardNr, deviceNr))
+	if err != nil {
+		return
+	}
+	status, err := sendspin.ParsePcmStatus(b)
+	if err == nil {
+		p.musicClock.Observe(status)
+	}
+}
+
 // MusicSyncStats returns timestamp-rendering diagnostics without exposing the
 // scheduled queue or allowing callers to mutate its state.
-func (p *PcmSpeaker) MusicSyncStats() (lateSamples, underruns, corrections uint64, startErrorUs, lastErrorUs int64) {
+func (p *PcmSpeaker) MusicSyncStats() (underruns, holds, lateSamples uint64, startErrorUs, lastErrorUs, maxDriftUs, bufferedMs int64) {
 	st := p.musicSync.stats()
-	return st.LateSamples, st.Underruns, st.Corrections, st.StartErrorUs, st.LastErrorUs
+	return st.Underruns, st.Holds, st.LateSamples,
+		st.StartErrorUs, st.LastErrorUs, st.MaxDriftUs, st.BufferedMs
 }
 
 // Close shuts the speaker down in the reverse of Init's bring-up: mute,

@@ -18,7 +18,6 @@ PLATFORMS = (
     "binary_sensor",
     "select",
     "switch",
-    "media_player",
 )
 
 # "number" is deliberately absent: the Volume number entity (a continuous
@@ -45,7 +44,5 @@ PLATFORMS = (
 CAP_AMBIENT_LIGHT = "ambient_light"
 CAP_LED_ANIM = "led_anim"
 CAP_AUDIO_MIX = "audio_mix"
-CAP_MUSIC_SYNC = "music_sync"
-
 REPAIR_CONTROLLER_UNREACHABLE = "controller_unreachable"
 REPAIR_TTS_INCOMPATIBLE = "tts_incompatible"

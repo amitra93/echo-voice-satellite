@@ -14,6 +14,8 @@ class FakeDevice:
         self.limiter_enabled = True
         self.limiter_threshold = -1.0
         self.limiter_release = 150.0
+        self.bass_shelf_hz = 125.0
+        self.subsonic_hz = 85.0
         self.data_frames: list[bytes] = []
         self.control_msgs: list[dict] = []
 

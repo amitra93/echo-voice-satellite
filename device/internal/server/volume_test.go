@@ -9,12 +9,16 @@ import (
 // fakeLEDController records what it was asked to paint — enough to observe
 // showLEDs actually running, unlike passing a nil led.Controller (showLEDs
 // returns before touching displayActive when its getter yields nil).
-type fakeLEDController struct{ setCalls int }
+type fakeLEDController struct {
+	setCalls int
+	leds     []led.Led
+}
 
 func (f *fakeLEDController) Init() error              { return nil }
 func (f *fakeLEDController) GetNumLEDs() (int, error) { return numLEDs, nil }
 func (f *fakeLEDController) SetLEDs(leds ...led.Led) error {
 	f.setCalls++
+	f.leds = append([]led.Led(nil), leds...)
 	return nil
 }
 
@@ -104,9 +108,52 @@ func TestVolumeMaxIsCodecUnityNotTheControlMaximum(t *testing.T) {
 // each press is a huge jump, too many and reaching the top is a chore.
 func TestButtonBandTakesAReasonableNumberOfPresses(t *testing.T) {
 	presses := (volumeMax - volumeButtonFloor) / volumeStep
-	if presses != 8 {
-		t.Fatalf("%d presses to cross the band (step %d over %d..%d); want 8 for nine levels",
+	if presses != 9 {
+		t.Fatalf("%d presses to cross the band (step %d over %d..%d); want 9 for ten levels",
 			presses, volumeStep, volumeButtonFloor, volumeMax)
+	}
+}
+
+func TestVolumeLEDArcChangesAtEveryButtonLevel(t *testing.T) {
+	fake := &fakeLEDController{}
+	vc := newVolumeController(func() led.Controller { return fake })
+	seen := make(map[int]bool)
+	for level := volumeButtonFloor; level <= volumeMax; level += volumeStep {
+		vc.showLEDs(level)
+		lit := 0
+		for _, pixel := range fake.leds {
+			if pixel.G != 0 {
+				lit++
+			}
+		}
+		if seen[lit] {
+			t.Fatalf("level %d repeats a %d-LED arc", level, lit)
+		}
+		seen[lit] = true
+	}
+	if len(seen) != 10 {
+		t.Fatalf("distinct volume arcs = %d, want 10", len(seen))
+	}
+	for _, lit := range []int{1, 2, 3, 5, 6, 7, 8, 10, 11, 12} {
+		if !seen[lit] {
+			t.Fatalf("missing %d-LED arc", lit)
+		}
+	}
+}
+
+func TestVolumeLEDArcStartsAtLED11AndWraps(t *testing.T) {
+	fake := &fakeLEDController{}
+	vc := newVolumeController(func() led.Controller { return fake })
+	vc.showLEDs(volumeButtonFloor + 2*volumeStep)
+
+	for i, id := range []int{11, 0, 1} {
+		pixel := fake.leds[id]
+		if pixel.ID != id || pixel.G == 0 {
+			t.Fatalf("arc position %d: LED %d = %+v, want cyan", i+1, id, pixel)
+		}
+	}
+	if fake.leds[2].G != 0 {
+		t.Fatalf("LED 2 should be off at volume level 3")
 	}
 }
 
@@ -129,6 +176,15 @@ func TestStepsStayInsideTheButtonBand(t *testing.T) {
 			t.Errorf("%s: clampToButtonBand(%d) = %d, want %d",
 				tc.name, tc.in, got, tc.want)
 		}
+	}
+}
+
+func TestPhysicalButtonsSnapLegacyRawLevelsToTheTenStepScale(t *testing.T) {
+	if got := nextButtonLevel(74); got != 79 {
+		t.Errorf("nextButtonLevel(74) = %d, want 79 (level 2)", got)
+	}
+	if got := previousButtonLevel(74); got != 73 {
+		t.Errorf("previousButtonLevel(74) = %d, want 73 (level 1)", got)
 	}
 }
 

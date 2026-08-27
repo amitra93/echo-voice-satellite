@@ -673,10 +673,26 @@ class SendspinDeviceSession:
         asyncio.create_task(self._stop_legacy_player())
         try:
             import em_eq
+            import em_limiter
+            import em_mbc
+            dev = self.device
             self._eq = em_eq.StreamingEQ(
                 PCM_SAMPLE_RATE,
-                bands=getattr(self.device, "eq_bands", [0.0] * 8),
-                loudness=bool(getattr(self.device, "eq_loudness", False)),
+                bands=getattr(dev, "eq_bands", [0.0] * 8),
+                loudness=bool(getattr(dev, "eq_loudness", False)),
+                limiter=em_limiter.Limiter(
+                    PCM_SAMPLE_RATE,
+                    threshold_db=getattr(dev, "limiter_threshold", -1.0),
+                    release_ms=getattr(dev, "limiter_release", 150.0),
+                    enabled=getattr(dev, "limiter_enabled", True),
+                ),
+                guard=em_mbc.BassGuard(
+                    PCM_SAMPLE_RATE,
+                    bass_guard_db=getattr(dev, "bass_guard_db", -30.0),
+                    enabled=getattr(dev, "bass_guard_enabled", True),
+                ),
+                bass_shelf_hz=getattr(dev, "bass_shelf_hz", em_eq.DEFAULT_BASS_SHELF_HZ),
+                subsonic_hz=getattr(dev, "subsonic_hz", em_eq.DEFAULT_SUBSONIC_HZ),
             )
         except Exception:
             self._eq = None
@@ -710,6 +726,39 @@ class SendspinDeviceSession:
         self._eq = None
         if self._generation:
             self._enqueue(("end", self._generation))
+
+    def update_output_chain(self) -> None:
+        """Apply current device audio settings to an active music stream."""
+        if self._eq is None:
+            return
+        try:
+            import em_eq
+            changed = self._eq.update(
+                bands=getattr(self.device, "eq_bands", [0.0] * 8),
+                loudness=bool(getattr(self.device, "eq_loudness", False)),
+                limiter_enabled=getattr(self.device, "limiter_enabled", True),
+                limiter_threshold=getattr(self.device, "limiter_threshold", -1.0),
+                limiter_release=getattr(self.device, "limiter_release", 150.0),
+                guard_enabled=getattr(self.device, "bass_guard_enabled", True),
+                guard_db=getattr(self.device, "bass_guard_db", -30.0),
+                bass_shelf_hz=getattr(self.device, "bass_shelf_hz", em_eq.DEFAULT_BASS_SHELF_HZ),
+                subsonic_hz=getattr(self.device, "subsonic_hz", em_eq.DEFAULT_SUBSONIC_HZ),
+            )
+            if changed:
+                log.info(
+                    "[%s] Sendspin output chain: %s",
+                    self.device_id,
+                    em_eq.describe_chain(
+                        self.device.eq_bands,
+                        self.device.eq_loudness,
+                        self._eq.limiter,
+                        self._eq.guard,
+                        bass_shelf_hz=self.device.bass_shelf_hz,
+                        subsonic_hz=self.device.subsonic_hz,
+                    ),
+                )
+        except Exception as exc:
+            log.warning("[%s] Sendspin output chain update failed: %s", self.device_id, exc)
 
     def on_disconnect(self) -> None:
         self._eq = None
@@ -978,6 +1027,11 @@ class SendspinRuntime:
         session = self.sessions.get(device_id)
         if session is not None:
             await session.release_legacy()
+
+    def update_device_config(self, device_id: str) -> None:
+        session = self.sessions.get(device_id)
+        if session is not None:
+            session.update_output_chain()
 
     async def command(self, device_id: str, command: str, **kwargs: Any) -> None:
         session = self.sessions.get(device_id)

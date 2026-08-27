@@ -46,6 +46,7 @@ import tempfile
 import time
 from pathlib import Path
 from typing import Any, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 import aiohttp
 from aiohttp import web
@@ -54,6 +55,7 @@ import websockets
 import em_db as db
 import em_auth as auth
 import em_config_sections as sections_mod
+import em_eq
 import em_firmware
 import em_ingressauth
 import em_oww_assets
@@ -63,8 +65,8 @@ import em_player
 import em_recordings
 import em_training_captures
 import em_volume
-import em_sendspin
 import em_scenes
+import em_sendspin
 import em_shadow
 import em_support
 import em_test_audio
@@ -172,6 +174,32 @@ _event_clients: set[web.WebSocketResponse] = set()
 
 # Track in-progress OTA updates per device_id to enforce one-at-a-time.
 _updates_in_progress: set[str] = set()
+
+
+def normalize_music_assistant_url(value: str) -> str:
+    """Normalize the native device's Music Assistant Sendspin endpoint."""
+    raw = str(value or "").strip()
+    if not raw:
+        return ""
+    if "://" not in raw:
+        raw = f"ws://{raw}"
+    parsed = urlsplit(raw)
+    if parsed.scheme not in ("ws", "wss"):
+        raise ValueError("Music Assistant URL must use ws:// or wss://")
+    if not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("Music Assistant URL must contain only a host and optional port")
+    try:
+        port = parsed.port if parsed.port is not None else 8927
+    except ValueError as exc:
+        raise ValueError("Music Assistant URL has an invalid port") from exc
+    if not 1 <= port <= 65535:
+        raise ValueError("Music Assistant URL port must be between 1 and 65535")
+    host = parsed.hostname
+    authority = f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+    path = parsed.path or "/sendspin"
+    if parsed.query or parsed.fragment:
+        raise ValueError("Music Assistant URL cannot contain a query or fragment")
+    return urlunsplit((parsed.scheme, authority, path, "", ""))
 
 # Last OTA failure per device, surfaced as `update_error` in /api/devices so
 # the dashboard (fleet deploy modal + per-device update log) can show *why* a
@@ -348,7 +376,6 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/system/status",    _get_system_status)
     app.router.add_get("/api/system/config",    _get_system_config)
     app.router.add_patch("/api/system/config",  _patch_system_config)
-    app.router.add_get("/api/system/sendspin", _get_sendspin_status)
     app.router.add_post("/api/system/api_key/generate", _post_api_key_generate)
     app.router.add_post("/api/system/api_key/rotate",   _post_api_key_rotate)
     app.router.add_delete("/api/system/api_key",        _delete_api_key)
@@ -465,7 +492,8 @@ async def _serve_spa(request: web.Request) -> web.Response:
 
 async def _serve_dashboard(request: web.Request) -> web.Response:
     """
-    Serve dashboard.html for /dashboard, with the JS bundle cache-busted.
+    Serve dashboard.html for /dashboard, with both dashboard scripts
+    cache-busted.
 
     add_static sends Last-Modified and ETag but no Cache-Control, so browsers
     apply HEURISTIC freshness and serve a cached dashboard.js without
@@ -475,7 +503,7 @@ async def _serve_dashboard(request: web.Request) -> web.Response:
     reads as "my change did not work" and sends you looking in the wrong place.
     It cost exactly that on 2026-07-30 when the new thermal row did not appear.
 
-    So the bundle URL carries the file's mtime. That changes on every rebuild
+    So each dashboard script URL carries its file's mtime. That changes on every rebuild
     regardless of version numbering (controller_version is "dev" for local
     builds and would not bust between two dev deploys), and the wrapper itself
     is sent no-cache so the new URL is always seen — it is 3KB, revalidating it
@@ -490,6 +518,12 @@ async def _serve_dashboard(request: web.Request) -> web.Response:
         page = page.replace(
             "static/dashboard.js",
             f"static/dashboard.js?v={int(bundle.stat().st_mtime)}",
+        )
+    logic = STATIC_DIR / "dashboard_logic.js"
+    if logic.exists():
+        page = page.replace(
+            "static/dashboard_logic.js",
+            f"static/dashboard_logic.js?v={int(logic.stat().st_mtime)}",
         )
     return web.Response(
         text=page,
@@ -844,9 +878,7 @@ async def _get_training_capture_audio(request: web.Request) -> web.Response:
 
 @auth.require_admin
 async def _post_training_capture_label(request: web.Request) -> web.Response:
-    """POST /api/training_captures/{model}/{name}/label {label} — move a capture
-    into a bucket, from wherever it is: label an untriaged clip, correct a
-    mislabel (positive↔negative), or send one back to `untriaged`. ADMIN ONLY."""
+    """Label and optionally trim a capture before it enters a dataset bucket."""
     model = request.match_info["model"]
     name  = request.match_info["name"]
     body  = await _json_body(request)
@@ -856,7 +888,8 @@ async def _post_training_capture_label(request: web.Request) -> web.Response:
                       "label must be positive, negative or untriaged", 400)
     loop = asyncio.get_event_loop()
     ok = await loop.run_in_executor(
-        None, em_training_captures.label, model, name, label
+        None, em_training_captures.label, model, name, label, None,
+        body.get("start_ms"), body.get("end_ms")
     )
     if not ok:
         return _error("no_capture", "No such capture", 404)
@@ -1075,17 +1108,7 @@ async def _post_media_command(request: web.Request) -> web.Response:
     body = await _json_body(request)
     command = body.get("command")
     try:
-        if body.get("sendspin") and command in (
-            "play", "pause", "resume", "stop", "next", "previous", "seek", "seek_relative",
-            "repeat_off", "repeat_one", "repeat_all", "shuffle", "unshuffle", "switch",
-        ):
-            kwargs = {}
-            if "position_ms" in body:
-                kwargs["position_ms"] = max(0, int(body["position_ms"]))
-            if "offset_ms" in body:
-                kwargs["offset_ms"] = int(body["offset_ms"])
-            await em_sendspin.command(device_id, str(command), **kwargs)
-        elif body.get("media_url"):
+        if body.get("media_url"):
             await em_player.play(device_id, str(body["media_url"]))
         elif command == "pause":
             await em_player.pause(device_id)
@@ -1110,11 +1133,6 @@ async def _post_media_command(request: web.Request) -> web.Response:
             })
             live.volume = value
             ha_sidechannels.volume(device_id, value)
-            if getattr(em_sendspin, "_runtime", None) is not None:
-                try:
-                    await em_sendspin.command(device_id, "volume", volume=int(round(value * 100)))
-                except Exception:
-                    pass
         else:
             return _error("invalid_media_command", "Unknown media command", 400)
     except Exception as e:
@@ -1230,6 +1248,34 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         live.eq_bands = effective["eqBands"]
     if "eqLoudness" in effective:
         live.eq_loudness = bool(effective["eqLoudness"])
+    if "bassShelfHz" in effective:
+        live.bass_shelf_hz = float(effective["bassShelfHz"])
+    if "subsonicHz" in effective:
+        live.subsonic_hz = float(effective["subsonicHz"])
+    if "ttsGainDb" in effective:
+        live.tts_gain_db = min(em_eq.MAX_MAKEUP_GAIN_DB, max(
+            0.0, float(effective["ttsGainDb"])))
+    # The output chain is consumed HERE, not on the device — it ignores these
+    # five keys entirely — so this mirror is the only thing that carries them.
+    # Missing it meant a push wrote the database, sent JSON the device threw
+    # away, and changed nothing audible until the device happened to
+    # reconnect. Exactly the shape this function's docstring warns about, and
+    # it cost a whole listening test on 2026-08-19: every setting appeared to
+    # do nothing, because every setting WAS doing nothing.
+    if "limiterEnabled" in effective:
+        live.limiter_enabled = bool(effective["limiterEnabled"])
+    if "limiterThreshold" in effective:
+        live.limiter_threshold = float(effective["limiterThreshold"])
+    if "limiterRelease" in effective:
+        live.limiter_release = float(effective["limiterRelease"])
+    if "bassGuardEnabled" in effective:
+        live.bass_guard_enabled = bool(effective["bassGuardEnabled"])
+    if "bassGuardDb" in effective:
+        live.bass_guard_db = float(effective["bassGuardDb"])
+    # Sendspin owns the Music Assistant stream and keeps its own stateful EQ
+    # instance, so refresh it separately from the legacy music/TTS paths.
+    if em_sendspin._runtime is not None:
+        em_sendspin._runtime.update_device_config(device_id)
     if "bleProxyEnabled" in effective:
         # Replaces em_ble_proxy.reconcile()'s old role here (Phase 4
         # cutover): no per-device listener to bring up or tear down, just
@@ -3192,17 +3238,8 @@ async def _get_system_status(request: web.Request) -> web.Response:
     release = await _get_cached_release()
 
     _ctrl = _running_controller_module()
-    sendspin_status = em_sendspin.runtime_status()
-
     return _ok({
         "controller_version": CONTROLLER_VERSION,
-        "sendspin": {
-            "enabled": bool(getattr(_ctrl, "SENDSPIN_ENABLED", False)),
-            "devices": len(sendspin_status["devices"]),
-            "configured_url": sendspin_status["configured_url"],
-            "resolved_url": sendspin_status["resolved_url"],
-            "discovery": sendspin_status["discovery"],
-        },
         # True when running as a Home Assistant add-on behind Supervisor's
         # ingress proxy. Presentation only — the dashboard is the same
         # dashboard either way, with the same features, and nothing should
@@ -3263,14 +3300,6 @@ def _ctrl_music_assistant_url() -> str:
 
 
 @auth.require_admin
-async def _get_sendspin_status(request: web.Request) -> web.Response:
-    runtime = getattr(em_sendspin, "_runtime", None)
-    if runtime is None:
-        return _error("sendspin_unavailable", "Sendspin is disabled", 503)
-    return _ok(runtime.status())
-
-
-@auth.require_admin
 async def _post_api_key_generate(request: web.Request) -> web.Response:
     """Create the HA integration key, returning it once to the admin."""
     loop = asyncio.get_event_loop()
@@ -3324,7 +3353,7 @@ async def _patch_system_config(request: web.Request) -> web.Response:
             continue
         if key == "music_assistant_url":
             try:
-                value = em_sendspin.normalize_server_url(str(value or ""))
+                value = normalize_music_assistant_url(str(value or ""))
             except ValueError as exc:
                 return _error("invalid_music_assistant_url", str(exc), 400)
         await loop.run_in_executor(None, db.set_config, key, str(value))
@@ -3337,7 +3366,14 @@ async def _patch_system_config(request: web.Request) -> web.Response:
             400,
         )
     if "music_assistant_url" in updated:
-        await em_sendspin.configure(str(updated["music_assistant_url"]))
+        # Native devices dial MA directly, so an endpoint change must reach
+        # them immediately instead of waiting for their next control reconnect.
+        for live in list(_devices.values()):
+            if "sendspin_native" in (getattr(live, "capabilities", []) or []):
+                await live.send_control({
+                    "type": "config",
+                    "sendspinServer": str(updated["music_assistant_url"]),
+                })
     return _ok(updated)
 
 
@@ -4827,7 +4863,10 @@ def _merge_device(row) -> dict:
         # otherwise the last one the device reported, so an offline device
         # still shows where it will come back.
         "volume":           (live.volume if live is not None
-                             else _stored_volume(row)),
+                              else _stored_volume(row)),
+        "volumeLevel":      em_volume.device_level_to_button_level(
+            round((live.volume if live is not None else _stored_volume(row)) * em_volume.DEVICE_VOLUME_MAX)
+            if (live.volume if live is not None else _stored_volume(row)) is not None else None),
         # BT proxy: just the live toggle now — there is no per-device
         # ESPHome listener/mDNS state to report (Phase 4 cutover). The
         # device's own scanner stats ride "stats" (device.stats.ble).

@@ -818,7 +818,7 @@ func capabilities() []string {
 	// capability the firmware has, rather than inferring one from a version
 	// string, is the rule the whole registration follows.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons", "test_audio",
-		"oww_shadow", "oww_trigger", "button_hold", "audio_mix", "music_sync"}
+		"oww_shadow", "oww_trigger", "button_hold", "audio_mix", "music_sync", "sendspin_native", "output_chain"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}

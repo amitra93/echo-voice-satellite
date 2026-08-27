@@ -89,12 +89,16 @@ def test_static_handlers_cover_missing_and_bundle_paths(monkeypatch, tmp_path):
     assert run(em_api._serve_dashboard(Request())).status == 503
 
     (tmp_path / "index.html").write_text("<head>\nbody")
-    (tmp_path / "dashboard.html").write_text("<head>static/dashboard.js")
+    (tmp_path / "dashboard.html").write_text(
+        "<head>static/dashboard_logic.js static/dashboard.js"
+    )
     (tmp_path / "dashboard.js").write_text("bundle")
+    (tmp_path / "dashboard_logic.js").write_text("logic")
     spa = run(em_api._serve_spa(Request(headers={"X-Ingress-Path": "/ha/x/"})))
     dashboard = run(em_api._serve_dashboard(Request()))
     assert '<base href="/ha/x/">' in spa.text
     assert "dashboard.js?v=" in dashboard.text
+    assert "dashboard_logic.js?v=" in dashboard.text
 
 
 def test_api_startup_helpers(monkeypatch):
@@ -139,6 +143,7 @@ def test_merge_device_handles_offline_and_live_state(monkeypatch):
     try:
         offline = em_api._merge_device(row)
         assert not offline["connected"] and offline["volume"] is not None
+        assert offline["volumeLevel"] == 2
         live = SimpleNamespace(
             speaking=True, muted=True, listening=True, thinking=False, stats={"ambientLux": 0},
             rtt_last_ms=12, volume=0.5, ble_proxy_enabled=True, oww_near_misses=3,
@@ -150,6 +155,7 @@ def test_merge_device_handles_offline_and_live_state(monkeypatch):
         merged = em_api._merge_device(row)
         assert merged["connected"] and merged["ambient_light_lux"] == 0
         assert merged["capabilities"] == ["ambient_light"]
+        assert merged["volumeLevel"] == 1
     finally:
         em_api._devices = old
 
