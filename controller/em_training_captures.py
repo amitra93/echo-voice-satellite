@@ -434,7 +434,8 @@ def prune_untriaged(model: str, db_path: str | None = None,
     return removed
 
 
-def export_zip(model: str, db_path: str | None = None) -> bytes:
+def export_zip(model: str, db_path: str | None = None,
+               delete_after: bool = False) -> bytes:
     """
     A ZIP of a wake word's LABELLED captures, laid out as `positive/…` and
     `negative/…` — the exact shape oww_forge's import expects. Untriaged is
@@ -444,6 +445,8 @@ def export_zip(model: str, db_path: str | None = None) -> bytes:
     was exported, and the per-file kind/score/device, so a retrained model can
     be traced back to the clips (and score distribution) it came from. oww_forge
     imports the audio and ignores the manifest, so it costs nothing there.
+    When `delete_after` is true, successfully exported labelled captures (and
+    their trim metadata) are removed after the ZIP is fully assembled.
     """
     manifest = {
         "model": model,
@@ -452,6 +455,7 @@ def export_zip(model: str, db_path: str | None = None) -> bytes:
         "clips": [],
     }
     buf = io.BytesIO()
+    exported_paths: list[Path] = []
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as z:
         for bucket in ("positive", "negative"):
             directory = _bucket_dir(model, bucket, db_path)
@@ -462,6 +466,7 @@ def export_zip(model: str, db_path: str | None = None) -> bytes:
                 if path.is_file():
                     trim = _read_trim(path)
                     z.writestr(f"{bucket}/{entry['name']}", _cropped_wav(path, trim))
+                    exported_paths.append(path)
                     manifest["clips"].append({
                         "bucket": bucket, "name": entry["name"],
                         "kind": entry["kind"], "score": entry["score"],
@@ -471,6 +476,13 @@ def export_zip(model: str, db_path: str | None = None) -> bytes:
                     written += 1
             manifest["buckets"][bucket] = written
         z.writestr("manifest.json", json.dumps(manifest, indent=2))
+    if delete_after:
+        for path in exported_paths:
+            try:
+                path.unlink()
+                _trim_path(path).unlink(missing_ok=True)
+            except OSError as e:
+                log.warning(f"[training] Could not remove exported capture {path.name}: {e}")
     return buf.getvalue()
 
 

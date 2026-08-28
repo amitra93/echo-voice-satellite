@@ -914,12 +914,15 @@ async def _delete_training_capture(request: web.Request) -> web.Response:
 @auth.require_admin
 async def _get_training_capture_export(request: web.Request) -> web.Response:
     """GET /api/training_captures/{model}/export — a ZIP of the labelled
-    positive/negative captures, in the layout oww_forge imports. ADMIN ONLY."""
+    positive/negative captures, in the layout oww_forge imports. Exported
+    labelled captures are removed after the archive is assembled. ADMIN ONLY."""
     model = request.match_info["model"]
     if em_training_captures.safe_model(model) is None:
         return _error("bad_request", "invalid wake-word model", 400)
     loop = asyncio.get_event_loop()
-    data = await loop.run_in_executor(None, em_training_captures.export_zip, model)
+    data = await loop.run_in_executor(
+        None, em_training_captures.export_zip, model, None, True
+    )
     return web.Response(
         body=data,
         headers={

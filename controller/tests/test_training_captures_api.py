@@ -120,6 +120,8 @@ def test_full_triage_round_trip(monkeypatch, tmp_path):
         assert f"negative/{a}" in names and "manifest.json" in names
         with wave.open(io.BytesIO(cropped), "rb") as w:
             assert w.getnframes() == 1600
+        assert tc.list_captures("hey_jarvis", "negative", db) == []
+        assert tc.list_captures("hey_jarvis", "untriaged", db)
 
     _run(monkeypatch, tmp_path, body)
 

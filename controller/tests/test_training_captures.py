@@ -261,6 +261,16 @@ def test_export_zip_includes_a_provenance_manifest(tmp_path):
     assert abs(clip["score"] - 0.32) < 1e-9
 
 
+def test_export_zip_can_delete_exported_labelled_captures(tmp_path):
+    db = _db(tmp_path)
+    pos = tc.save("hey_jarvis", "dev1", _pcm(20), "miss", 0.3, db_path=db, ts_ms=1)
+    unt = tc.save("hey_jarvis", "dev1", _pcm(20), "miss", 0.1, db_path=db, ts_ms=2)
+    tc.label("hey_jarvis", pos, "positive", db)
+    tc.export_zip("hey_jarvis", db, delete_after=True)
+    assert tc.list_captures("hey_jarvis", "positive", db) == []
+    assert tc.list_captures("hey_jarvis", "untriaged", db)[0]["name"] == unt
+
+
 # ─── plan_snapshot (the wake-listener's hot-path decision) ───────────────────
 
 def _ring(sec: float) -> bytes:
