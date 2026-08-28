@@ -702,7 +702,6 @@ def test_output_chain_devices_bypass_controller_dsp(monkeypatch):
     async def run():
         device = new_device(["output_chain"])
         device.eq_bands = [12.0] * 8
-        device.tts_gain_db = 12.0
         buffered = []
 
         def unexpected(*_args, **_kwargs):

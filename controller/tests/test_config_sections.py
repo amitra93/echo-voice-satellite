@@ -76,8 +76,8 @@ def test_dashboard_section_map_matches_python():
 # ─── Resolution ──────────────────────────────────────────────────────────────
 
 def _glob():
-    return {"owwThreshold": 0.5, "ledScene": "standard", "micGainDb": 24,
-            "agcEnabled": True, "bleProxyEnabled": False, "eqLoudness": False}
+    return {"owwThreshold": 0.5, "ledScene": "standard", "afeMicGainDb": 0,
+            "bleProxyEnabled": False, "eqLoudness": False}
 
 
 def test_no_sections_is_pure_fleet():
@@ -88,15 +88,15 @@ def test_no_sections_is_pure_fleet():
 
 
 def test_only_the_overridden_section_wins():
-    dev = {"owwThreshold": 0.9, "ledScene": "pride", "micGainDb": 40}
+    dev = {"owwThreshold": 0.9, "ledScene": "pride", "afeMicGainDb": 12}
     out = cs.merge(_glob(), dev, ["ring"])
     assert out["ledScene"] == "pride"       # overridden section
     assert out["owwThreshold"] == 0.5       # fleet
-    assert out["micGainDb"] == 24           # fleet
+    assert out["afeMicGainDb"] == 0          # fleet
 
 
 def test_all_sections_reproduces_the_old_full_override():
-    dev = {"owwThreshold": 0.9, "ledScene": "pride", "micGainDb": 40}
+    dev = {"owwThreshold": 0.9, "ledScene": "pride", "afeMicGainDb": 12}
     out = cs.merge(_glob(), dev, list(cs.SECTION_IDS))
     for k, v in dev.items():
         assert out[k] == v
@@ -143,7 +143,7 @@ def test_v8_backfill_is_lossless(tmp_path, use_global, expected):
     with em_db._tx() as conn:
         conn.execute(
             "UPDATE devices SET use_global_config = ?, config = ? WHERE device_id = 'dev1'",
-            (use_global, json.dumps({"ledScene": "pride", "micGainDb": 40})),
+            (use_global, json.dumps({"ledScene": "pride", "afeMicGainDb": 12})),
         )
         conn.execute(
             "UPDATE devices SET config_sections = ? WHERE device_id = 'dev1'",
@@ -155,7 +155,7 @@ def test_v8_backfill_is_lossless(tmp_path, use_global, expected):
         assert eff["ledScene"] == em_db.DEFAULT_DEVICE_CONFIG["ledScene"]
     else:
         assert eff["ledScene"] == "pride"
-        assert eff["micGainDb"] == 40
+        assert eff["afeMicGainDb"] == 12
 
 
 def test_reverting_a_section_discards_its_values(tmp_path):
@@ -166,12 +166,12 @@ def test_reverting_a_section_discards_its_values(tmp_path):
     em_db.init(str(tmp_path / "t.db"))
     em_db.register_new_device("dev1", "10.0.0.9", "vtest")
     em_db.set_device_config_sections("dev1", ["ring", "microphones"])
-    em_db.set_device_config("dev1", {"ledScene": "pride", "micGainDb": 40})
+    em_db.set_device_config("dev1", {"ledScene": "pride", "afeMicGainDb": 12})
 
     em_db.set_device_config_sections("dev1", ["microphones"])
     stored = em_db.get_device_config("dev1")
     assert "ledScene" not in stored, "reverted section left a shadow value"
-    assert stored["micGainDb"] == 40, "still-overridden section lost its value"
+    assert stored["afeMicGainDb"] == 12, "still-overridden section lost its value"
 
     # And re-overriding starts from the fleet, not the discarded value.
     em_db.set_device_config_sections("dev1", ["ring", "microphones"])
@@ -208,7 +208,7 @@ def test_v11_prunes_out_of_scope_values_from_migrated_rows(tmp_path, monkeypatch
         conn.execute(
             "UPDATE devices SET config_sections = '[]', config = ? WHERE device_id = 'dev1'",
             (json.dumps({"ledScene": "malevolent", "owwModel": "hey_mycroft_v0.1",
-                         "micGainDb": 40, "startupVolume": 42}),),
+                          "afeMicGainDb": 12, "startupVolume": 42}),),
         )
         conn.execute("UPDATE system_config SET value = '10' WHERE key = 'schema_version'")
 
@@ -223,7 +223,7 @@ def test_v11_prunes_out_of_scope_values_from_migrated_rows(tmp_path, monkeypatch
     stored = em_db.get_device_config("dev1")
     assert "ledScene" not in stored, "out-of-scope value survived the prune"
     assert "owwModel" not in stored
-    assert "micGainDb" not in stored
+    assert "afeMicGainDb" not in stored
     # State keys are never section-scoped and must survive.
     assert stored["startupVolume"] == 42
 

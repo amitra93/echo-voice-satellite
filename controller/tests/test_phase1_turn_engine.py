@@ -28,7 +28,6 @@ class FakeDevice:
     def __init__(self):
         self.voice_queue = asyncio.Queue()
         self.turn_history = collections.deque(maxlen=50)
-        self.ns_asr = False
 
 
 def test_mic_queue_is_forwarded_as_pcm_and_eos():
@@ -57,58 +56,6 @@ def test_mic_queue_captures_exact_asr_pcm_when_enabled():
         assert bytes(turn.mic_audio) == payload
 
     asyncio.run(run())
-
-
-def test_mic_queue_uses_denoised_pcm_for_the_wire_and_recording(monkeypatch):
-    class Denoiser:
-        def process(self, payload):
-            return b"\x78\x56" * (len(payload) // 2)
-
-        def zero_report(self):
-            return "zeros out=0.0% in=0.0% floor=-20dB"
-
-    async def run():
-        device = FakeDevice()
-        device.ns_asr = True
-        turn = engine.Turn(1, device, None, None, capture_audio=True)
-        turn.socket = FakeSocket()
-        raw = b"\x34\x12" * (MIC_FRAME_BYTES // 2)
-        denoised = b"\x78\x56" * (MIC_FRAME_BYTES // 2)
-        await device.voice_queue.put(raw)
-        await device.voice_queue.put("vad_end")
-        await engine._send_mic(turn)
-        assert turn.socket.frames[0].payload == denoised
-        assert bytes(turn.mic_audio) == denoised
-
-    monkeypatch.setattr(engine.em_ns, "StreamingDenoiser", Denoiser)
-    asyncio.run(run())
-
-
-def test_mic_queue_falls_back_to_raw_after_denoiser_failure(monkeypatch):
-    reporters = []
-
-    class Denoiser:
-        def process(self, _payload):
-            raise RuntimeError("model error")
-
-        def zero_report(self):
-            reporters.append(True)
-            return "zeros out=0.0% in=0.0% floor=-20dB"
-
-    async def run():
-        device = FakeDevice()
-        device.ns_asr = True
-        turn = engine.Turn(1, device, None, None)
-        turn.socket = FakeSocket()
-        raw = b"\x34\x12" * (MIC_FRAME_BYTES // 2)
-        await device.voice_queue.put(raw)
-        await device.voice_queue.put("vad_end")
-        await engine._send_mic(turn)
-        assert turn.socket.frames[0].payload == raw
-
-    monkeypatch.setattr(engine.em_ns, "StreamingDenoiser", Denoiser)
-    asyncio.run(run())
-    assert reporters == [True]
 
 
 def test_tts_pcm_is_upsampled_to_48khz_s16():

@@ -72,7 +72,7 @@ def test_device_config_fallbacks_and_global_config(database):
     assert em_db.get_global_device_config_raw() == defaults
     em_db.set_global_device_config({"owwThreshold": 0.4})
     assert em_db.get_global_device_config()["owwThreshold"] == 0.4
-    assert em_db.get_global_device_config()["micGainDb"] == defaults["micGainDb"]
+    assert em_db.get_global_device_config()["afeMicGainDb"] == defaults["afeMicGainDb"]
     assert em_db.get_global_device_config_raw() == {"owwThreshold": 0.4}
     with em_db._tx() as conn:
         conn.execute("UPDATE system_config SET value = ? WHERE key = ?", ("bad", "global_device_config"))

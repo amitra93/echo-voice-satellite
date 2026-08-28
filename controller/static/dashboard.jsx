@@ -4920,11 +4920,11 @@ const STAGE_MONO = "'DM Mono',monospace";
 // control sitting under a toggle that does not govern it would look fine and
 // be silently wrong.
 const CONFIG_SECTIONS = {
-  "playback": ["eqBands", "eqLoudness", "ttsGainDb", "duckDb", "bassShelfHz", "subsonicHz", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb"],
+  "playback": ["eqBands", "eqLoudness", "duckDb", "limiterEnabled", "limiterRelease", "bassGuardEnabled", "bassGuardDb"],
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "saveWakeCaptures", "wakeCaptureSec", "wakeNearMissFloor"],
-  "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "nsAsr", "saveUtterances"],
+  "microphones": ["afeMicGainDb", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
-  "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs"],
+  "advanced": ["vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs"],
   "bluetooth": ["bleProxyEnabled"]
 };
 
@@ -5065,27 +5065,6 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
     ? { opacity: 0.45, pointerEvents: 'none' }
     : {};
 
-  // Derive current mic preset from beamAngle
-  const angle = config.beamAngle ?? -1;
-  const currentPreset = angle === -1 ? 'omni' : (angle === 90 ? 'front' : angle === 270 ? 'rear' : 'omni');
-
-  const PRESETS = {
-    // omni = centre mic (ch6) for everything, beamforming genuinely off.
-    // beamformingEnabled:true with beamAngle -1 is AUTO mode (onset-ratio
-    // perimeter mic selection at turn start), which is not what this
-    // preset's label or polar plot promise.
-    omni:  { beamAngle: -1,  beamformingEnabled: false, activeMics: ['mk1','mk2','mk3','mk4','mk5','mk6'], patternType: 'omni'  },
-    front: { beamAngle: 90,  beamformingEnabled: true,  activeMics: ['mk3','mk4','mk5','mk6'],             patternType: 'front' },
-    rear:  { beamAngle: 270, beamformingEnabled: true,  activeMics: ['mk1','mk2','mk3','mk6'],             patternType: 'rear'  },
-  };
-
-  function selectPreset(key) {
-    if (disabled) return;
-    const p = PRESETS[key];
-    onChange('beamAngle', p.beamAngle);
-    onChange('beamformingEnabled', p.beamformingEnabled);
-  }
-
   const WW_MODELS = [
     { value: 'hey_jarvis_v0.1',   label: 'Hey Jarvis'   },
     { value: 'alexa_v0.1',        label: 'Alexa'         },
@@ -5186,13 +5165,6 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             <div style={inputStyle}>
               <Toggle label="Speech boost" sub="presence boost for voice" value={config.eqLoudness ?? false} onChange={v => set('eqLoudness', v)}/>
             </div>
-            <div style={inputStyle}>
-              <Slider label="TTS loudness"
-                sub="voice-only makeup gain; music is unchanged and peaks remain limited"
-                value={config.ttsGainDb ?? 0} min={0} max={12} step={0.5} unit="dB"
-                disabled={disabled}
-                onChange={v => set('ttsGainDb', v)}/>
-            </div>
             {/* Speaker protection: ONE toggle for the bass guard here, plus
                 the limiter CEILING in the advanced panel below. The limiter's
                 enable and release stay API-only.
@@ -5253,27 +5225,6 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
               call — it sets how loud the output is allowed to get before peaks
               are held, so a low ceiling squashes an EQ/bass boost and a high
               one lets it through at the cost of headroom. Judged by ear. */}
-          <div style={inputStyle}>
-            <Slider label="Bass shelf"
-              sub="centre frequency of the bass boost — lower for deeper bass, higher for punchier mid-bass"
-              value={config.bassShelfHz ?? 125} min={40} max={300} step={5} unit="Hz"
-              disabled={disabled}
-              onChange={v => set('bassShelfHz', v)}/>
-          </div>
-          <div style={inputStyle}>
-            <Slider label="Subsonic cutoff"
-              sub="removes rumble below this — lower to let deep bass through, higher to protect the driver"
-              value={config.subsonicHz ?? 85} min={20} max={120} step={5} unit="Hz"
-              disabled={disabled}
-              onChange={v => set('subsonicHz', v)}/>
-          </div>
-          <div style={inputStyle}>
-            <Slider label="Output ceiling"
-              sub="peak limit — raise to let EQ/bass boosts through, lower for more headroom"
-              value={config.limiterThreshold ?? -1} min={-20} max={0} step={0.5} unit="dB"
-              disabled={disabled}
-              onChange={v => set('limiterThreshold', v)}/>
-          </div>
         </StageAdvanced>
       </Stage>
 
@@ -5350,7 +5301,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             </div>
             <div style={{ marginTop: 8, ...inputStyle }}>
               <Toggle label="Speex denoise" sub="cleans audio before scoring — try in noisy rooms" value={config.owwSpeexNs ?? false} onChange={v => set('owwSpeexNs', v)}/>
-              <Toggle label="Barge-in" sub="wake word interrupts playback — enable AEC first" value={config.bargeInEnabled ?? false} onChange={v => set('bargeInEnabled', v)}/>
+              <Toggle label="Barge-in" sub="wake word interrupts playback — Amazon AFE supplies the echo-cancelled capture path" value={config.bargeInEnabled ?? false} onChange={v => set('bargeInEnabled', v)}/>
               <Slider label="Barge threshold" sub="wake confidence needed during playback — raise it if a response cuts itself short" value={config.bargeInThreshold ?? 0.05} min={0.05} max={0.9} step={0.05} formatValue={v => v.toFixed(2)} onChange={v => set('bargeInThreshold', v)}/>
               <Slider label="Near-miss floor" sub="minimum score to count as a near-miss and log/capture — raise if picking up too much background speech" value={nearMissFloor} min={0.01} max={0.95} step={0.01} formatValue={v => v.toFixed(2)} onChange={v => set('wakeNearMissFloor', Number(v.toFixed(2)))}/>
               {floorConflict && (
@@ -5413,44 +5364,11 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
       {/* 03 MICROPHONES */}
       <Stage n="03" title="Microphones"
         chips={<ScopeChip tone="device">Device</ScopeChip>}
-        desc="Capture from the 7-mic array. Presets steer which perimeter mic is used during voice turns — wake-word listening always uses the centre mic. Gain here is the only gain in the wake path: it sets the level everything downstream hears."
+        desc="Amazon AFE provides the processed microphone stream. AFE mic gain is applied after AFE processing and before VAD, wake-word scoring, recordings, and controller transmission."
         scope={scopeEl('microphones')} dim={secStyle('microphones')}>
-        <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 20, alignItems: 'center' }}>
-          <DeviceDiagram
-            activeMics={PRESETS[currentPreset].activeMics}
-            patternType={PRESETS[currentPreset].patternType}
-          />
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6, ...inputStyle }}>
-            {Object.entries(PRESETS).map(([key, p]) => (
-              <div key={key} onClick={() => selectPreset(key)} style={{
-                background: currentPreset === key
-                  ? 'linear-gradient(160deg,var(--accent-tint),var(--accent-line))'
-                  : 'linear-gradient(160deg,var(--raised),var(--surface))',
-                border: `1px solid ${currentPreset === key ? 'var(--accent)' : 'var(--border-soft)'}`,
-                borderRadius: 10, padding: '9px 6px 8px',
-                cursor: disabled ? 'default' : 'pointer',
-                display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
-                transition: 'border-color 0.15s, background 0.15s',
-              }}>
-                <DeviceDiagramMini activeMics={p.activeMics} patternType={p.patternType}/>
-                <div style={{ fontFamily: mono, fontSize: 10, color: 'var(--text2)' }}>
-                  {key.charAt(0).toUpperCase() + key.slice(1)}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
         <StageAdvanced open={advMics} onToggle={() => setAdvMics(o => !o)} disabledStyle={inputStyle}>
           <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 24px' }}>
-            <Slider label="MICPGA" sub="analog gain, before the ADC" value={config.adcMicpga ?? 40} min={0} max={59} onChange={v => set('adcMicpga', v)}/>
-            <Slider label="Digital gain" sub="ADC digital gain — affects wake + turns" value={config.adcDigitalGain ?? 88} min={0} max={100} onChange={v => set('adcDigitalGain', v)}/>
-            <Slider label="Mic gain" sub="fixed gain on the 24-bit capture, pre-16-bit stream" value={config.micGainDb ?? 24} min={0} max={42} unit="dB" onChange={v => set('micGainDb', v)}/>
-            <Slider label="Beam angle" sub="-1 = auto (onset-ratio selection)" value={config.beamAngle ?? -1} min={-1} max={359} step={1} onChange={v => set('beamAngle', v)}/>
-            <Toggle label="Beamforming" sub="perimeter mic lock during turns" value={config.beamformingEnabled ?? false} onChange={v => set('beamformingEnabled', v)}/>
-            <Toggle label="Echo cancel (AEC)" sub="subtracts the device's own playback — wake + turns" value={config.aecEnabled ?? false} onChange={v => set('aecEnabled', v)}/>
-            <Toggle label="Noise suppression" sub="DTLN denoise on speech-to-text audio only — helps fans/hum, not TV speech" value={config.nsAsr ?? false} onChange={v => set('nsAsr', v)}/>
-            <Slider label="AEC delay" sub="playback write-to-ear latency compensation" value={config.aecDelayMs ?? 250} min={0} max={1000} step={10} unit="ms" onChange={v => set('aecDelayMs', v)}/>
-            <Slider label="AEC tail" sub="filter length — residual delay error + room reverb" value={config.aecTailMs ?? 300} min={50} max={500} step={10} unit="ms" onChange={v => set('aecTailMs', v)}/>
+            <Slider label="AFE mic gain" sub="post-AFE digital gain before VAD, wake-word scoring, recordings, and controller transmission; clipping is counted in device diagnostics" value={config.afeMicGainDb ?? 0} min={0} max={24} unit="dB" onChange={v => set('afeMicGainDb', v)}/>
             <Toggle label="Save utterances" sub="keeps the last 10 turns' mic audio on the server — play or download from Activity" value={config.saveUtterances ?? false} onChange={v => set('saveUtterances', v)}/>
           </div>
         </StageAdvanced>
@@ -5557,10 +5475,6 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             value={holdCapable && (config.buttonSingleTapEvent ?? false)}
             onChange={v => set('buttonSingleTapEvent', v)}/>
           <Slider label="Multi-tap window" sub="0 = off. Coalesces quick taps into double/triple, at the cost of delaying every tap by this much. Needs 'Tap sends an event'" value={config.buttonMultiTapMs ?? 0} min={0} max={600} step={50} unit="ms" disabled={!(holdCapable && (config.buttonSingleTapEvent ?? false))} onChange={v => set('buttonMultiTapMs', v)}/>
-        </div>
-        {subHeader('Turn processing')}
-        <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
-          <Toggle label="Auto gain (AGC)" sub="levels button-turn speech; never the wake stream" value={config.agcEnabled ?? true} onChange={v => set('agcEnabled', v)}/>
         </div>
         {subHeader('Speech gate')}
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '4px 20px', ...inputStyle }}>

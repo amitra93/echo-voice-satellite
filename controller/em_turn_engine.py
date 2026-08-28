@@ -48,7 +48,6 @@ from aiohttp import web
 import em_announce
 import em_audio_frame as audio
 import em_db as db
-import em_ns
 import em_recordings
 
 log = logging.getLogger("echomuse.turn_engine")
@@ -321,35 +320,8 @@ async def turn_action(request: web.Request) -> web.Response:
 
 async def _send_mic(turn: Turn) -> None:
     """Forward the controller's voice queue as fixed-size PCM frames."""
-    denoiser = None
-    ns_reporter = None
-    ns_debug_raw = bytearray()
-    ns_debug_out = bytearray()
-    if getattr(turn.device, "ns_asr", False):
-        try:
-            denoiser = em_ns.StreamingDenoiser()
-            ns_reporter = denoiser
-        except Exception as exc:
-            log.warning("[%s] nsAsr enabled but DTLN is unavailable (%s) — streaming raw audio",
-                        getattr(turn.device, "device_id", "?"), exc)
-
     async def forward(raw_payload: bytes) -> None:
-        nonlocal denoiser, ns_reporter
         payload = raw_payload
-        if denoiser is not None:
-            try:
-                payload = denoiser.process(raw_payload)
-                if len(payload) != len(raw_payload):
-                    raise RuntimeError(f"DTLN produced {len(payload)} bytes")
-            except Exception as exc:
-                ns_reporter = denoiser
-                denoiser = None
-                payload = raw_payload
-                log.warning("[%s] NS failed mid-turn (%s) — streaming raw audio",
-                            getattr(turn.device, "device_id", "?"), exc)
-        if em_ns.DEBUG_DIR:
-            ns_debug_raw.extend(raw_payload)
-            ns_debug_out.extend(payload)
         if turn.capture_audio:
             remaining = em_recordings.MAX_UTTERANCE_BYTES - len(turn.mic_audio)
             if remaining > 0:
@@ -397,12 +369,7 @@ async def _send_mic(turn: Turn) -> None:
         if turn.socket is not None and not turn.cancelled.is_set():
             await turn.socket.send_bytes(audio.encode_frame(audio.MIC_EOS, turn.mic_sequence))
     finally:
-        if ns_reporter is not None:
-            log.info("[%s] NS: %s", getattr(turn.device, "device_id", "?"),
-                     ns_reporter.zero_report())
-        em_ns.dump_debug_pair(getattr(turn.device, "device_id", "turn"),
-                              bytes(ns_debug_raw), bytes(ns_debug_out))
-
+        pass
 
 class _StreamingUpsampler:
     """Stateful 24->48kHz linear interpolator for streamed TTS.

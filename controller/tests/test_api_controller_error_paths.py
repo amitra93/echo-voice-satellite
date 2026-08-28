@@ -135,12 +135,12 @@ def test_api_turn_audio_media_and_config_error_branches(monkeypatch):
     monkeypatch.setattr(em_api.em_scenes, "resolve", lambda _config: {"listening_anim": {"pattern": "solid"}})
     monkeypatch.setattr(em_api.ha_sidechannels, "wake_model", lambda *_: None)
     config = {
-        "owwThreshold": 0.4, "owwModel": "hey", "owwSpeexNs": True, "nsAsr": True,
+        "owwThreshold": 0.4, "owwModel": "hey", "owwSpeexNs": True,
         "saveUtterances": True, "saveWakeCaptures": True, "wakeCaptureSec": 2,
         "wakeNearMissFloor": 0.1, "bargeInEnabled": True, "bargeInThreshold": 0.1,
         "buttonSingleTapEvent": True, "buttonMultiTapMs": 300, "wakeArbitrationMs": 500,
-        "owwOnDevice": "on", "eqBands": [], "eqLoudness": True, "ttsGainDb": 4,
-        "limiterEnabled": True, "limiterThreshold": -1, "limiterRelease": 100,
+        "owwOnDevice": "on", "eqBands": [], "eqLoudness": True,
+        "limiterEnabled": True, "limiterRelease": 100,
         "bassGuardEnabled": True, "bassGuardDb": 2, "bleProxyEnabled": True,
     }
     run(em_api._apply_live_config("dev", live, config))

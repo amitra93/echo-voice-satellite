@@ -332,9 +332,6 @@ class Device:
         # the speexdsp-ns pip package confirmed installable in the Docker
         # build before enabling fleet-wide; see review Q1 fix sequence).
         self.oww_speex_ns:  bool  = False
-        # nsAsr: controller-side DTLN noise suppression on the ASR-bound
-        # turn stream only (em_ns.py; wake stream stays raw).
-        self.ns_asr:        bool  = False
         # saveUtterances: keep this turn's ASR-bound mic audio and write it
         # to recordings/ at turn end (em_recordings). Read per turn, so
         # switching it off stops the next turn being captured, not the one
@@ -359,12 +356,9 @@ class Device:
         self._last_capture_mono: float = 0.0
         self.eq_bands:      list  = [0.0] * 8
         self.eq_loudness:   bool  = False
-        self.bass_shelf_hz: float = em_eq.DEFAULT_BASS_SHELF_HZ
-        self.subsonic_hz:  float = em_eq.DEFAULT_SUBSONIC_HZ
         self.bass_guard_enabled: bool  = True
         self.bass_guard_db:      float = em_mbc.DEFAULT_BASS_GUARD_DB
         self.limiter_enabled:   bool  = True
-        self.limiter_threshold: float = em_limiter.DEFAULT_THRESHOLD_DB
         self.limiter_release:   float = em_limiter.DEFAULT_RELEASE_MS
         # LED ring scene — render-ready palette/spinner from em_scenes,
         # refreshed on connect and on any config push carrying led* keys.
@@ -442,7 +436,7 @@ class Device:
         # the continuous wake stream in wake_word_listener. Measurement only —
         # never applied to the audio (see 2026-07-06 architecture discussion:
         # adaptation as measurement, not signal modification). Consumers:
-        # em_esphome's old SNR-relative no-speech detection (em_turnclock) —
+        # The old SNR-relative no-speech detection (em_turnclock) —
         # the turn engine does not yet consume this the same way, see
         # em_turn_engine.py's module docstring for the tracked gap —
         # and diagnostics (near-miss logs). Asymmetric tracker: follows drops
@@ -476,7 +470,6 @@ class Device:
         # Controller-only TTS makeup gain. Applied before the output limiter,
         # never to music, so it improves speech intelligibility/loudness
         # without changing the user's media volume.
-        self.tts_gain_db: float = 0.0
 
         # Recent voice-turn traces (turn_record-shaped dicts, appended by
         # em_turn_engine._remember_turn at turn completion) — powers the
@@ -948,7 +941,7 @@ def _limiter_for(device):
     return em_limiter.for_stream(
         SPEAKER_RATE,
         device.limiter_enabled,
-        device.limiter_threshold,
+        em_limiter.DEFAULT_THRESHOLD_DB,
         device.limiter_release,
     )
 
@@ -1287,18 +1280,16 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
         _guard   = _guard_for(device)
         log.info(
             f"[{device.device_id}] Output chain: "
-            f"{em_eq.describe_chain(device.eq_bands, device.eq_loudness, _limiter, _guard, device.tts_gain_db, device.bass_shelf_hz, device.subsonic_hz)}"
+             f"{em_eq.describe_chain(device.eq_bands, device.eq_loudness, _limiter, _guard)}"
         )
         # EQ is a solid numpy crunch (hundreds of ms for a long response) — run
         # it off the event loop, which otherwise freezes every device's LED
         # frames, shell proxying, and WS handling right as playback starts
         # (observed as spinner stutter and console typing judder).
         def _prepare_pcm() -> bytes:
-            return em_eq.apply(voice_response, SPEAKER_RATE, device.eq_bands,
-                               device.eq_loudness, limiter=_limiter,
-                               guard=_guard, makeup_gain_db=device.tts_gain_db,
-                               bass_shelf_hz=device.bass_shelf_hz,
-                               subsonic_hz=device.subsonic_hz)
+             return em_eq.apply(voice_response, SPEAKER_RATE, device.eq_bands,
+                                device.eq_loudness, limiter=_limiter,
+                                guard=_guard)
 
         _t_eq0 = asyncio.get_event_loop().time()
         speaker_pcm = await asyncio.get_event_loop().run_in_executor(None, _prepare_pcm)
@@ -1438,7 +1429,7 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
         _guard   = _guard_for(device)
         log.info(
             f"[{device.device_id}] Output chain: "
-            f"{em_eq.describe_chain(device.eq_bands, device.eq_loudness, _limiter, _guard, device.tts_gain_db, device.bass_shelf_hz, device.subsonic_hz)}"
+             f"{em_eq.describe_chain(device.eq_bands, device.eq_loudness, _limiter, _guard)}"
         )
         stream_eq = em_eq.StreamingEQ(
             SPEAKER_RATE,
@@ -1446,9 +1437,6 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
             device.eq_loudness,
             limiter=_limiter,
             guard=_guard,
-            makeup_gain_db=device.tts_gain_db,
-            bass_shelf_hz=device.bass_shelf_hz,
-            subsonic_hz=device.subsonic_hz,
         )
     # Cleared BEFORE streaming starts: the device sets it when its audio
     # channel drains after EOS, and a stale set from the previous response
@@ -2847,7 +2835,6 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         device.oww_model     = config.get("owwModel", f"{OWW_MODEL}_v0.1")
         device.wake_arb_ms   = int(config.get("wakeArbitrationMs", 300))
         device.oww_speex_ns  = bool(config.get("owwSpeexNs", False))
-        device.ns_asr        = bool(config.get("nsAsr", False))
         device.save_utterances = bool(config.get("saveUtterances", False))
         device.save_wake_captures = bool(config.get("saveWakeCaptures", False))
         device.wake_capture_sec = float(config.get("wakeCaptureSec", 2.0))
@@ -2861,7 +2848,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         # Gates ble_adverts forwarding below — replaces em_ble_proxy's
         # reconcile()/DeviceBleProxyServer machinery (Phase 4 cutover): no
         # per-device TCP listener or mDNS entry to bring up anymore, just a
-        # config flag checked per batch, same idiom as ns_asr/save_utterances.
+        # config flag checked per batch, same idiom as save_utterances.
         device.ble_proxy_enabled = bool(config.get("bleProxyEnabled", False))
         # Resolved against the capability — see em_shadow.effective_mode for
         # why "on" against firmware that cannot trigger must become shadow
@@ -2875,16 +2862,10 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         ).add_done_callback(_log_task_exception)
         device.eq_bands      = config.get("eqBands", [0.0] * 8)
         device.eq_loudness   = bool(config.get("eqLoudness", False))
-        device.bass_shelf_hz = float(config.get("bassShelfHz", em_eq.DEFAULT_BASS_SHELF_HZ))
-        device.subsonic_hz  = float(config.get("subsonicHz", em_eq.DEFAULT_SUBSONIC_HZ))
-        device.tts_gain_db   = min(em_eq.MAX_MAKEUP_GAIN_DB, max(
-            0.0, float(config.get("ttsGainDb", 0.0))))
         device.bass_guard_enabled = bool(config.get("bassGuardEnabled", True))
         device.bass_guard_db      = float(config.get(
             "bassGuardDb", em_mbc.DEFAULT_BASS_GUARD_DB))
         device.limiter_enabled   = bool(config.get("limiterEnabled", True))
-        device.limiter_threshold = float(config.get(
-            "limiterThreshold", em_limiter.DEFAULT_THRESHOLD_DB))
         device.limiter_release   = float(config.get(
             "limiterRelease", em_limiter.DEFAULT_RELEASE_MS))
         device.led_scene     = em_scenes.resolve(config)

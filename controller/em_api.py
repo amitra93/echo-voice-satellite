@@ -1212,8 +1212,6 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         asyncio.create_task(_install_then_switch(device_id, pending_model))
     if "owwSpeexNs" in effective:
         live.oww_speex_ns = bool(effective["owwSpeexNs"])
-    if "nsAsr" in effective:
-        live.ns_asr = bool(effective["nsAsr"])
     if "saveUtterances" in effective:
         live.save_utterances = bool(effective["saveUtterances"])
     if "saveWakeCaptures" in effective:
@@ -1248,13 +1246,6 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         live.eq_bands = effective["eqBands"]
     if "eqLoudness" in effective:
         live.eq_loudness = bool(effective["eqLoudness"])
-    if "bassShelfHz" in effective:
-        live.bass_shelf_hz = float(effective["bassShelfHz"])
-    if "subsonicHz" in effective:
-        live.subsonic_hz = float(effective["subsonicHz"])
-    if "ttsGainDb" in effective:
-        live.tts_gain_db = min(em_eq.MAX_MAKEUP_GAIN_DB, max(
-            0.0, float(effective["ttsGainDb"])))
     # The output chain is consumed HERE, not on the device — it ignores these
     # five keys entirely — so this mirror is the only thing that carries them.
     # Missing it meant a push wrote the database, sent JSON the device threw
@@ -1264,8 +1255,6 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
     # do nothing, because every setting WAS doing nothing.
     if "limiterEnabled" in effective:
         live.limiter_enabled = bool(effective["limiterEnabled"])
-    if "limiterThreshold" in effective:
-        live.limiter_threshold = float(effective["limiterThreshold"])
     if "limiterRelease" in effective:
         live.limiter_release = float(effective["limiterRelease"])
     if "bassGuardEnabled" in effective:

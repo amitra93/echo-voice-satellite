@@ -64,11 +64,6 @@ def test_settings_name_the_values_not_just_on():
     assert "limiter=-6dB/400ms" in line
 
 
-def test_settings_name_tts_makeup_gain_when_present():
-    line = em_eq.describe_chain([0.0] * 8, False, makeup_gain_db=6.0)
-    assert "tts_gain=+6dB" in line
-
-
 def test_flat_eq_says_flat_and_a_shaped_one_lists_bands():
     assert "eq=flat" in em_eq.describe_chain([0.0] * 8, False)
     line = em_eq.describe_chain([3.0] + [0.0] * 7, True)
@@ -111,7 +106,7 @@ def test_a_live_toggle_is_visible_as_a_settings_change():
     eq = em_eq.StreamingEQ(FS, [0.0] * 8, False,
                            limiter=_limiter(), guard=_guard())
     kw = dict(bands=[0.0] * 8, loudness=False, limiter_enabled=True,
-              limiter_threshold=-1.0, limiter_release=150.0,
+              limiter_release=150.0,
               guard_enabled=True, guard_db=-30.0)
     assert eq.update(**kw) is True          # first call always lands
     assert eq.update(**kw) is False         # steady state is silent

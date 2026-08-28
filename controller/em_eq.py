@@ -52,47 +52,12 @@ EQ_FREQUENCIES = [125, 250, 500, 1000, 2000, 3500, 5500, 8000]
 NUM_BANDS       = len(EQ_FREQUENCIES)
 DEFAULT_BANDS   = [0.0] * NUM_BANDS
 _PEAK_Q         = 1.4   # ~1 octave bandwidth for middle bands
-MAX_MAKEUP_GAIN_DB = 12.0
 
-# Band 0 is a low shelf whose centre frequency is configurable via
-# bassShelfHz. 125 Hz (the original fixed value) is the default and
-# matches what every existing device already runs. Lowering it (e.g. 60,
-# 80) shifts the shelf's corner down, boosting sub-bass that the 125 Hz
-# shelf leaves alone; raising it (e.g. 150, 200) tightens the bass and
-# moves energy into the punchy mid-bass region.
+# Band 0 is a fixed low shelf matching the device's speaker response.
 DEFAULT_BASS_SHELF_HZ = 125.0
-_BASS_SHELF_MIN_HZ    = 40.0    # below this is rumble the driver cannot move
-_BASS_SHELF_MAX_HZ    = 300.0   # above this overlaps band 1 (250 Hz peak)
 
-# Subsonic highpass cutoff, configurable via subsonicHz. 85 Hz (the original
-# fixed value) protects the driver from excursion it cannot turn into sound.
-# Lowering it (e.g. 50-60) lets sub-bass through that the 85 Hz filter was
-# removing — which matters when bassShelfHz is also set low, since a filter
-# at 85 Hz cuts the exact content a shelf at 60 Hz is trying to boost.
+# The fixed highpass protects the driver from excursion it cannot turn into sound.
 DEFAULT_SUBSONIC_HZ = 85.0
-_SUBSONIC_MIN_HZ    = 20.0     # below 20 Hz is inaudible and wastes excursion
-_SUBSONIC_MAX_HZ    = 120.0    # above this starts eating audible bass
-
-
-def _subsonic_hz(subsonic_hz):
-    """Clamp and default the configurable subsonic cutoff."""
-    if subsonic_hz is None:
-        return DEFAULT_SUBSONIC_HZ
-    return float(min(_SUBSONIC_MAX_HZ, max(_SUBSONIC_MIN_HZ, subsonic_hz)))
-
-
-def makeup_gain(samples: np.ndarray, db: float) -> np.ndarray:
-    """Raise a voice source before its guard and limiter stages.
-
-    The limiter must see this gain: applying it after limiting would restore
-    the peaks the limiter deliberately removed and reintroduce speaker-stage
-    clipping. The clamp is a last-resort guard for persisted/manual config;
-    the dashboard exposes the same 0..12dB range.
-    """
-    db = min(MAX_MAKEUP_GAIN_DB, max(0.0, float(db)))
-    if db == 0.0:
-        return samples
-    return samples * (10.0 ** (db / 20.0))
 
 
 # ─── Biquad primitives ────────────────────────────────────────────────────────
@@ -159,16 +124,8 @@ def _loudness_sos(fs: float) -> np.ndarray:
 
 # ─── Public API ───────────────────────────────────────────────────────────────
 
-def _bass_shelf_hz(bass_shelf_hz):
-    """Clamp and default the configurable low-shelf frequency."""
-    if bass_shelf_hz is None:
-        return DEFAULT_BASS_SHELF_HZ
-    return float(min(_BASS_SHELF_MAX_HZ, max(_BASS_SHELF_MIN_HZ, bass_shelf_hz)))
-
-
 def build_sos(bands: list, sample_rate: int, loudness: bool = False,
-              subsonic: bool = True, bass_shelf_hz: float = DEFAULT_BASS_SHELF_HZ,
-              subsonic_hz: float = DEFAULT_SUBSONIC_HZ) -> np.ndarray:
+              subsonic: bool = True) -> np.ndarray:
     """
     Build a stacked SOS matrix for the given band gains and sample rate.
 
@@ -177,11 +134,10 @@ def build_sos(bands: list, sample_rate: int, loudness: bool = False,
     """
     sections = []
     if subsonic:
-        sections.append(_highpass_sos(_subsonic_hz(subsonic_hz), sample_rate))
-    fc0 = _bass_shelf_hz(bass_shelf_hz)
+        sections.append(_highpass_sos(DEFAULT_SUBSONIC_HZ, sample_rate))
     for i, (fc, gain_db) in enumerate(zip(EQ_FREQUENCIES, bands)):
         if i == 0:
-            sections.append(_loshelf_sos(fc0, gain_db, sample_rate))
+            sections.append(_loshelf_sos(DEFAULT_BASS_SHELF_HZ, gain_db, sample_rate))
         elif i == NUM_BANDS - 1:
             sections.append(_hishelf_sos(fc, gain_db, sample_rate))
         else:
@@ -199,9 +155,6 @@ def apply(
     subsonic: bool = True,
     limiter: "em_limiter.Limiter | None" = None,
     guard: "em_mbc.BassGuard | None" = None,
-    makeup_gain_db: float = 0.0,
-    bass_shelf_hz: float = DEFAULT_BASS_SHELF_HZ,
-    subsonic_hz: float = DEFAULT_SUBSONIC_HZ,
 ) -> bytes:
     """
     Apply EQ to mono S16_LE PCM. Returns mono S16_LE PCM at the same rate.
@@ -219,15 +172,6 @@ def apply(
                      scale, which is #231.
         guard:       Optional dynamic bass guard applied AFTER the EQ and
                       BEFORE the limiter — see the ordering note below.
-        makeup_gain_db: Voice-only gain applied after EQ but before the guard
-                      and limiter. Music callers leave this at zero.
-        bass_shelf_hz: Centre frequency of band 0 (low shelf). Default 125.
-                      Lower (60-80) for deeper sub-bass; higher (150-200)
-                      for punchier mid-bass. Clamped to 40-300 Hz.
-        subsonic_hz:  Cutoff of the subsonic highpass filter. Default 85.
-                      Lower (50-60) to let sub-bass through when bassShelfHz
-                      is also set low; the 85 Hz default cuts content a 60 Hz
-                      shelf is trying to boost. Clamped to 20-120 Hz.
 
     Returns:
         EQ-processed mono S16_LE PCM bytes, same length as input.
@@ -242,18 +186,13 @@ def apply(
         log.warning(f"[eq] Expected {NUM_BANDS} bands, got {len(bands)} — padding with zeros")
         bands = list(bands) + [0.0] * (NUM_BANDS - len(bands))
 
-    bass_shelf_hz = _bass_shelf_hz(bass_shelf_hz)
-    subsonic_hz = _subsonic_hz(subsonic_hz)
     flat = not loudness and not subsonic and all(b == 0.0 for b in bands)
-    if flat and limiter is None and guard is None and makeup_gain_db == 0.0:
+    if flat and limiter is None and guard is None:
         return pcm
 
     samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float64)
     if not flat:
-        samples = sosfilt(build_sos(bands, sample_rate, loudness=loudness, subsonic=subsonic,
-                                   bass_shelf_hz=bass_shelf_hz,
-                                   subsonic_hz=subsonic_hz), samples)
-    samples = makeup_gain(samples, makeup_gain_db)
+        samples = sosfilt(build_sos(bands, sample_rate, loudness=loudness, subsonic=subsonic), samples)
     # Order matters: the guard removes excursion the driver cannot deliver,
     # THEN the limiter catches what is left. Limiting first would spend gain
     # reduction on bass that is about to be thrown away, pulling down the
@@ -280,17 +219,11 @@ class StreamingEQ:
     def __init__(self, sample_rate: int, bands: list | None = None,
                  loudness: bool = False, subsonic: bool = True,
                  limiter: "em_limiter.Limiter | None" = None,
-                 guard: "em_mbc.BassGuard | None" = None,
-                 makeup_gain_db: float = 0.0,
-                 bass_shelf_hz: float = DEFAULT_BASS_SHELF_HZ,
-                 subsonic_hz: float = DEFAULT_SUBSONIC_HZ):
+                 guard: "em_mbc.BassGuard | None" = None):
         self._limiter = limiter
         self._guard = guard
-        self._makeup_gain_db = min(MAX_MAKEUP_GAIN_DB, max(0.0, float(makeup_gain_db)))
         self._sample_rate = int(sample_rate)   # set_bands rebuilds against it
         self._subsonic = bool(subsonic)
-        self._bass_shelf_hz = _bass_shelf_hz(bass_shelf_hz)
-        self._subsonic_hz = _subsonic_hz(subsonic_hz)
         # Last values update() applied; None until it is first called, so the
         # first call always lands rather than matching a coincidental default.
         self._applied = None
@@ -301,9 +234,7 @@ class StreamingEQ:
         if not loudness and not subsonic and all(b == 0.0 for b in bands):
             self._sos = None  # flat — pure passthrough
         else:
-            self._sos = build_sos(bands, sample_rate, loudness=loudness, subsonic=subsonic,
-                                bass_shelf_hz=self._bass_shelf_hz,
-                                subsonic_hz=self._subsonic_hz)
+            self._sos = build_sos(bands, sample_rate, loudness=loudness, subsonic=subsonic)
             self._zi  = np.zeros((self._sos.shape[0], 2), dtype=np.float64)
 
     @property
@@ -323,9 +254,7 @@ class StreamingEQ:
                limiter_threshold: float | None = None,
                limiter_release: float | None = None,
                guard_enabled: bool | None = None,
-               guard_db: float | None = None,
-               bass_shelf_hz: float | None = None,
-               subsonic_hz: float | None = None) -> bool:
+               guard_db: float | None = None) -> bool:
         """
         Re-apply the whole chain's settings mid-stream. Returns True if
         anything moved.
@@ -341,11 +270,9 @@ class StreamingEQ:
         tail or the stream's latency — see the setters for why each of those
         would otherwise be audible.
         """
-        wanted_hz = _bass_shelf_hz(bass_shelf_hz) if bass_shelf_hz is not None else self._bass_shelf_hz
-        wanted_sub = _subsonic_hz(subsonic_hz) if subsonic_hz is not None else self._subsonic_hz
         wanted = (tuple(bands) if bands is not None else None, loudness,
                   limiter_enabled, limiter_threshold, limiter_release,
-                  guard_enabled, guard_db, wanted_hz, wanted_sub)
+                  guard_enabled, guard_db)
         if wanted == self._applied:
             return False
 
@@ -355,9 +282,7 @@ class StreamingEQ:
         # EQ only when the curve, the shelf frequency, or the subsonic cutoff
         # moved — the expensive branch.  A frequency change rebuilds the
         # coefficients (the section count is unchanged, so state survives).
-        if prev is None or (prev[0], prev[1], prev[7], prev[8]) != (wanted[0], wanted[1], wanted_hz, wanted_sub):
-            self._bass_shelf_hz = wanted_hz
-            self._subsonic_hz = wanted_sub
+        if prev is None or (prev[0], prev[1]) != (wanted[0], wanted[1]):
             self.set_bands(bands, loudness)
 
         if self._limiter is not None:
@@ -392,21 +317,18 @@ class StreamingEQ:
             self._sos = None
             return
 
-        sos = build_sos(bands, self._sample_rate, loudness=loudness, subsonic=self._subsonic,
-                        bass_shelf_hz=self._bass_shelf_hz,
-                        subsonic_hz=self._subsonic_hz)
+        sos = build_sos(bands, self._sample_rate, loudness=loudness, subsonic=self._subsonic)
         if self._sos is None or self._zi.shape[0] != sos.shape[0]:
             self._zi = np.zeros((sos.shape[0], 2), dtype=np.float64)
         self._sos = sos
 
     def process(self, pcm: bytes) -> bytes:
         if len(pcm) < 2 or (self._sos is None and self._limiter is None
-                            and self._guard is None and self._makeup_gain_db == 0.0):
+                            and self._guard is None):
             return pcm
         samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float64)
         if self._sos is not None:
             samples, self._zi = sosfilt(self._sos, samples, zi=self._zi)
-        samples = makeup_gain(samples, self._makeup_gain_db)
         if self._guard is not None:
             samples = self._guard.process(samples)
         if self._limiter is not None:
@@ -470,9 +392,7 @@ def _stage_state(stage, off="off") -> bool:
     return stage is not None and getattr(stage, "enabled", True)
 
 
-def describe_chain(bands, loudness, limiter=None, guard=None, makeup_gain_db=0.0,
-                   bass_shelf_hz=DEFAULT_BASS_SHELF_HZ,
-                   subsonic_hz=DEFAULT_SUBSONIC_HZ) -> str:
+def describe_chain(bands, loudness, limiter=None, guard=None) -> str:
     """
     One line naming what this stream's chain is SET to.
 
@@ -485,12 +405,6 @@ def describe_chain(bands, loudness, limiter=None, guard=None, makeup_gain_db=0.0
     eq = ("flat" if not shaped
           else "/".join(f"{float(b):+g}" if float(b) else "0" for b in bands))
     parts = [f"eq={eq}", f"speech_boost={'on' if loudness else 'off'}"]
-    if makeup_gain_db:
-        parts.append(f"tts_gain={float(makeup_gain_db):+g}dB")
-    if bass_shelf_hz and float(bass_shelf_hz) != DEFAULT_BASS_SHELF_HZ:
-        parts.append(f"bass_shelf={float(bass_shelf_hz):g}Hz")
-    if subsonic_hz and float(subsonic_hz) != DEFAULT_SUBSONIC_HZ:
-        parts.append(f"subsonic={float(subsonic_hz):g}Hz")
     parts.append(
         f"guard={f'{guard.bass_guard_db:g}dB' if _stage_state(guard) else 'off'}"
     )

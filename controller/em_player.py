@@ -573,15 +573,14 @@ class MediaSession:
         eq = em_eq.StreamingEQ(SPEAKER_RATE, device.eq_bands, device.eq_loudness,
                                limiter=em_limiter.Limiter(
                                    SPEAKER_RATE,
-                                   threshold_db=device.limiter_threshold,
+                                    threshold_db=em_limiter.DEFAULT_THRESHOLD_DB,
                                    release_ms=device.limiter_release,
                                    enabled=device.limiter_enabled),
                                guard=em_mbc.BassGuard(
                                    SPEAKER_RATE,
                                    bass_guard_db=device.bass_guard_db,
                                    enabled=device.bass_guard_enabled),
-                               bass_shelf_hz=device.bass_shelf_hz,
-                               subsonic_hz=device.subsonic_hz)
+                                )
         start_pos = self._pos
         proc = None
         seg_start = loop.time()
@@ -667,14 +666,11 @@ class MediaSession:
                 if eq.update(bands=device.eq_bands,
                              loudness=device.eq_loudness,
                              limiter_enabled=device.limiter_enabled,
-                             limiter_threshold=device.limiter_threshold,
-                             limiter_release=device.limiter_release,
-                             guard_enabled=device.bass_guard_enabled,
-                             guard_db=device.bass_guard_db,
-                             bass_shelf_hz=device.bass_shelf_hz,
-                             subsonic_hz=device.subsonic_hz):
+                              limiter_release=device.limiter_release,
+                              guard_enabled=device.bass_guard_enabled,
+                              guard_db=device.bass_guard_db):
                     log.info(f"[{self.device_id}] Output chain: "
-                             f"{em_eq.describe_chain(device.eq_bands, device.eq_loudness, eq.limiter, eq.guard, bass_shelf_hz=device.bass_shelf_hz, subsonic_hz=device.subsonic_hz)}")
+                              f"{em_eq.describe_chain(device.eq_bands, device.eq_loudness, eq.limiter, eq.guard)}")
 
                 try:
                     if pending is not None:

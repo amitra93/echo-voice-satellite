@@ -23,8 +23,8 @@ config key ends up belonging to no section.
 SECTIONS: dict[str, dict] = {
     "playback": {
         "label": "Playback",
-        "keys": ["eqBands", "eqLoudness", "ttsGainDb", "duckDb", "bassShelfHz", "subsonicHz",
-                 "limiterEnabled", "limiterThreshold", "limiterRelease",
+        "keys": ["eqBands", "eqLoudness", "duckDb",
+                 "limiterEnabled", "limiterRelease",
                  "bassGuardEnabled", "bassGuardDb"],
     },
     "wakeword": {
@@ -39,10 +39,7 @@ SECTIONS: dict[str, dict] = {
     "microphones": {
         "label": "Microphones",
         "keys": [
-            "adcMicpga", "adcDigitalGain", "micGainDb",
-            "beamformingEnabled", "beamAngle",
-            "aecEnabled", "aecDelayMs", "aecTailMs", "nsAsr",
-            "saveUtterances",
+            "afeMicGainDb", "saveUtterances",
         ],
     },
     "ring": {
@@ -56,7 +53,7 @@ SECTIONS: dict[str, dict] = {
     "advanced": {
         "label": "Advanced",
         "keys": [
-            "agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs",
+            "vadThreshold", "vadSpeechMs", "vadSilenceMs",
             # Already the button-turn section; these decide whether they happen.
             "buttonSingleTapEvent", "buttonMultiTapMs",
         ],

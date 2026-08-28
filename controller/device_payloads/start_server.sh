@@ -31,24 +31,6 @@ ip link set p2p0 down
 # Prevent WiFi suspension
 echo "EchoMuse" > /sys/power/wake_lock
 
-# Speaker mixer init
-tinymix -D 0 56 On
-tinymix -D 0 64 1 1
-tinymix -D 0 88 On
-tinymix -D 0 85 1
-tinymix -D 0 62 15 15
-tinymix -D 0 61 100 100
-
-# Mic gain — equalised across all four ADCs (A/B/C/D)
-tinymix -D 0 89 88 88
-tinymix -D 0 92 40 40
-tinymix -D 0 107 88 88
-tinymix -D 0 110 40 40
-tinymix -D 0 125 88 88
-tinymix -D 0 128 40 40
-tinymix -D 0 143 88 88
-tinymix -D 0 146 40 40
-
 kill $(ps | grep ledcontroller | grep -v grep) 2>/dev/null
 
 # ── Log size cap ──────────────────────────────────────────────────────────────
@@ -121,24 +103,13 @@ sup_log() {
 
 sup_log "boot slot=$(readlink /data/local/bin/server 2>/dev/null)"
 
-# ── Amp safety ────────────────────────────────────────────────────────────────
-# Mute + amp off whenever the server is not running. The server does this
-# itself on SIGTERM (PcmSpeaker.Close), but SIGKILL/panic paths skip it —
-# and an enabled amp on an idle DAC produces audible hiss for as long as
-# the server is down (between OTA slots was the worst case). Idempotent;
-# the server re-enables the amp in its own startup sequence.
-amp_off() {
-    tinymix -D 0 61 0 0 2>/dev/null
-    tinymix -D 0 5 Off 2>/dev/null
-}
-
 # ── Signal handling ───────────────────────────────────────────────────────────
 # Forward SIGTERM/SIGINT to the server subprocess so Android init can
 # cleanly stop the service (exec is no longer used, so init signals us).
-# Wait for the server to finish its own graceful shutdown, then amp_off
-# as belt-and-braces. The log-trim loop dies with us too.
+# Wait for the server to finish its own graceful shutdown. The log-trim loop
+# dies with us too; Android's HAL owns the output route.
 SERVER_PID=0
-trap 'sup_log "term signalled — supervisor exiting"; kill $SERVER_PID $TRIM_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; amp_off; exit 0' TERM INT
+trap 'sup_log "term signalled — supervisor exiting"; kill $SERVER_PID $TRIM_PID 2>/dev/null; wait $SERVER_PID 2>/dev/null; exit 0' TERM INT
 
 # ── Retry loop with auto-rollback ─────────────────────────────────────────────
 attempt=0
@@ -154,7 +125,6 @@ while true; do
 
     # Server is down — silence the amp until the next start (or forever,
     # if this turns out to be the rollback/give-up path).
-    amp_off
 
     END_TIME=$(date +%s)
     RUNTIME=$(( END_TIME - START_TIME ))

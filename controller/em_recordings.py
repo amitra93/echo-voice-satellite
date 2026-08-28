@@ -5,7 +5,7 @@ em_recordings.py — utterance audio capture for the Activity panel
 Saves the mic audio of recent voice turns as WAV files so you can *listen*
 to what the array actually captured, rather than inferring mic quality from
 an STT transcript and a wake score. Asked for by users who wanted to judge
-capture quality before spending an evening tuning micGainDb/AEC/NS.
+capture quality before spending an evening tuning the audio path.
 
 Storage mirrors `em_oww_models`: files live in `recordings/` beside the
 SQLite DB, so they sit inside the persisted Docker volume and survive image
@@ -17,8 +17,8 @@ rowids, so the order is exact even if the volume is restored from a backup
 that flattened timestamps.
 
 The audio written is exactly what the controller streamed to Home Assistant
-for recognition — tapped BELOW noise suppression, so on a device with
-`nsAsr` on the file is the denoised stream, not the raw mic. That is the
+for recognition. The file contains the exact ASR-bound stream, not a separate
+processed copy. That is the
 point: a recording that isn't what STT heard can tell you the room was
 noisy but never why a transcript came back wrong. 16kHz mono S16_LE,
 matching the ESPHome satellite wire format.

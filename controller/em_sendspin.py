@@ -682,7 +682,7 @@ class SendspinDeviceSession:
                 loudness=bool(getattr(dev, "eq_loudness", False)),
                 limiter=em_limiter.Limiter(
                     PCM_SAMPLE_RATE,
-                    threshold_db=getattr(dev, "limiter_threshold", -1.0),
+                    threshold_db=em_limiter.DEFAULT_THRESHOLD_DB,
                     release_ms=getattr(dev, "limiter_release", 150.0),
                     enabled=getattr(dev, "limiter_enabled", True),
                 ),
@@ -691,8 +691,6 @@ class SendspinDeviceSession:
                     bass_guard_db=getattr(dev, "bass_guard_db", -30.0),
                     enabled=getattr(dev, "bass_guard_enabled", True),
                 ),
-                bass_shelf_hz=getattr(dev, "bass_shelf_hz", em_eq.DEFAULT_BASS_SHELF_HZ),
-                subsonic_hz=getattr(dev, "subsonic_hz", em_eq.DEFAULT_SUBSONIC_HZ),
             )
         except Exception:
             self._eq = None
@@ -737,12 +735,9 @@ class SendspinDeviceSession:
                 bands=getattr(self.device, "eq_bands", [0.0] * 8),
                 loudness=bool(getattr(self.device, "eq_loudness", False)),
                 limiter_enabled=getattr(self.device, "limiter_enabled", True),
-                limiter_threshold=getattr(self.device, "limiter_threshold", -1.0),
                 limiter_release=getattr(self.device, "limiter_release", 150.0),
                 guard_enabled=getattr(self.device, "bass_guard_enabled", True),
                 guard_db=getattr(self.device, "bass_guard_db", -30.0),
-                bass_shelf_hz=getattr(self.device, "bass_shelf_hz", em_eq.DEFAULT_BASS_SHELF_HZ),
-                subsonic_hz=getattr(self.device, "subsonic_hz", em_eq.DEFAULT_SUBSONIC_HZ),
             )
             if changed:
                 log.info(
@@ -753,8 +748,6 @@ class SendspinDeviceSession:
                         self.device.eq_loudness,
                         self._eq.limiter,
                         self._eq.guard,
-                        bass_shelf_hz=self.device.bass_shelf_hz,
-                        subsonic_hz=self.device.subsonic_hz,
                     ),
                 )
         except Exception as exc:

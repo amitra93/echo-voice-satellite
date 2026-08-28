@@ -46,36 +46,8 @@ DEFAULT_DEVICE_CONFIG = {
     # needs ONNX Runtime plus the models installed on the device out of band
     # (they are not in the firmware). Enable on ONE device at a time.
     "owwOnDevice":      "off",
-    "adcDigitalGain":   88,
-    "adcMicpga":        40,
-    # micGainDb: fixed digital gain (dB) the device applies to the full
-    # 24-bit capture before quantising to the 16-bit stream. Sized from
-    # 20h fleet logs (2026-07-07): speech RMS at wake detection was
-    # 0.0001–0.0006 FS (~3–20 LSB in 16-bit — the old S24→S16 truncation
-    # discarded most of the signal), loudest observed chunk 0.0035 FS, so
-    # +24dB (×16) lifts speech into a usable range with ample clipping
-    # headroom. Device clamps to [0, 42]; clipped-sample count appears in
-    # the device's periodic VAD diag log. Note: the device interprets
-    # vadThreshold in pre-gain units (threshold is scaled by the gain
-    # internally), so this can be tuned without retuning vadThreshold.
-    "micGainDb":        24,
-    # AEC (speexdsp, device-side, whole mic path incl. wake stream).
-    # Default ON, and coupled to bargeInEnabled below: with barge-in the mic
-    # streams throughout playback, and AEC is the only thing stopping the
-    # device waking on its own TTS. Turning one on without the other is the
-    # self-trigger case the barge threshold reasoning assumes away, so if
-    # this goes back to False, bargeInEnabled must go with it.
-    # ~14dB attenuation per response, held across turns since v2.7.8; check
-    # the [aec] att= logs when tuning.
-    # aecDelayMs: 0, measured on hardware 2026-07-08 — the mic side reads
-    # 160ms ALSA batches, which eats most of the speaker's write-to-ear
-    # latency; the filter tail absorbs the remainder. (The original 250
-    # guess made the echo arrive *before* its reference — non-causal, zero
-    # cancellation.) aecTailMs is the adaptive filter length (residual
-    # delay + room reverb). Device clamps: delay 0–1000, tail 50–500.
-    "aecEnabled":       True,
-    "aecDelayMs":       0,
-    "aecTailMs":        300,
+    # AFE output is already S16 after Amazon's processing; default unity.
+    "afeMicGainDb":     0,
     "startupVolume":    85,
     # vadThreshold: 0.001 (normalised RMS pre-AGC).
     # Q2 fix (2026-07-05 review, tracked as B6): this was drifted to 0.003 in
@@ -116,10 +88,7 @@ DEFAULT_DEVICE_CONFIG = {
     # trades recall for false positives (see oww_forge/README.md).
     "owwThreshold":     0.5,
     # Barge-in (§3.2, controller-side): wake word spoken during TTS playback
-    # cancels it and starts a fresh turn. Requires device AEC (aecEnabled)
-    # on — with barge-in the mic streams through playback, and AEC is what
-    # stops the device hearing itself — so aecEnabled above defaults on with
-    # it, and the two move together. bargeInThreshold is used as-is,
+    # cancels it and starts a fresh turn. bargeInThreshold is used as-is,
     # deliberately BELOW the normal wake threshold: the echo at the mic is
     # ~25dB louder than the person talking over it, so speech-over-TTS wake
     # scores are inherently depressed (~0.10–0.12 measured), while post-AEC
@@ -135,12 +104,6 @@ DEFAULT_DEVICE_CONFIG = {
     # dashboard slider floor, so the only way to tune from here is UP, which
     # is the direction the visible failure asks for.
     #
-    # Watch one interaction: the beamformer locks a different mic per turn
-    # and each has its own echo path, so AEC re-converges per turn (per-
-    # channel filter states are the unbuilt fix) — and the one measured
-    # self-echo figure above 0.05 is that unconverged case at 0.055. The
-    # symptom would be a device cutting its own response short. This fleet
-    # runs 0.05 with beamforming and AEC both on and does not do that.
     "bargeInEnabled":   True,
     "bargeInThreshold": 0.05,
     # How far music is attenuated while a voice turn plays OVER it, on
@@ -168,11 +131,10 @@ DEFAULT_DEVICE_CONFIG = {
     # A/B this is waiting on is now actually runnable. Off until someone
     # runs it — not off because it cannot be turned on.
     "owwSpeexNs":       False,
-    # nsAsr: DTLN noise suppression (em_ns.py), controller-side, applied
     # ONLY to the turn audio streamed to HA's STT — the wake stream and
     # all noise-floor measurement stay raw. Helps steady noise (fan, AC,
     # hum) at marginal SNR; does little against competing speech (TV) —
-    # that's the beamformer's job. Default off, and the A/B that was
+    # that's the AFE's job. Default off, and the A/B that was
     # "pending" has since run with a result that is NOT yet reconciled: with
     # NS on, recordings showed 8-15% of samples at exact digital zero at a
     # healthy signal level (the gate chewing speech); with it off, 0.3%.
@@ -183,7 +145,6 @@ DEFAULT_DEVICE_CONFIG = {
     # Models are vendored into the Docker image, so if the
     # files are missing (bare-metal without NS_MODEL_DIR) the flag
     # degrades to raw streaming with a warning.
-    "nsAsr":            False,
     # saveUtterances: keep the mic audio of the last few voice turns
     # (em_recordings.KEEP_PER_DEVICE) as WAVs, downloadable from the
     # Activity tab. Diagnostic tooling for "is my mic any good" — the
@@ -214,49 +175,14 @@ DEFAULT_DEVICE_CONFIG = {
     # Android Bluetooth stack on the device (required — /dev/stpbt is
     # single-owner) and brings up a second ESPHome listener + mDNS entry.
     "bleProxyEnabled":  False,
-    # beamformingEnabled: True — ch6 (centre/omni) hears the wake word, then
-    # the turn locks to the best perimeter mic. The flag ONLY gates Lock():
-    # unlocked is always ch6 and the wake path never locks, so the wake
-    # stream is ch6 either way (beamformer.go). It cannot splice wake audio.
-    #
-    # This was False, on a comment describing the every-32ms reselection that
-    # be2f16d (v2.6.3 P0-2) had already fixed in the same commit. The real
-    # reason recorded there was that onset discrimination was unreliable at
-    # <=1.5m, "re-enable once P0-3/P0-4 are addressed" — P0-3 closed
-    # 2026-07-12 (DTLN) and v2.7.2's lock-back selection fixed the decayed-
-    # spike picks that caused most of the wrong-lock risk. Nobody went back.
-    # Meanwhile this fleet has run True since the 2026-07-20 config restore
-    # with no reported regression, so True is the value with field evidence
-    # behind it and False is the one that has not been run in months.
-    "beamformingEnabled": True,
-    "beamAngle":        -1,
     "eqBands":          [4.5, 3.0, -0.5, 0.0, 1.5, 1.0, 0.0, 1.5],
     "eqLoudness":       True,
-    # Bass shelf centre frequency (band 0). Default 125 Hz matches every
-    # existing device. Lower (60-80) for deeper sub-bass; higher (150-200)
-    # for punchier mid-bass. Clamped 40-300 Hz by em_eq._bass_shelf_hz.
-    "bassShelfHz":      125,
-    # Subsonic highpass cutoff. Default 85 Hz protects the driver from
-    # sub-bass excursion. Lower (50-60) to let sub-bass through when
-    # bassShelfHz is also set low. Clamped 20-120 Hz by em_eq.
-    "subsonicHz":       85,
-    # TTS sources are substantially less mastered than music. This makeup
-    # gain is applied before the existing guard and limiter, so it raises
-    # speech without restoring peaks the protection stages removed. Music
-    # deliberately never consumes this key.
-    "ttsGainDb":         0.0,
-    # Output limiter. On by default: the EQ chain hard-clipped anything it
-    # boosted past full scale (#231), and a default that leaves that in place
-    # protects nobody — least of all a fresh device starting on the boosted
-    # eqBands curve above. Threshold/release are config rather than constants
-    # because limiter character wants tuning by ear in a real room — the same
-    # reasoning as duckDb and the LED meter curve.
+    # Output limiter and dynamic bass guard protect the device after EQ.
     # Dynamic bass guard. Removes low-frequency content the driver cannot
     # deliver, which is what makes the midrange clean — see em_mbc.
     "bassGuardEnabled": True,
     "bassGuardDb":      -30.0,
     "limiterEnabled":   True,
-    "limiterThreshold": -1.0,
     "limiterRelease":   150,
     # LED ring scene (controller-side rendering — see em_scenes.py).
     # ledListenColor/ledThinkColor only apply when ledScene is "custom".
@@ -275,12 +201,6 @@ DEFAULT_DEVICE_CONFIG = {
     "meterGamma":       2.2,   # >1 expands the dark end so the swing reads
     "meterRef":         0.22,  # speaker RMS mapped to full brightness
     "meterCurve":       0.7,   # <1 lifts quiet consonants
-    # agcEnabled: automatic gain control (lockMic/button turn streams only).
-    # Disable to hear raw mic levels. (nsEnabled/RNNoise removed 2026-07-12
-    # with the device-side RNNoise code — a stale nsEnabled key in stored
-    # configs is harmless: new firmware ignores unknown fields, and old
-    # firmware keeps honouring the stored False until it's OTA'd.)
-    "agcEnabled":       True,
 }
 
 # Maximum log rows retained per device. Older rows are pruned on insert.
@@ -837,6 +757,16 @@ MIGRATIONS: list[str] = [
     """
     UPDATE system_config SET value = '22' WHERE key = 'schema_version';
     """,
+
+    # ── v23 — remove direct-capture config from AFE-only devices ────────────
+    """
+    UPDATE system_config SET value = '23' WHERE key = 'schema_version';
+    """,
+
+    # ── v24 — remove retired controller audio processing settings ───────────
+    """
+    UPDATE system_config SET value = '24' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -869,7 +799,90 @@ def _fixup_v22(conn) -> None:
         conn.execute("ALTER TABLE turns ADD COLUMN state TEXT NOT NULL DEFAULT 'done'")
 
 
-_MIGRATION_FIXUPS = {11: _fixup_v11, 22: _fixup_v22}
+_OBSOLETE_AFE_CONFIG_KEYS = frozenset({
+    "adcMicpga", "adcDigitalGain", "micGainDb", "beamAngle",
+    "beamformingEnabled", "aecEnabled", "aecDelayMs", "aecTailMs",
+    "agcEnabled", "vadChannel",
+})
+
+
+def _strip_obsolete_afe_config(config) -> dict:
+    """Keep only supported keys when removing legacy direct-capture settings."""
+    return {key: value for key, value in config.items() if key not in _OBSOLETE_AFE_CONFIG_KEYS}
+
+
+def _fixup_v23(conn) -> None:
+    """Remove retired direct-capture keys from persisted fleet and device config."""
+    row = conn.execute(
+        "SELECT value FROM system_config WHERE key = 'global_device_config'"
+    ).fetchone()
+    if row:
+        try:
+            config = json.loads(row["value"] or "{}") or {}
+        except (json.JSONDecodeError, TypeError):
+            config = None
+        if config is not None:
+            pruned = _strip_obsolete_afe_config(config)
+            if len(pruned) != len(config):
+                conn.execute(
+                    "UPDATE system_config SET value = ? WHERE key = 'global_device_config'",
+                    (json.dumps(pruned),),
+                )
+
+    for row in conn.execute("SELECT device_id, config FROM devices"):
+        try:
+            config = json.loads(row["config"] or "{}") or {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+        pruned = _strip_obsolete_afe_config(config)
+        if len(pruned) != len(config):
+            conn.execute(
+                "UPDATE devices SET config = ? WHERE device_id = ?",
+                (json.dumps(pruned), row["device_id"]),
+            )
+
+
+_RETIRED_AUDIO_CONFIG_KEYS = frozenset({
+    "ttsGainDb", "bassShelfHz", "subsonicHz", "limiterThreshold", "nsAsr",
+})
+
+
+def _fixup_v24(conn) -> None:
+    """Remove controller audio settings persisted by older releases."""
+    def prune(config):
+        return {key: value for key, value in config.items()
+                if key not in _RETIRED_AUDIO_CONFIG_KEYS}
+
+    row = conn.execute(
+        "SELECT value FROM system_config WHERE key = 'global_device_config'"
+    ).fetchone()
+    if row:
+        try:
+            config = json.loads(row["value"] or "{}") or {}
+        except (json.JSONDecodeError, TypeError):
+            config = None
+        if config is not None:
+            pruned = prune(config)
+            if pruned != config:
+                conn.execute(
+                    "UPDATE system_config SET value = ? WHERE key = 'global_device_config'",
+                    (json.dumps(pruned),),
+                )
+
+    for row in conn.execute("SELECT device_id, config FROM devices"):
+        try:
+            config = json.loads(row["config"] or "{}") or {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+        pruned = prune(config)
+        if pruned != config:
+            conn.execute(
+                "UPDATE devices SET config = ? WHERE device_id = ?",
+                (json.dumps(pruned), row["device_id"]),
+            )
+
+
+_MIGRATION_FIXUPS = {11: _fixup_v11, 22: _fixup_v22, 23: _fixup_v23, 24: _fixup_v24}
 
 # ─── Connection management ────────────────────────────────────────────────────
 

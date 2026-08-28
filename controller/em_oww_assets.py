@@ -17,8 +17,8 @@ What has to land on a device, in `shadow.DefaultDir`:
     <stem>.onnx           ~0.9MB   one classifier per wake model
 
 The runtime is vendored into the controller image at build time (pinned by
-version + sha256, the same treatment the Dockerfile already gives xterm and
-DTLN), so devices never need internet. The models come from the installed
+version + sha256, alongside the other bundled runtime assets), so devices
+never need internet. The models come from the installed
 openwakeword package, or from `oww_models/` for custom ones — no second copy
 to keep in step.
 

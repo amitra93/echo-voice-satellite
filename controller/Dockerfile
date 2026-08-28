@@ -68,7 +68,6 @@ COPY em_support.py .
 COPY em_shadow.py .
 COPY em_oww_warmup.py .
 COPY em_barge.py .
-COPY em_ns.py .
 COPY em_pki.py .
 COPY em_hostip.py .
 COPY em_ingressauth.py .
@@ -98,14 +97,6 @@ COPY em_ha_sidechannels.py .
 COPY version.py .
 # Device payloads (start_server.sh etc.) — canonical copies served to devices
 COPY device_payloads/ ./device_payloads/
-
-# DTLN noise-suppression models (em_ns.py) — vendored at build time like the
-# JS deps above; pinned to a commit so builds are reproducible. MIT licensed.
-RUN mkdir -p /app/models/dtln && \
-    curl -sfL -o /app/models/dtln/model_1.onnx \
-      https://raw.githubusercontent.com/breizhn/DTLN/1de1f15a8b5b7e1c44905618ff2ef70ca8277fbc/pretrained_model/model_1.onnx && \
-    curl -sfL -o /app/models/dtln/model_2.onnx \
-      https://raw.githubusercontent.com/breizhn/DTLN/1de1f15a8b5b7e1c44905618ff2ef70ca8277fbc/pretrained_model/model_2.onnx
 
 # ONNX Runtime for the DEVICE (armeabi-v7a) — on-device wake word assets.
 #

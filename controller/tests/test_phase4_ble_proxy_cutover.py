@@ -3,7 +3,7 @@
 em_ble_proxy.py's ESPHome-hosted BT proxy (its own TCP listener, mDNS entry,
 protobuf-encoded advertisements) is gone. What forwarding still needs — "only
 forward while bleProxyEnabled is on" — is now a plain config flag cached on
-the live Device object, the same idiom as ns_asr/save_utterances, checked per
+    the live Device object, the same idiom as save_utterances, checked per
 ble_adverts batch in em_controller.handle_control.
 
 Source-shape assertions throughout: em_api.py/em_controller.py need aiohttp,
@@ -23,7 +23,7 @@ def test_apply_live_config_caches_ble_proxy_enabled_like_ns_asr():
     The one place both the per-device and fleet config-push endpoints go
     through (see _apply_live_config's own docstring) must mirror
     bleProxyEnabled onto the live Device the same way it already does for
-    nsAsr/saveUtterances/bargeInEnabled — or a config toggle only takes
+    saveUtterances/bargeInEnabled — or a config toggle only takes
     effect on the device's next reconnect instead of immediately.
     """
     src = (CONTROLLER / "em_api.py").read_text()

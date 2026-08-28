@@ -182,7 +182,7 @@ def _eq():
 
 
 ARGS = dict(bands=[0.0] * em_eq.NUM_BANDS, loudness=False,
-            limiter_enabled=True, limiter_threshold=-1.0,
+            limiter_enabled=True,
             limiter_release=150.0, guard_enabled=True, guard_db=-20.0)
 
 
@@ -204,11 +204,11 @@ def test_update_does_not_rebuild_the_eq_for_an_unrelated_change():
     zi = eq._zi
 
     eq.update(**{**ARGS, "bands": [3.0] + [0.0] * (em_eq.NUM_BANDS - 1),
-                 "guard_db": -30.0, "limiter_threshold": -6.0})
+                 "guard_db": -30.0})
     assert eq._sos is sos, "EQ rebuilt for a change that was not the EQ"
     assert eq._zi is zi
 
-    assert eq._limiter.threshold_db == -6.0
+    assert eq._limiter.threshold_db == -1.0
     assert eq._guard.bass_guard_db == -30.0
 
 
