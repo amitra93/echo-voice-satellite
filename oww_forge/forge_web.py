@@ -198,6 +198,18 @@ def _wakewords_state() -> list:
         work = Path(cfg["output_dir"]) / name
         model = forge.MODELS / f"{name}.onnx"
         features_built = all((work / filename).exists() for filename in forge.FEATURE_FILES)
+        inventory = forge.source_inventory(work)
+        training_mix = cfg.get("training_mix", {
+            "positive": {source: None for source in forge.SOURCE_NAMES},
+            "negative": {source: None for source in forge.SOURCE_NAMES},
+        })
+        try:
+            resolved_training_mix = {
+                polarity: forge.resolve_training_mix(inventory, polarity, training_mix.get(polarity))
+                for polarity in ("positive", "negative")
+            }
+        except ValueError:
+            resolved_training_mix = {}
         words.append({
             "name": name,
             "phrases": cfg.get("target_phrase", []),
@@ -210,6 +222,9 @@ def _wakewords_state() -> list:
             "steps": cfg.get("steps"),
             "clips_train": _count(work / "positive_train"),
             "clips_test": _count(work / "positive_test"),
+            "source_inventory": inventory,
+            "training_mix": training_mix,
+            "resolved_training_mix": resolved_training_mix,
             "features_built": features_built,
             "features_stale": forge.features_stale(work, cfg),
             "model_built": model.exists(),
@@ -382,6 +397,42 @@ async def api_dataset_options(request):
     cfg["use_slr28_augmentation"] = bool(body.get("use_slr28_augmentation"))
     cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
     return web.json_response({"ok": True})
+
+
+async def api_training_mix(request):
+    """Persist independently weighted positive and negative source mixes."""
+    name = request.match_info["name"]
+    _require_wakeword(name)
+    if _job and _job.poll() is None:
+        raise web.HTTPConflict(text="cannot change training mix while a job is running")
+    body = await request.json()
+    mix = body.get("training_mix")
+    if not isinstance(mix, dict):
+        raise web.HTTPBadRequest(text="training_mix must be an object")
+    cfg_path = forge.WAKEWORDS / name / "config.yml"
+    cfg = yaml.safe_load(cfg_path.read_text())
+    work = Path(cfg["output_dir"]) / cfg["model_name"]
+    inventory = forge.source_inventory(work)
+    normalized = {}
+    try:
+        for polarity in ("positive", "negative"):
+            weights = mix.get(polarity)
+            if not isinstance(weights, dict):
+                raise ValueError(f"{polarity} mix is required")
+            normalized[polarity] = {
+                source: weights.get(source) for source in forge.SOURCE_NAMES
+            }
+            forge.resolve_training_mix(inventory, polarity, normalized[polarity])
+    except ValueError as error:
+        raise web.HTTPBadRequest(text=str(error))
+    cfg["training_mix"] = normalized
+    cfg_path.write_text(yaml.safe_dump(cfg, sort_keys=False))
+    resolved = {
+        polarity: forge.resolve_training_mix(inventory, polarity, normalized[polarity])
+        for polarity in ("positive", "negative")
+    }
+    return web.json_response({"ok": True, "training_mix": normalized,
+                              "inventory": inventory, "resolved": resolved})
 
 
 async def api_confusables(request):
@@ -680,6 +731,7 @@ def make_app() -> web.Application:
     app.router.add_post("/api/wakewords", api_wakeword_create)
     app.router.add_post("/api/wakewords/{name}/build", api_build)
     app.router.add_post("/api/wakewords/{name}/datasets", api_dataset_options)
+    app.router.add_post("/api/wakewords/{name}/training-mix", api_training_mix)
     app.router.add_post("/api/wakewords/{name}/confusables", api_confusables)
     app.router.add_post("/api/wakewords/{name}/google-tts-config", api_save_google_tts_config)
     app.router.add_post("/api/wakewords/{name}/google-tts", api_google_tts)

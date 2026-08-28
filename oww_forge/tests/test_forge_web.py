@@ -93,6 +93,27 @@ class ForgeWebGoogleTtsTests(unittest.IsolatedAsyncioTestCase):
                 "qps": 0,
             }))
 
+    async def test_training_mix_persists_separate_positive_and_negative_weights(self):
+        base = self.wakewords / "work" / "demo"
+        for directory, filename in (
+            ("positive_train", "custom_a.wav"),
+            ("positive_train", "piper_a.wav"),
+            ("negative_train", "custom_n.wav"),
+            ("negative_train", "piper_n.wav"),
+        ):
+            path = base / directory / filename
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(b"not-a-wav")
+        response = await forge_web.api_training_mix(Request({"training_mix": {
+            "positive": {"custom": 60, "piper": 40, "google": 0},
+            "negative": {"custom": 20, "piper": 80, "google": 0},
+        }}))
+
+        self.assertEqual(response.status, 200)
+        config = self.read_config()
+        self.assertEqual(config["training_mix"]["positive"]["custom"], 60)
+        self.assertEqual(config["training_mix"]["negative"]["piper"], 80)
+
     async def test_prune_google_tts_previews_then_deletes_only_unselected_clips(self):
         base = self.wakewords / "work" / "demo"
         for directory in ("positive_train", "positive_test", "negative_train", "negative_test"):

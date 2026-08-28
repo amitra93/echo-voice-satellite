@@ -310,6 +310,22 @@ async function api(path, opts) {
   return r.json();
 }
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const sourceLabel = {custom: 'Your recordings', piper: 'Piper synthetic', google: 'Google Chirp 3'};
+const fmtHours = seconds => `${Math.round((seconds || 0) / 3600)}h`;
+
+function sourceMixPanel(w, polarity) {
+  const inventory = w.source_inventory?.[polarity] || {};
+  const mix = w.training_mix?.[polarity] || {};
+  const rows = ['custom', 'piper', 'google'].map(source => {
+    const item = inventory[source] || {train: {}, test: {}, total: {}};
+    const available = (item.train?.count || 0) > 0;
+    const value = mix[source] == null ? '' : mix[source];
+    return `<tr><td>${sourceLabel[source]}</td><td>${item.train?.count || 0}</td><td>${item.test?.count || 0}</td><td>${item.total?.count || 0}</td><td>${fmtHours(item.total?.seconds)}</td><td><input type="number" min="0" max="100" step="1" data-mix-${polarity}-${source} value="${value}" ${available && !busy() ? '' : 'disabled'} style="width:60px">%</td></tr>`;
+  }).join('');
+  const draws = w.resolved_training_mix?.[polarity]?.draws || {};
+  const drawText = Object.entries(draws).filter(([, count]) => count).map(([source, count]) => `${sourceLabel[source]} ${count}`).join(', ') || 'no train clips';
+  return `<div class="dataset-options" style="margin-top:10px"><div class="microlabel">${polarity[0].toUpperCase() + polarity.slice(1)} training sources</div><table style="width:100%;font-size:12px;border-collapse:collapse"><thead><tr><th align="left">Source</th><th>Train</th><th>Test</th><th>Total</th><th>Audio</th><th>Mix</th></tr></thead><tbody>${rows}</tbody></table><div class="hint">Per build: ${esc(drawText)} draws. Leave every mix field blank to use natural source proportions. Audio is rounded to the nearest hour; test clips are never weighted.</div></div>`;
+}
 
 function fmtAgo(ts) {
   const d = new Date(ts * 1000);
@@ -396,6 +412,12 @@ function render() {
   // whichever field the user is actively editing, and put it back afterwards.
   const wwRoot = $('wakewords');
   const editing = document.activeElement;
+  const pendingMix = {};
+  wwRoot.querySelectorAll('input[data-mix-positive-custom], input[data-mix-positive-piper], input[data-mix-positive-google], input[data-mix-negative-custom], input[data-mix-negative-piper], input[data-mix-negative-google]').forEach(input => {
+    const card = input.closest('.card.ww');
+    const attr = [...input.attributes].find(a => a.name.startsWith('data-mix-'));
+    if (card && attr) pendingMix[`${card.dataset.name}:${attr.name}`] = input.value;
+  });
   let pendingEdit = null;
   if (editing && wwRoot.contains(editing) && (editing.tagName === 'INPUT' || editing.tagName === 'TEXTAREA')) {
     const card = editing.closest('.card.ww');
@@ -483,6 +505,9 @@ function render() {
               title="Preview and remove generated Chirp clips outside the saved locale and voice selection">Preview prune unselected clips</button>
           </div>
         </div>
+        ${sourceMixPanel(w, 'positive')}
+        ${sourceMixPanel(w, 'negative')}
+        <div class="row" style="margin-top:6px"><button class="small" data-act="save-mix" ${busy() ? 'disabled' : ''}>Save training mix</button><span class="hint" data-mix-result style="margin:0"></span></div>
         <div class="dataset-options" style="margin-top:10px">
           <div class="microlabel">Piper languages</div>
           <label>Locale <input data-piper-language value="en_GB" placeholder="e.g. en_GB, de_DE"></label>
@@ -529,6 +554,13 @@ function render() {
       try { revived.setSelectionRange(pendingEdit.selStart, pendingEdit.selEnd); } catch {}
     }
   }
+  wwRoot.querySelectorAll('.card.ww').forEach(card => {
+    card.querySelectorAll('input[data-mix-positive-custom], input[data-mix-positive-piper], input[data-mix-positive-google], input[data-mix-negative-custom], input[data-mix-negative-piper], input[data-mix-negative-google]').forEach(input => {
+      const attr = [...input.attributes].find(a => a.name.startsWith('data-mix-'));
+      const key = `${card.dataset.name}:${attr?.name}`;
+      if (key in pendingMix) input.value = pendingMix[key];
+    });
+  });
 }
 
 function renderJob() {
@@ -840,6 +872,18 @@ $('wakewords').addEventListener('click', async e => {
   } else if (act === 'eval') {
     await api(`/api/wakewords/${name}/evaluate`, {method: 'POST',
       headers: {'Content-Type': 'application/json'}, body: '{}'});
+  } else if (act === 'save-mix') {
+    const weights = polarity => Object.fromEntries(['custom', 'piper', 'google'].map(source => {
+      const raw = card.querySelector(`[data-mix-${polarity}-${source}]`).value.trim();
+      return [source, raw === '' ? null : Number(raw)];
+    }));
+    const result = await api(`/api/wakewords/${name}/training-mix`, {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({training_mix: {positive: weights('positive'), negative: weights('negative')}})});
+    const summary = ['positive', 'negative'].map(p =>
+      `${p}: ${Object.entries(result.resolved[p].draws).filter(([, n]) => n).map(([s, n]) => `${sourceLabel[s]} ${n}`).join(', ') || 'no clips'}`
+    ).join(' | ');
+    card.querySelector('[data-mix-result]').textContent = `Saved. Per build: ${summary}`;
   } else if (act === 'gtts') {
     const n = +card.querySelector('[data-gtts-samples]').value;
     const langs = card.querySelector('[data-gtts-languages]').value.trim();

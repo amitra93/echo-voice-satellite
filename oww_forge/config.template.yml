@@ -22,6 +22,18 @@ google_tts_voices: ""
 google_tts_samples_per_voice: 250
 google_tts_qps: 2
 
+# Optional source weights for the generated training view. Leave every value
+# null to train on each source in its natural file-count proportion.
+training_mix:
+  positive:
+    custom: null
+    piper: null
+    google: null
+  negative:
+    custom: null
+    piper: null
+    google: null
+
 # Synthetic positives: 20k minimum recommended, 100k+ is best.
 n_samples: @N_SAMPLES@
 n_samples_val: @N_SAMPLES_VAL@

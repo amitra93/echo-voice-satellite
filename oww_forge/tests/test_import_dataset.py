@@ -14,6 +14,7 @@ import sys
 import tempfile
 import unittest
 import zipfile
+import wave
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parents[1]))
@@ -113,6 +114,44 @@ class ImportDatasetTests(unittest.TestCase):
         zpath.write_bytes(_make_zip(1, 0))
         with self.assertRaises(FileNotFoundError):
             forge.import_labeled_dataset("nope", zpath)
+
+    def test_source_inventory_counts_and_caches_wav_duration(self):
+        for directory, name in (
+            ("positive_train", "custom_room.wav"),
+            ("positive_train", "google_en-US_voice.wav"),
+            ("negative_test", "piper_adversarial.wav"),
+        ):
+            path = self._base / directory / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with wave.open(str(path), "wb") as wav:
+                wav.setnchannels(1)
+                wav.setsampwidth(2)
+                wav.setframerate(16000)
+                wav.writeframes(b"\0\0" * 16000)
+
+        inventory = forge.source_inventory(self._base)
+
+        self.assertEqual(inventory["positive"]["custom"]["train"]["count"], 1)
+        self.assertEqual(inventory["positive"]["google"]["train"]["seconds"], 1.0)
+        self.assertEqual(inventory["negative"]["piper"]["test"]["count"], 1)
+        self.assertTrue((self._base / forge.SOURCE_INVENTORY).exists())
+
+    def test_resolve_training_mix_keeps_polarities_independent(self):
+        inventory = {
+            polarity: {source: {"train": {"count": count}, "test": {"count": 0}}
+                       for source, count in counts.items()}
+            for polarity, counts in {
+                "positive": {"custom": 2, "piper": 8, "google": 0},
+                "negative": {"custom": 5, "piper": 5, "google": 0},
+            }.items()
+        }
+        positive = forge.resolve_training_mix(
+            inventory, "positive", {"custom": 70, "piper": 30, "google": 0})
+        negative = forge.resolve_training_mix(
+            inventory, "negative", {"custom": 20, "piper": 80, "google": 0})
+
+        self.assertEqual(positive["draws"], {"custom": 7, "piper": 3, "google": 0})
+        self.assertEqual(negative["draws"], {"custom": 2, "piper": 8, "google": 0})
 
 
 if __name__ == "__main__":

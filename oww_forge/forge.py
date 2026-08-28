@@ -24,6 +24,7 @@ import itertools
 import json
 import os
 import re
+import random
 import shutil
 import subprocess
 import sys
@@ -976,6 +977,158 @@ FEATURE_FILES = ("positive_features_train.npy", "positive_features_test.npy",
                  "negative_features_train.npy", "negative_features_test.npy")
 FEATURE_MANIFEST = ".feature_sources.json"
 CLIP_DIRS = ("positive_train", "positive_test", "negative_train", "negative_test")
+SOURCE_NAMES = ("custom", "piper", "google")
+SOURCE_INVENTORY = ".source_inventory.json"
+_SOURCE_INVENTORY_MEMORY: dict[str, tuple[tuple[int, ...], dict]] = {}
+
+
+def clip_source(path: Path) -> str:
+    """Classify existing flat-layout clips without changing their storage."""
+    if path.name.startswith(("custom_", "user_")):
+        return "custom"
+    if path.name.startswith("google_"):
+        return "google"
+    return "piper"
+
+
+def _wav_duration_seconds(path: Path) -> float:
+    import wave
+
+    try:
+        with wave.open(str(path), "rb") as wav:
+            return wav.getnframes() / wav.getframerate()
+    except (OSError, EOFError, wave.Error):
+        return 0.0
+
+
+def source_inventory(work_dir: Path) -> dict:
+    """Return source/polarity/split counts and durations, caching WAV headers."""
+    work_dir.mkdir(parents=True, exist_ok=True)
+    directory_paths = [work_dir / f"{polarity}_{split}"
+                       for polarity in ("positive", "negative")
+                       for split in ("train", "test")]
+    directory_mtimes = tuple(
+        path.stat().st_mtime_ns if path.is_dir() else 0
+        for path in directory_paths
+    )
+    memory_key = str(work_dir.resolve())
+    cached_memory = _SOURCE_INVENTORY_MEMORY.get(memory_key)
+    if cached_memory and cached_memory[0] == directory_mtimes:
+        return cached_memory[1]
+    cache_path = work_dir / SOURCE_INVENTORY
+    try:
+        cache = json.loads(cache_path.read_text())
+    except (OSError, ValueError):
+        cache = {"files": {}}
+    if (cache.get("directories") == list(directory_mtimes)
+            and isinstance(cache.get("inventory"), dict)):
+        inventory = cache["inventory"]
+        _SOURCE_INVENTORY_MEMORY[memory_key] = (directory_mtimes, inventory)
+        return inventory
+    files = cache.get("files", {})
+    current = {}
+    inventory = {
+        polarity: {source: {"train": {"count": 0, "seconds": 0.0},
+                             "test": {"count": 0, "seconds": 0.0}}
+                   for source in SOURCE_NAMES}
+        for polarity in ("positive", "negative")
+    }
+    for polarity in ("positive", "negative"):
+        for split in ("train", "test"):
+            directory = work_dir / f"{polarity}_{split}"
+            for path in sorted(directory.glob("*.wav")) if directory.exists() else ():
+                stat = path.stat()
+                key = f"{polarity}_{split}/{path.name}"
+                prior = files.get(key, {})
+                if prior.get("size") == stat.st_size and prior.get("mtime_ns") == stat.st_mtime_ns:
+                    seconds = prior.get("seconds", 0.0)
+                else:
+                    seconds = _wav_duration_seconds(path)
+                current[key] = {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns,
+                                "seconds": seconds}
+                bucket = inventory[polarity][clip_source(path)][split]
+                bucket["count"] += 1
+                bucket["seconds"] += seconds
+    for polarity in inventory.values():
+        for source in polarity.values():
+            source["total"] = {
+                "count": source["train"]["count"] + source["test"]["count"],
+                "seconds": source["train"]["seconds"] + source["test"]["seconds"],
+            }
+    part = cache_path.with_name(cache_path.name + ".part")
+    part.write_text(json.dumps({"version": 2, "directories": list(directory_mtimes),
+                                "files": current, "inventory": inventory},
+                               sort_keys=True))
+    part.replace(cache_path)
+    _SOURCE_INVENTORY_MEMORY[memory_key] = (directory_mtimes, inventory)
+    return inventory
+
+
+def resolve_training_mix(inventory: dict, polarity: str, requested: dict | None) -> dict:
+    """Resolve a source mix into deterministic train draw counts."""
+    available = {source: inventory[polarity][source]["train"]["count"]
+                 for source in SOURCE_NAMES}
+    total = sum(available.values())
+    if not total:
+        return {"natural": True, "draws": {source: 0 for source in SOURCE_NAMES}}
+    requested = requested or {}
+    specified = {source: requested.get(source) for source in SOURCE_NAMES}
+    if all(value is None for value in specified.values()):
+        return {"natural": True, "draws": available}
+    if any(not isinstance(value, (int, float)) for value in specified.values()):
+        raise ValueError(f"{polarity} mix must specify all source weights or leave all blank")
+    if any(value < 0 for value in specified.values()) or sum(specified.values()) != 100:
+        raise ValueError(f"{polarity} mix weights must be non-negative and total 100")
+    if any(specified[source] and not available[source] for source in SOURCE_NAMES):
+        raise ValueError(f"{polarity} mix assigns weight to an unavailable source")
+    draws = {source: int(total * specified[source] // 100) for source in SOURCE_NAMES}
+    remainder = total - sum(draws.values())
+    for source in sorted(SOURCE_NAMES, key=lambda item: (-specified[item], item))[:remainder]:
+        draws[source] += 1
+    return {"natural": False, "draws": draws}
+
+
+def _materialize_mix_view(work_dir: Path, config: dict) -> tuple[Path, dict]:
+    """Create an upstream-compatible weighted clip workspace without mutating sources."""
+    import yaml
+
+    inventory = source_inventory(work_dir)
+    staging = work_dir / ".mix_staging"
+    shutil.rmtree(staging, ignore_errors=True)
+    stage_work = staging / config["model_name"]
+    resolved = {}
+    seed = config.get("training_mix_seed", 20260828)
+    for polarity in ("positive", "negative"):
+        mix = resolve_training_mix(inventory, polarity, (config.get("training_mix") or {}).get(polarity))
+        resolved[polarity] = mix
+        for split in ("train", "test"):
+            destination = stage_work / f"{polarity}_{split}"
+            destination.mkdir(parents=True, exist_ok=True)
+            by_source = {source: sorted((work_dir / f"{polarity}_{split}").glob("*.wav"))
+                         for source in SOURCE_NAMES}
+            for source, paths in by_source.items():
+                if split == "test":
+                    chosen = paths
+                else:
+                    draws = mix["draws"][source]
+                    rng = random.Random(f"{seed}:{polarity}:{source}")
+                    shuffled = paths[:]
+                    rng.shuffle(shuffled)
+                    chosen = [shuffled[index % len(shuffled)] for index in range(draws)] if shuffled else []
+                for index, src in enumerate(chosen):
+                    dst = destination / f"mix_{source}_{index:06d}_{src.name}"
+                    os.link(src, dst)
+    staged_config = dict(config)
+    staged_config["output_dir"] = str(staging)
+    # A train-only restart consumes the canonical feature arrays generated by
+    # an earlier augment run. Augment will overwrite these staged copies.
+    for filename in FEATURE_FILES:
+        source = work_dir / filename
+        if source.exists():
+            shutil.copy2(source, stage_work / filename)
+    staged_config_path = staging / "training_config.yml"
+    staged_config_path.write_text(yaml.safe_dump(staged_config, sort_keys=False))
+    return staged_config_path, resolved
 
 
 def feature_sources_manifest(work_dir: Path, config: dict) -> dict:
@@ -994,6 +1147,8 @@ def feature_sources_manifest(work_dir: Path, config: dict) -> dict:
             "use_musan_background": bool(config.get("use_musan_background")),
             "use_slr28_augmentation": bool(config.get("use_slr28_augmentation")),
         },
+        "training_mix": config.get("training_mix"),
+        "training_mix_seed": config.get("training_mix_seed", 20260828),
     }
 
 
@@ -1084,6 +1239,8 @@ def cmd_build(args) -> None:
     if args.only_step:
         steps = [args.only_step]
 
+    staged_config_path = None
+    resolved_mix = None
     for step in steps:
         log(f"=== step: {step} ===")
         # Generate can add Piper clips, so inspect sources only after it runs.
@@ -1094,15 +1251,33 @@ def cmd_build(args) -> None:
             args.overwrite = True
         if step == "train" and features_stale(work_dir, config):
             sys.exit("training clips changed since feature generation; rerun from augment")
-        cmd = [sys.executable, TRAIN_PY, "--training_config", str(cfg_path), STEP_FLAGS[step]]
+        # Generation owns the canonical clip directories. Augment/train run in
+        # a disposable hard-linked view so source weights never alter the
+        # original files or the held-out source-specific test sets.
+        if step == "augment":
+            staged_config_path, resolved_mix = _materialize_mix_view(work_dir, config)
+            log("resolved training mix: " + json.dumps(resolved_mix, sort_keys=True))
+        training_config = cfg_path if step == "generate" else staged_config_path
+        if training_config is None:
+            staged_config_path, resolved_mix = _materialize_mix_view(work_dir, config)
+            training_config = staged_config_path
+        cmd = [sys.executable, TRAIN_PY, "--training_config", str(training_config), STEP_FLAGS[step]]
         if args.overwrite and step == "augment":
             cmd.append("--overwrite")
         subprocess.run(cmd, check=True)
         if step == "augment":
+            stage_work = Path(config["output_dir"]) / config["model_name"] / ".mix_staging" / config["model_name"]
+            for filename in FEATURE_FILES:
+                shutil.copy2(stage_work / filename, work_dir / filename)
             write_feature_manifest(work_dir, config)
 
     if "train" in steps:
-        src = WAKEWORDS / name / f"{name}.onnx"
+        src = (Path(config["output_dir"]) / config["model_name"] / ".mix_staging" /
+               f"{name}.onnx")
+        # Test doubles and older local wrappers can still write to the
+        # canonical output path. Real upstream runs use the staged path.
+        if not src.exists():
+            src = WAKEWORDS / name / f"{name}.onnx"
         if not src.exists():
             sys.exit(f"training finished but {src} was not produced — check the logs above")
         MODELS.mkdir(parents=True, exist_ok=True)
