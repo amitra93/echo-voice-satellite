@@ -2,7 +2,9 @@
 
 ## Status
 
-**Implemented with changes.** The controller connects directly to Music
+**Historical design, superseded by
+[`2026-08-27-device-sendspin-migration.md`](2026-08-27-device-sendspin-migration.md).**
+The controller connects directly to Music
 Assistant through Sendspin, and the device protocol includes scheduled music
 rendering. The HACS integration now has a media-player entity, rather than
 only Echo-specific status as originally proposed.
@@ -35,7 +37,7 @@ EchoMuse controller: one Sendspin client per eligible Echo
         |  EchoMuse frames 0x06 start / 0x07 PCM / 0x08 clear / 0x09 end
         v
 Echo device scheduled music renderer
-        |  local voice ducking, timestamp-paced ALSA output
+        |  local voice ducking, timestamp-paced OpenSL playback
         v
 Speaker
 

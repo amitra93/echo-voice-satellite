@@ -60,7 +60,7 @@ transport needs a custom WebSocket and frame codec.
 
 ```
 Echo Dot ──(existing /control + /data WS, UNCHANGED)──▶ Controller (audio hub)
-   ▲ plays 48 kHz TTS                                     │  wake word, beamform, AEC,
+   ▲ plays 48 kHz TTS                                     │  wake word,
    │ down existing 0x02 plane                             │  em_player, 24→48 upsample + EQ
    │                                                      │
    │                                       em_turn_engine.py  (NEW — turn state machine,

@@ -1452,4 +1452,20 @@ are **append-only and in ascending date order** — new work goes at the end.
   in `owwOnDevice=on`, while the controller keeps scoring for comparison.
   Music uses a 4-second device lead and ducks under voice on `audio_mix`
   firmware; BLE advertisements arrive through the HACS remote scanner. These
-  are current-state notes, not revisions of the historical entries.
+   are current-state notes, not revisions of the historical entries.
+
+ - 2026-08-28 (**audio architecture supersession note**): Amazon AFE through
+  paired system-UID OpenSL `VOICE_RECOGNITION` capture and OpenSL playback is
+  now the sole production device audio path. Earlier direct-ALSA, SpeexDSP,
+  local beamformer, raw gain, AGC, and related configuration entries remain
+  historical evidence only; they do not describe a supported fallback or
+  current tuning surface. Raw ALSA utilities remain for hardware diagnostics,
+  fixture capture, and AFE comparison, never production capture or playback.
+
+- 2026-08-28 (**audio-control and denoiser supersession note**): the historical
+  entries describing `ttsGainDb`, `bassShelfHz`, `subsonicHz`,
+  `limiterThreshold`, an output ceiling control, or DTLN `nsAsr` describe an
+  earlier implementation. These are not current configuration options or API
+  controls. Output protection and level handling are fixed in the production
+  path, and microphone processing remains owned by the Amazon AFE. The
+  current-facing documentation now lists only supported controls.

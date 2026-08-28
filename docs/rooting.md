@@ -477,16 +477,13 @@ adb shell "su -c 'cat /tmp/server.log'"
 ✅ SELinux permissive — survives reboots
 ✅ Magisk 17.3 — persistent root, survives reboots
 ✅ Alexa voice stack disabled
-✅ echoaudioservice retained (required for audio DSP init)
+✅ Android audio services retained (required AFE/HAL runtime owners)
 ✅ EchoMuse running as init service on boot (exec mode, no crash loop)
-✅ Dummy mixer service for EchoMuse init compatibility
-✅ Audio mixer configured at boot (tinymix in start_server.sh)
-✅ Mic gain equalised across all four ADCs — digital volume 88, MICPGA 40
 ✅ WiFi wake lock — FireOS cannot suspend wireless interface
 ✅ p2p0 (WiFi Direct) disabled — no mDNS interference
 ✅ Full LED ring RGB control (IS31FL3236A, 12 RGB LEDs)
-✅ Microphone streaming (9 channels, S24_3LE, 16kHz, card 0 device 24)
-✅ Speaker audio working (card 0, device 23, 48kHz stereo, period 2048 count 4)
+✅ Amazon AFE microphone streaming (processed mono 16kHz through OpenSL)
+✅ Speaker audio working through OpenSL, AudioFlinger, and Amazon HAL
 ✅ Button events (evdev)
 ✅ WiFi working
 ✅ Stable boot
@@ -496,23 +493,12 @@ adb shell "su -c 'cat /tmp/server.log'"
 ✅ Device approval flow — strict mode (pending) or auto mode
 ✅ Orange LED pulse while disconnected / searching for server
 ✅ Slow white LED pulse while pending controller approval
-✅ On-device energy VAD — VAD end signal (0x04) sent to controller on silence
-✅ Wake word detection on ch6 (centre/omni mic) — equidistant, no directional bias
+✅ Amazon AFE production audio — paired system-UID OpenSL `VOICE_RECOGNITION`
+capture and playback; Amazon's HAL owns microphone processing
 ✅ OpenWakeWord — "Hey Jarvis" detected server-side (threshold 0.3)
-✅ Mic channel mapping confirmed empirically (tone injection, analyse_capture.py)
-✅ Directional mic selection — best perimeter mic locked at voice turn start
-✅ Direction estimation — onset ratio (fast/slow EWMA) robust to background noise (TV etc.)
-✅ LED direction overlay — light green segment on listening ring during voice turn only
 ✅ LED mapping calibrated — LED 0 at 240°, confirmed from volume sweep
-✅ Audio processing pipeline — speexdsp AEC (v2.7.3) + AGC; device RNNoise removed 2026-07-12, NS is controller-side DTLN on the STT stream (`nsAsr` flag)
-✅ AGC applies to lock_mic turns only since v2.7.0 (wake stream is permanently AGC-free)
-✅ Ungated continuous wake stream (v2.7.0) — no VAD gate/AGC/preroll on the always-on stream; OWW scores uninterrupted audio; ~32KB/s per device
-✅ Mic stream leak fixed (v2.7.0) — ownership check in streamMic exit; stop/start pairs can no longer leak a concurrent duplicate stream (historical "wake degrades over days, reboot fixes it" root cause)
+✅ Continuous processed wake stream — OWW scores uninterrupted AFE capture
 ✅ Per-room noise floor tracking (v2.7.0, controller) — measurement-only asymmetric EWMA; drives the SNR-relative 5s no-speech cutoff (wake-then-silence closes quietly again)
-✅ Mid-stream beam lock (v2.7.0) — beam_lock/beam_unlock control messages; wake turns get perimeter mic selection without a stream restart
-✅ Beamformer lock-back selection (v2.7.2) — Lock() scores directions over a ~2s energy-history ring covering the wake word, not the decayed present (see pipeline state table)
-✅ Acoustic echo cancellation (v2.7.3, working since v2.7.7, convergence holds since v2.7.8, default OFF) — speexdsp canceller on the whole mic path; reference tapped at the speaker ALSA write. Keep aecDelayMs at 0 (measured; higher values are non-causal — see v2.7.7). Converges to ~14dB per response and *stays* converged across turns since v2.7.8 (governor trims no longer reset the filter); `[aec] att=` and `[mic] clock/stall` telemetry in the device log show live attenuation and capture health. Enable from the dashboard Microphones advanced section
-✅ 24-bit fixed mic gain (v2.7.1) — `micGainDb` (default +24dB) applied to the full 24-bit sample during S16 extraction; recovers the low byte the old truncation discarded (speech was ~3–20 LSB in 16-bit). Validated: STT empty-transcript rate went from 6/19 turns to 0/5, detection rms 0.0003 → 0.006–0.009, clipped=0
 ✅ PTY dashboard shell (v2.7.1) — device allocates a real pseudo-terminal (mksh prompt, line editing, top/vi, resize); dashboard terminal is xterm.js; programmatic sessions (OTA) keep the raw pipe
 ✅ /tmp/server.log size cap (v2.7.1) — trim loop in start_server.sh, bounded at ~5.5MB; VAD diag slowed to ~10min with prompt clip-count reporting
 ✅ State-aware landing page (v2.7.1) — / shows first-run setup (amber ring) or login (green ring) and redirects authenticated visitors to /dashboard; sessions in localStorage
@@ -522,8 +508,6 @@ adb shell "su -c 'cat /tmp/server.log'"
 ✅ Per-turn structured trace — [TURN] log line with full stage timing at turn end
 ✅ OWW near-miss visibility — scores > 0.05 logged at INFO (rate-limited 1/2s per device), persistent counter on dashboard status tab (v2.6.5)
 ✅ VAD threshold tunable down to 0.0001 (dashboard slider floor corrected)
-✅ Beamformer structural fix — smoothers always run, output by lock state not flag
-✅ AGC release frozen during silence — prevents noise floor amplification past VAD threshold
 ### Historical completion log
 
 The entries below are a chronological implementation record, not a current

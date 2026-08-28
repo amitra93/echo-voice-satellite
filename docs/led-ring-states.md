@@ -216,7 +216,7 @@ Mute is the reference implementation of principle 5, and its behaviour is
 |---|---|---|---|---|
 | C1 | `led_anim` listening (`solid`, `listening:true`) | any unsuppressed | Scene listening colour; enables direction overlay | [today] |
 | C2 | `led_anim` `spin`/`rotate` (thinking) | any unsuppressed | Spinner on device ticker, 80ms | [today] |
-| C3 | `led_anim` `meter` (playing) | any unsuppressed | Throbs with live speaker RMS at the ALSA write — the **voice plane only**, measured before the music mix (v2.10.0). The AEC far-end tap deliberately sees the mixed output, since that is what must be cancelled from the mic; the meter must not, or it throbs to a song nobody asked it to visualise | [today] |
+| C3 | `led_anim` `meter` (playing) | any unsuppressed | Throbs with live voice-plane RMS at the production renderer, measured before the music mix so it does not visualise a song rather than the response | [today] |
 | C4 | `led_anim` `off` | any unsuppressed | Ring black | [today] |
 | C5 | Any `led_anim` / `leds` | MUTED or VOL-DISPLAY | **Recorded into `baseLEDs`, not painted** | [today] |
 | C6 | Legacy `leds` frame | any unsuppressed | Atomically replaces any running animation (generation counter) | [today] |

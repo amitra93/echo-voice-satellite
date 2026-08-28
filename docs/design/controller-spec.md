@@ -281,8 +281,6 @@ Per-device config stored as JSON in `devices.config`. On first approval, populat
 
 ```json
 {
-  "adcDigitalGain": 100,
-  "adcMicpga": 60,
   "startupVolume": 85,
   "vadThreshold": 0.004,
   "vadSpeechMs": 80,
@@ -319,8 +317,6 @@ Sent immediately after `ack` on successful registration.
 ```json
 {
   "type": "config",
-  "adcDigitalGain": 100,
-  "adcMicpga": 60,
   "startupVolume": 85,
   "vadThreshold": 0.004,
   "vadSpeechMs": 80,
@@ -330,7 +326,8 @@ Sent immediately after `ack` on successful registration.
 }
 ```
 
-Go side applies config values to tinymix and internal thresholds on receipt.
+The device applies supported configuration values on receipt. Amazon AFE owns
+production microphone processing; raw ADC controls are not part of this schema.
 
 ### Controller → Device: `pending`
 

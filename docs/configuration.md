@@ -95,45 +95,15 @@ little speaker is boomy and dull by default.
 An extra presence bump for spoken responses. Try it if responses sound
 muffled from across the room.
 
-### Speaker protection
-Keeps bass the driver cannot deliver from muddying everything above it. Leave
-it on.
+### Fixed speaker protection
+The output path applies its protection and level handling internally. The
+subsonic filter, bass shaping, limiter behavior, and output ceiling are fixed
+parts of that path, not user settings or API controls. There is no separate
+speaker-protection switch to enable or tune.
 
-It sounds backwards, and it is the right answer for a speaker this small.
-Frequencies below about 115Hz still move the cone even though you cannot hear
-them, and that movement smears the midrange — which is what people usually
-describe as thin, boxy or "tin-can". Removing them makes the middle clearer,
-and on loud material slightly *louder*, because the limiter no longer has to
-hold everything down to contain bass peaks you were never going to hear.
-
-Quiet passages keep their low end. Only loud content is affected, which is why
-it is a guard rather than a filter.
-
-This one switch covers two stages: the bass guard described above, and a
-limiter that stops the equalizer distorting what it boosts. Turning any EQ
-band up can push the audio past the maximum the hardware can represent, and
-without a limiter that gets clipped — measured at nearly 5% of samples on an
-ordinary response with a modest bass boost, audible as harshness or crackle,
-and it only ever happened to people who touched the EQ to improve their sound.
-
-**It used to be five controls and now it is one, deliberately.** None of the
-five could be judged by ear. The two stages cancel out each other's most
-obvious effect — at a flat EQ, switching the guard on is a 7.7dB change in
-overall level, and with every band at +12dB it is 0.2dB, because the limiter
-simply gives back what the guard takes. The depth slider moved the overall
-level by 0.14dB across its entire range. Controls whose effect ranges from
-"large" to "nothing" depending on where the others sit are not a tuning
-surface; they are a way to conclude the feature is broken, which is what kept
-happening.
-
-The individual values still exist and still apply — if you had tuned the
-ceiling, release or depth, your settings are unchanged. They are reachable
-through the API for anyone who wants them, just not on the dashboard.
-
-The crossover frequency and the shape of the curve come from measurements of
-Amazon's own firmware on this same speaker, so they are not guesses. Our
-default depth is gentler than Amazon's, because theirs sits in front of an
-equalizer curve we have not yet measured — see issue #247.
+Use the EQ presets and faders above for supported tone changes. If a response
+sounds too loud or too quiet, use the device volume or Home Assistant's volume
+control; there is no response-gain control.
 
 ### Duck depth
 How far music drops while the assistant is talking over it. Music **keeps
@@ -269,9 +239,8 @@ spoke, move toward Precise.
 ### Barge-in
 Lets the wake word **interrupt the assistant mid-turn** — say the wake word
 while it is reading you a paragraph (or still thinking about your last
-question) and it stops and listens. **Turn on Echo cancel (AEC) first**:
-barge-in works by leaving the microphones live while the device speaks, and
-AEC is what stops it hearing itself.
+question) and it stops and listens. The paired Amazon AFE capture/playback
+route handles the device-side audio processing needed while playback is live.
 
 The **barge threshold** is the wake confidence required during playback, and
 counter-intuitively it sits *lower* than the normal wake threshold. The
@@ -287,8 +256,7 @@ like a wake word. Two consecutive detections are now required as well, which
 is what makes a single stray frame harmless.
 
 If a response ever cuts itself off, raise this. If interrupting stops working,
-lower it — but check whether AEC is on first, since that is the more common
-cause.
+lower it and inspect the device's AFE health/status first.
 
 (During the silent *thinking* pause the normal wake sensitivity applies
 instead — nothing is playing, so the low threshold is not needed there.)
@@ -302,12 +270,6 @@ command that followed was never picked up, so you had to wait and ask again.
 **Interrupting cannot be taken back.** If you say the wake word and then stay
 quiet, the original answer is gone rather than resumed — Home Assistant has no
 way to restart a reply it has already abandoned. The turn just ends quietly.
-
-### Speex denoise
-Runs a noise cleaner on the audio *only for wake-word scoring* (your actual
-commands are untouched). Worth trying in rooms with constant background
-noise (TV, air-con) if wake detection is unreliable there. Off by default —
-it's a "try it and compare" option.
 
 ### Wake word detection
 Who decides you said the wake word. Three settings:
@@ -382,83 +344,34 @@ Three things to know before leaving Controller:
 
 ## 03 — Microphones
 
-How your voice gets captured. These settings were tuned carefully — the
-presets are the only part most people should touch.
+Amazon AFE owns microphone-array selection, echo cancellation, and hardware
+gain. EchoMuse receives its processed mono stream; there is no raw ALSA or
+selectable microphone backend.
 
-### Pickup presets (Omni / Front / Rear)
-The Dot has 7 microphones. During a command, it can favour the mic closest
-to your voice:
+### Available controls
 
-- **Omni** — use the centre mic for everything. The safe choice; also the
-  fallback if directional pickup ever misbehaves.
-- **Front / Rear** — permanently favour one side. For Dots against a wall or
-  next to a TV: point the pickup *away* from the noise.
-- With directional pickup on and no fixed direction, the device picks the
-  mic automatically at each wake — see the pipeline doc's "lock-back"
-  section.
+**AFE mic gain (dB)** — fixed digital gain applied after AFE processing and
+before VAD, wake-word scoring, recordings, and transmission to the controller.
+Default **0dB**. Raise it only when recordings confirm speech is too quiet;
+saturated samples are counted in device diagnostics.
 
-### Advanced (inside the Microphones section)
-
-**MICPGA / Digital gain** — hardware amplifier levels inside the Dot's audio
-chips, matched to Amazon's own factory values. *Leave these alone* unless
-you're deep-diving; wrong values can distort every mic at once.
-
-**Mic gain (dB)** — the software gain applied to the raw 24-bit microphone
-signal before anything else hears it. Default **24dB**, chosen from real
-measurements (the Dot's raw capture is extremely quiet — without this boost,
-speech recognition regularly failed). Raise only if a device in a very large
-room still tests quiet; the device reports "clipped" samples in its log if
-you've gone too far. Lower toward 0 if you ever see clipping.
-
-**Beam angle / Beamforming** — the raw controls behind the pickup presets.
-Beam angle `-1` means "choose automatically at each wake"; any other number
-fixes the pickup direction in degrees (0 = the side with the volume-up
-button, clockwise). The presets set both of these for you.
-
-**Noise suppression** — cleans the audio sent to speech-to-text (and only
-that — wake-word listening is untouched). It uses a small neural denoiser
-(DTLN) running on the controller, so there's no load on the Dot. Helps most
-with *steady* noise — fans, air-con, appliance hum — in rooms where
-transcripts come back garbled. It does not remove other people talking or
-the TV; pointing the beamformer away from them is the tool for that. Off by
-default — turn it on per device and compare transcripts.
-
-Suppression is limited to 20 dB, so a passage the denoiser judges to be noise
-is pushed well down rather than removed outright. Before that limit existed it
-could silence quiet speech completely — a word or two vanishing mid-sentence
-rather than sounding muffled.
-
-**Echo cancel (AEC)** — teaches the mics to *subtract the Dot's own voice*
-from what they hear. Benefits: the device can hear you properly during and
-right after its own responses (follow-up questions work much better), its
-own speech can't confuse the listening logic, and it's what makes barge-in
-possible. Off by default; turn it on per device and check the `[aec] att=`
-lines in the device log show attenuation climbing during a response. Two
-tuning knobs:
-
-- **AEC delay** — alignment between what was played and what the mics
-  heard. **Leave it at 0** — that's the measured correct value for this
-  hardware (the mic pipeline's own buffering absorbs the speaker latency).
-  Raising it can silently disable cancellation entirely.
-- **AEC tail** — how much room echo/reverberation the canceller models.
-  Default 300ms; raise toward 500 in big empty-sounding rooms.
+Echo cancellation and beam selection are mandatory Amazon AFE processing, not
+EchoMuse settings. Barge-in always uses that AFE capture path.
 
 **Save utterances** — keeps the audio of recent voice turns so you can
 *listen* to what was sent for transcription. The **Activity** tab then shows
 a ▶ (play here) and a ⤓ (download the WAV) on every turn that has a
 recording.
 
-What's saved is the audio **exactly as speech-to-text received it** — so if
-**Noise suppression** is on, you're hearing the cleaned-up version, not the
-raw microphone. That's deliberate: when a transcript comes back wrong, the
-only recording that can explain it is the one the recogniser actually heard.
+What's saved is the audio **exactly as speech-to-text received it**. When a
+transcript comes back wrong, the recording is the audio the recogniser actually
+heard.
 
 This is the honest way to answer "is my microphone any good?". Without it
 you're guessing from a garbled transcript, which can't tell you whether the
-room was noisy, the gain was too low, or the denoiser chewed a word. Thirty
-seconds of listening usually settles it — and it's the only sensible way to
-A/B **Mic gain**, the pickup presets, or **Noise suppression**, since you can
-compare the same phrase before and after.
+room was noisy or the gain was too low. Thirty seconds of listening usually
+settles it — and lets you compare the same phrase after changing **AFE mic
+gain**.
 
 **Off by default, and worth thinking about before switching on.** This is the
 only setting that stores recognisable speech on the controller. What's kept:
@@ -579,20 +492,13 @@ currently measured when the taps reach the controller rather than on the
 device. On a busy or distant device you may need more. Zero disables
 grouping, and a tap fires `single` immediately.
 
-### Turn processing
-
-**Auto gain (AGC)** — automatically levels your voice volume on button
-turns, so whispering and shouting come out similar. Harmless here; it's
-deliberately never applied to wake-word listening (automatic gain drifting
-with room noise was the root cause of a "stops responding after a few days"
-bug, and it stays banished from that path).
-
 ### Speech gate
 
 Decides when a button-press utterance starts and stops:
 
-- **Threshold** — how loud counts as "speech". Measured in pre-gain units
-  (the mic gain doesn't change what this number means). The default 0.001
+- **Threshold** — how loud counts as "speech" in the processed AFE stream.
+  AFE mic gain is accounted for internally, so changing it does not require
+  retuning this threshold. The default 0.001
   was validated by measurement; raise slightly (0.003–0.005) only in
   genuinely noisy rooms.
 - **Speech gate (ms)** — how much continuous speech opens the gate. Higher =

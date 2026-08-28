@@ -114,14 +114,12 @@ crossing it:
 Late or duplicate events from older generations are ignored by both device and
 controller.
 
-### AEC Requirement
+### AFE Requirement
 
 The stop model must hear speech over TTS without reacting to the device's own
-voice. AEC is therefore mandatory while stop detection is armed during
-playback.
+voice. The paired Amazon AFE route is therefore mandatory while stop detection
+is armed during playback.
 
-- Config validation refuses an armed playback stop state when `aecEnabled` is
-  false.
 - The device refuses an invalid `stop_arm` defensively.
 - Stop-specific evaluation must include TTS-overlap and residual-echo tests.
 
@@ -547,7 +545,7 @@ for diagnostics, never substituted into the training set.
 
 ### D11. Self-stop prevention
 
-**Decision: AEC-informed stop training and calibration.** Add stop-specific
+**Decision: AFE-informed stop training and calibration.** Add stop-specific
 capture upload and configuration support analogous to wake activation and
 near-miss captures. The controller collects post-AEC examples of successful
 stops, missed stops, false stops, and playback residuals; Forge uses exported
@@ -555,10 +553,10 @@ labelled data to tune the model and its threshold. The exact runtime AEC-health
 gate remains open because D12 selected enabled-AEC readiness rather than a
 measured convergence gate.
 
-### D12. AEC readiness policy
+### D12. AFE readiness policy
 
-**Decision: enabled is sufficient.** Playback stop arming requires
-`aecEnabled`, but does not wait for a separate measured convergence signal.
+**Decision: paired AFE is sufficient.** Playback stop arming requires the
+active paired AFE route, but does not wait for a separate measured health signal.
 
 ### D13. Threshold policy
 
@@ -634,11 +632,11 @@ cost.
 
 ### D11/D12. Final AEC runtime policy
 
-**Decision: enabled AEC is the sole runtime gate.** Stop training/capture
-workflow must collect post-AEC playback residuals and false stops for later
+**Decision: active AFE is the sole runtime gate.** Stop training/capture
+workflow must collect post-AFE playback residuals and false stops for later
 model and threshold tuning, but the device does not delay arming on a measured
-AEC convergence/health signal. `aecEnabled` remains mandatory for playback
-arming.
+AFE convergence/health signal. The active paired AFE route remains mandatory
+for playback arming.
 
 ### D1. One-syllable model viability
 
@@ -735,10 +733,10 @@ arming.
 - **C. Playback content suppression:** suppress stop scoring while outbound TTS
   contains the word `stop`.
 
-### D12. AEC readiness policy
+### D12. AFE readiness policy
 
-- **A. Enabled is sufficient:** require `aecEnabled`, accept early-turn risk.
-- **B. Measured health:** require a converged/healthy AEC signal before arming.
+- **A. Active route is sufficient:** require paired AFE, accept early-turn risk.
+- **B. Measured health:** require a healthy AFE signal before arming.
 - **C. Delay arming:** wait a fixed settling period after playback begins.
 
 ### D13. Threshold policy

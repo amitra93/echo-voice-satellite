@@ -24,7 +24,7 @@ through the Dot's speaker.
   continues measuring agreement. Off is the default; see
   [docs/configuration.md](docs/configuration.md).
 - **Barge-in** — say the wake word over the assistant's own reply to cut it
-  off, backed by an on-device echo canceller (vendored speexdsp).
+  off. Capture and playback stay on Amazon's paired AFE audio route.
 - **Multi-room done right** — one utterance in earshot of two Echos gets
   **one** response: the first detector claims the turn and peers in the
   suppression window stand down.
@@ -47,11 +47,11 @@ through the Dot's speaker.
 - **Headphones** — plug into the 3.5mm jack and audio moves there, unplug and
   it comes back, no reboot needed.
 - **Fleet dashboard** — provisioning wizard, per-device or global config
-  pushed live (EQ, LED ring scenes, mic tuning), A/B-slot OTA updates with
+  pushed live (EQ and LED ring scenes), A/B-slot OTA updates with
   automatic fallback, root shell, logs, and per-turn activity analytics
   (wake scores, near-misses, latencies, playback underruns). Optionally keep
   the last few turns' mic audio to play back — the only honest way to judge
-  capture quality and tune gain by ear rather than by inference.
+  capture quality from the active AFE path rather than by inference.
 - **Encrypted device link** — TLS with a controller-generated CA plus
   per-device tokens; the wizard installs credentials automatically.
 - **No phone-home** — there is no telemetry, no analytics and no install
@@ -62,10 +62,9 @@ through the Dot's speaker.
   a `git clone`, and how often it happens is yours to set
   ([docs/configuration.md](docs/configuration.md#what-leaves-your-network)).
 
-The 7-mic array, LED ring, buttons, and speaker are all driven natively:
-onset-ratio beamforming, +24dB pre-truncation mic gain (the stock capture
-path throws away most of the signal), device-local LED animations, mute
-that's genuinely hardware (ADC off, red ring, button LED).
+The 7-mic array and speaker use Amazon's Audio Front End through paired OpenSL
+capture and playback. EchoMuse retains device-local LED animations and genuine
+hardware mute (capture blocked, red ring, button LED).
 
 ## How it works
 
@@ -73,9 +72,9 @@ that's genuinely hardware (ADC off, red ring, button LED).
 Echo Dot (Go firmware) ⇄ WebSocket/TLS ⇄ Controller (Python) ⇄ HACS integration ⇄ Home Assistant
 ```
 
-The device is deliberately dumb: it captures, beamforms, and streams audio
-continuously, and plays what it's sent. Everything that can drift or
-misjudge — wake scoring, endpointing, noise suppression, EQ, arbitration —
+The device captures processed AFE audio and streams it continuously, then plays
+what it is sent through the paired AFE output route. Everything that can drift
+or misjudge — wake scoring, endpointing, EQ, arbitration —
 lives on the controller where it can be observed and updated fleet-wide.
 (The opt-in exception is on-device wake-word scoring: shadow mode compares
 local and controller detections, while active mode can initiate a turn when
@@ -218,11 +217,10 @@ producing them.
 ## Acknowledgements
 
 - [EchoGo](https://github.com/Binozo/EchoGo) — Binozo
-- [GoTinyAlsa](https://github.com/Binozo/GoTinyAlsa) — Binozo
+- [GoTinyAlsa](https://github.com/Binozo/GoTinyAlsa) — Binozo, retained for
+  hardware diagnostics only
 - [amonet-biscuit](https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-2nd-gen-2016-biscuit.4761416/) — R0rt1z2
 - [EchoCLI](https://github.com/Dragon863/EchoCLI) — Dragon863
-- [SpeexDSP](https://gitlab.xiph.org/xiph/speexdsp) — Xiph.Org Foundation (BSD-3-Clause) — vendored echo canceller
-- [DTLN](https://github.com/breizhn/DTLN) — Nils L. Westhausen (MIT) — controller-side noise suppression models
 - [openWakeWord](https://github.com/dscripka/openWakeWord) — David Scripka — wake word models and training pipeline
 
 ---

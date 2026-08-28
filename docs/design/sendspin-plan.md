@@ -1,6 +1,8 @@
 # Sendspin Integration Plan
 
-**Status:** Implemented with changes. Sendspin transport, device `music_sync`,
+**Status:** Historical design, superseded by
+[`2026-08-27-device-sendspin-migration.md`](2026-08-27-device-sendspin-migration.md).
+Sendspin transport, device `music_sync`,
 and the HACS media player shipped. The original limitation to group controls
 and metadata is obsolete: the media player also supports media commands.
 
@@ -31,7 +33,7 @@ EchoMuse timed music protocol
 Device scheduled renderer
         | voice ducking + music timeline
         v
-ALSA
+OpenSL playback
 ```
 
 The existing `0x04` music transport is not sufficient for synchronized playback. Sending ordinary PCM to multiple devices concurrently will not synchronize starts or prevent long-term clock drift.
@@ -99,11 +101,11 @@ Sendspin server timestamp
 
 ### 5. Device Renderer
 
-- Add a scheduled music buffer integrated with the ALSA write path rather than the independently primed legacy music queue.
+- Add a scheduled music buffer integrated with the production renderer rather than the independently primed legacy music queue.
 - Hold silence until the first target timestamp.
 - Trim late prefixes instead of playing late audio.
 - Clear immediately on stream clear, disconnect, or server replacement.
-- Track predicted output time at every ALSA period.
+- Track predicted output time from the measured OpenSL presentation clock.
 - Correct long-term clock drift with small, inaudible frame insertion/deletion or an equivalent bounded ASRC strategy.
 - Keep steady-state correction within Sendspin's `+/-0.5%` speed limit.
 - Retain local ducking without shifting the shared music timeline.

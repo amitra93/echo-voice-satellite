@@ -33,7 +33,7 @@ middleman for Sendspin.
 | MA discovery (1A) | how device learns MA address | **Controller-push** via `ConfigMessage.sendspinServer`; device caches last-known. (mDNS `_sendspin-server._tcp` fallback later.) |
 | Mute (2A) | who owns mute | **MA owns music mute** (player entity → Sendspin mute → device music-plane gain only). **Keep EchoMuse privacy-mute switch** (mic/hardware/red-ring, device-sovereign). |
 | Volume (3A) | authority | **Device is runtime authority**; controller persists (`startupVolume` from `volume_state`) + dashboard read-out; controller never pushes volume at runtime except its existing one-time boot seed. |
-| Sync clock (4B) | renderer clock | **ALSA `hw_ptr`** (±0.5ms, multi-room-ready), not `CLOCK_MONOTONIC`. |
+| Sync clock (4B) | renderer clock | **Measured OpenSL presentation clock**, not `CLOCK_MONOTONIC`. |
 | Encryption | Noise | MA 6.0.5 implements none; build plaintext-first with Noise as a **switchable layer** (later). No pairing needed (server has no approval path). |
 | Coverage | new code | **≥75%** (host tests). |
 
@@ -49,7 +49,7 @@ removal phases. Re-check: HA entity registry has a `music_assistant`-platform
 | Component | File | Coverage | Notes |
 |---|---|---|---|
 | 2-D Kalman time filter | `timefilter.go` | 100% | 1:1 port of aiosendspin `client/time_sync.py`; golden fixture `testdata/timefilter_fixture.json` generated from the exact Python. Maps server ts → device clock. |
-| ALSA `hw_ptr` playback clock (4B) | `playbackclock.go` | 98.6% | Parses `/proc/asound/card0/pcm23p/sub0/status` (real format captured); tracks measured rate (~47973 fps). |
+| OpenSL playback clock (4B) | `playbackclock.go` | 98.6% | Uses the active OpenSL player's measured completion/presentation timing. |
 | Wire protocol codec | `proto.go` | 94.1% | Envelope `{"payload":{…},"type":…}`; `client/hello`,`client/time`,`client/state`,`client/goodbye`; parse `server/hello`,`server/time`,`stream/start`(+`codec_header`),`stream/clear`/`end` role-targeting,`server/command`,`group/update`; binary audio frame `>Bq` (type 1B + int64 BE `timestamp_us`), AUDIO_CHUNK=4. |
 | Native client core | `client.go`, `manager.go` | package total 81.7% | Direct WS handshake, periodic time-sync, reconnect/backoff, stream lifecycle, PCM scheduling, and MA volume/music-mute commands. Deliberately not wired into firmware until output-chain parity passes. |
 | Decoder | `decoder.go` | package total 81.9% | Validates PCM or FLAC stream setup (including FLAC header presence) and decodes complete FLAC frames through `mewkiz/flac`; malformed or unsupported audio is rejected. |
@@ -84,10 +84,10 @@ Captured live from `aiosendspin` 6.0.5 in the controller container.
    - Handshake: send `client/hello`; receive `server/hello`.
    - **Time-sync loop:** periodic `client/time`; on `server/time` compute offset/max_error and `TimeFilter.Update`. Gate playback until `IsSynchronized()`.
    - Send initial `client/state` (volume/muted + lead/min_buffer/static_delay).
-   - Stream lifecycle: `stream/start`(player role) → build FLAC decoder from `codec_header` → binary `AUDIO_CHUNK`s (decode → PCM, convert `timestamp_us` via `TimeFilter.ComputeClientTime`, then to the hw_ptr-scheduled frame position) → feed `scheduled_music`; `stream/clear`/`stream/end` (player-role-targeted) → clear/end the renderer.
+    - Stream lifecycle: `stream/start`(player role) → build FLAC decoder from `codec_header` → binary `AUDIO_CHUNK`s (decode → PCM, convert `timestamp_us` via `TimeFilter.ComputeClientTime`, then to the OpenSL-clock-scheduled frame position) → feed `scheduled_music`; `stream/clear`/`stream/end` (player-role-targeted) → clear/end the renderer.
    - **Volume/mute wiring (2A/3A):** `server/command` volume/mute → device music-plane gain / hardware volume; **must not touch privacy mute**. Report changes back via `client/state` and to the controller via `volume_state` (persistence).
-   - Keep the clock behind an interface so `hw_ptr` (4B) is the impl and tests can inject a fake.
-3. **Renderer integration** — native chunks now feed the existing interpolated `scheduled_music` renderer, but its "now" still uses `deviceclock.NowUs()`. Integrate `PlaybackClock`/ALSA `hw_ptr` before multi-room claims. Keep device-side ducking + mixing (`silenceLoop` else-if) unchanged.
+    - Keep the clock behind an interface so the OpenSL presentation clock (4B) is the impl and tests can inject a fake.
+3. **Renderer integration** — native chunks now feed the existing interpolated `scheduled_music` renderer, but its "now" still uses `deviceclock.NowUs()`. Integrate the measured OpenSL presentation clock before multi-room claims. Keep device-side ducking + mixing unchanged.
 4. **Capability** — controller-side gate is ready, but firmware must not announce `sendspin_native` until output-chain parity and hardware verification pass. Controller forwarding remains active today.
 5. **Config** — implemented: `sendspinServer` rides `ConfigMessage`; add durable last-known endpoint storage before relying on controller-offline reconnects.
 6. **Output chain (option A)** — cherry-pick `device/internal/outchain/` + `bindings/speaker/outputchain.go` + `output_chain` capability from `wilbowes/sendspin-design`. **Regenerate `testdata/chain_fixture.bin` from OUR `em_eq`/`em_limiter`/`em_mbc`** (they differ from the branch's — incl. the ceiling work). Wire post-mix at `silenceLoop`. Controller stands down its chain only for `output_chain` devices, and only on announce (R2). No-click via dual-instance **linear** crossfade (their §8.3).
