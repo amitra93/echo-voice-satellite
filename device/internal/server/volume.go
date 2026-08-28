@@ -36,8 +36,7 @@ const (
 	// Do not raise this. The lost headroom cannot be bought back from
 	// Ext_Amp_Gain either — that control is inert on this board (measured
 	// 0.0dB of effect across its whole 6/12/18/24dB range, while still
-	// reading its new value back). "HP Driver Gain Volume" (ctl 62) is the
-	// stage that does work, if more output is ever wanted.
+	// reading its new value back).
 	volumeMax = 127
 
 	// volumeButtonFloor is the bottom of the band the PHYSICAL buttons
@@ -69,6 +68,7 @@ type volumeController struct {
 	displayActive  bool        // volume arc currently on the ring — see DisplayActive
 	isMuted        func() bool // set after construction to avoid circular dependency
 	onVolumeChange func(int)   // set after construction; called after every Set()
+	codecVolume    bool        // false when Android owns output attenuation
 	// onDisplayExpire, when set, replaces the default clear-to-black at the
 	// end of the display window: the server wires it to repaint the ring
 	// from its stored controller state, so a volume press mid-turn hands
@@ -101,12 +101,26 @@ func (vc *volumeController) SetOnVolumeChange(cb func(int)) {
 
 func newVolumeController(ledGetter func() led.Controller) *volumeController {
 	vc := &volumeController{
-		ledCtrl: ledGetter,
+		ledCtrl:     ledGetter,
+		codecVolume: true,
 	}
 	// Read initial volume from tinymix
 	vc.level = vc.readFromDevice()
 	log.Printf("Volume controller initialised at %d/%d", vc.level, volumeMax)
 	return vc
+}
+
+// UseAndroidVolume leaves the codec at unity and hands user attenuation to
+// AudioFlinger. It is used only by the Amazon AFE path; direct ALSA continues
+// to own ctl 61 itself.
+func (vc *volumeController) UseAndroidVolume() {
+	if err := exec.Command("tinymix", "-D", "0", "61",
+		fmt.Sprintf("%d", volumeMax), fmt.Sprintf("%d", volumeMax)).Run(); err != nil {
+		log.Printf("tinymix unity set failed: %v", err)
+	}
+	vc.mu.Lock()
+	vc.codecVolume = false
+	vc.mu.Unlock()
 }
 
 // readFromDevice reads current tinymix level. Returns the midpoint of the
@@ -154,12 +168,14 @@ func (vc *volumeController) Set(level int, showRing bool) {
 	// wiring completes (SubscribeToButton starts the evdev goroutines
 	// first).
 	cb := vc.onVolumeChange
+	codecVolume := vc.codecVolume
 	vc.mu.Unlock()
 
-	// Apply to ALSA
-	if err := exec.Command("tinymix", "-D", "0", "61",
-		fmt.Sprintf("%d", level), fmt.Sprintf("%d", level)).Run(); err != nil {
-		log.Printf("tinymix set failed: %v", err)
+	if codecVolume {
+		if err := exec.Command("tinymix", "-D", "0", "61",
+			fmt.Sprintf("%d", level), fmt.Sprintf("%d", level)).Run(); err != nil {
+			log.Printf("tinymix set failed: %v", err)
+		}
 	}
 
 	log.Printf("Volume set to %d/%d", level, volumeMax)

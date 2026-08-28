@@ -153,6 +153,99 @@ func TestClientRoutesPlayerStreamLifecycleAndCommands(t *testing.T) {
 	}
 }
 
+// A pause or stop must flush the scheduled queue immediately rather than let
+// it drain. MA has no player-level pause/stop command (see
+// TestSupportedCommandsExcludesUnrecognisedValues) — it signals this purely
+// through group/update{playback_state:"stopped"}, captured live following a
+// real pause. Without a flush the renderer plays out whatever MA had already
+// pushed ahead of real time (RequiredLeadMs) — routinely several seconds — so
+// the room keeps playing for that long after the user asked it to stop.
+func TestClientFlushesOnGroupStopped(t *testing.T) {
+	sink := &fakeSink{}
+	c := NewClient("id", "Study", sink)
+	if _, err := c.HandleText(serverMessage(t, TypeStreamStart, map[string]any{"player": map[string]any{
+		"codec": CodecPCM, "sample_rate": 48000, "channels": 1, "bit_depth": 16,
+	}})); err != nil {
+		t.Fatal(err)
+	}
+	if sink.clears != 0 {
+		t.Fatalf("clears=%d before any group/update", sink.clears)
+	}
+	if _, err := c.HandleText(serverMessage(t, TypeGroupUpdate, map[string]any{
+		"playback_state": "stopped", "group_id": "g1",
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if sink.clears != 1 {
+		t.Fatalf("stopped: clears=%d, want 1", sink.clears)
+	}
+	// A second stop is idempotent-shaped from the client's point of view —
+	// it flushes again, which is harmless (there is nothing left to lose).
+	if _, err := c.HandleText(serverMessage(t, TypeGroupUpdate, map[string]any{
+		"playback_state": "stopped", "group_id": "g1",
+	})); err != nil {
+		t.Fatal(err)
+	}
+	if sink.clears != 2 {
+		t.Fatalf("second stopped: clears=%d, want 2", sink.clears)
+	}
+}
+
+// A skip (or resume) must NOT flush — a genuine track transition is
+// stream/end immediately followed by stream/start with the group staying
+// "playing" throughout, captured live, with no group/update in between at
+// all. Any OTHER playback_state must also leave the buffer alone: "stopped"
+// is the only value this client acts on.
+func TestClientDoesNotFlushOnNonStoppedGroupStates(t *testing.T) {
+	sink := &fakeSink{}
+	c := NewClient("id", "Study", sink)
+	if _, err := c.HandleText(serverMessage(t, TypeStreamStart, map[string]any{"player": map[string]any{
+		"codec": CodecPCM, "sample_rate": 48000, "channels": 1, "bit_depth": 16,
+	}})); err != nil {
+		t.Fatal(err)
+	}
+	for _, state := range []string{"playing", "buffering", "paused_by_someone_else", ""} {
+		if _, err := c.HandleText(serverMessage(t, TypeGroupUpdate, map[string]any{
+			"playback_state": state, "group_id": "g1",
+		})); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if sink.clears != 0 {
+		t.Fatalf("clears=%d, want 0 — only \"stopped\" may flush", sink.clears)
+	}
+}
+
+// This is the regression the fix above replaced: MA's aiosendspin server
+// validates player_support.supported_commands against a fixed schema and
+// hard-rejects client/hello — closing the connection before it even sends
+// its own server/hello — for any value it does not recognise. "pause" and
+// "stop" were tried here and confirmed rejected against a real Music
+// Assistant instance (ghcr.io/music-assistant/server:stable): every
+// connection attempt failed with "Malformed client/hello ... has invalid
+// value", and the SAME payload with only volume/mute succeeded. That is a
+// materially different failure mode from an unsupported command simply being
+// ignored — it takes the whole player offline — so this is pinned rather
+// than left to be rediscovered by breaking it again.
+func TestSupportedCommandsExcludesUnrecognisedValues(t *testing.T) {
+	c := NewClient("id", "Study", &fakeSink{})
+	messages, err := c.InitialMessages()
+	if err != nil {
+		t.Fatal(err)
+	}
+	hello := decodePayload[clientHelloPayload](t, messages[0], TypeClientHello)
+	got := hello.PlayerSupport.SupportedCommands
+	want := []string{"volume", "mute"}
+	if len(got) != len(want) {
+		t.Fatalf("SupportedCommands = %v, want exactly %v", got, want)
+	}
+	for i, cmd := range want {
+		if got[i] != cmd {
+			t.Fatalf("SupportedCommands = %v, want exactly %v", got, want)
+		}
+	}
+}
+
 func TestClientInitialMessagesAdvertiseFormatsAndState(t *testing.T) {
 	c := NewClient("id", "Study", &fakeSink{})
 	c.NowUs = func() int64 { return 123 }

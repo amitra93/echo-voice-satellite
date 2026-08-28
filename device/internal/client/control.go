@@ -84,7 +84,6 @@ type StateCallback func()
 type ConfigAppliedCallback func(msg config.ConfigMessage)
 type VolumeSetCallback func(level int)
 type MuteToggleCallback func()
-type BeamLockCallback func(lock bool)
 
 // WifiChangeCallback receives a wifi_change request. It must return
 // quickly (the executor runs in its own goroutine) — the control
@@ -106,7 +105,6 @@ type ControlClient struct {
 	configAppliedCallback    ConfigAppliedCallback
 	volumeSetCallback        VolumeSetCallback
 	muteToggleCallback       MuteToggleCallback
-	beamLockCallback         BeamLockCallback
 	speakerFlushCallback     StateCallback
 	musicFlushCallback       StateCallback
 	duckCallback             func(on bool)
@@ -154,7 +152,6 @@ func (c *ControlClient) OnPending(cb StateCallback)               { c.pendingCal
 func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback) { c.configAppliedCallback = cb }
 func (c *ControlClient) OnVolumeSet(cb VolumeSetCallback)         { c.volumeSetCallback = cb }
 func (c *ControlClient) OnMuteToggle(cb MuteToggleCallback)       { c.muteToggleCallback = cb }
-func (c *ControlClient) OnBeamLock(cb BeamLockCallback)           { c.beamLockCallback = cb }
 func (c *ControlClient) OnSpeakerFlush(cb StateCallback)          { c.speakerFlushCallback = cb }
 func (c *ControlClient) OnMusicFlush(cb StateCallback)            { c.musicFlushCallback = cb }
 func (c *ControlClient) OnDuck(cb func(on bool))                  { c.duckCallback = cb }
@@ -455,20 +452,6 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		case "test_audio_cleanup":
 			if c.testAudioCleanupCallback != nil {
 				c.testAudioCleanupCallback()
-			}
-
-		// beam_lock/beam_unlock: controller-driven beamformer control for the
-		// continuous wake stream. Sent at wake detection (lock onto the
-		// speaker's perimeter mic mid-utterance, no stream restart) and at
-		// turn end (back to ch6 omni for wake listening).
-		case "beam_lock":
-			if c.beamLockCallback != nil {
-				c.beamLockCallback(true)
-			}
-
-		case "beam_unlock":
-			if c.beamLockCallback != nil {
-				c.beamLockCallback(false)
 			}
 
 		case "volume_set":
@@ -818,7 +801,7 @@ func capabilities() []string {
 	// capability the firmware has, rather than inferring one from a version
 	// string, is the rule the whole registration follows.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons", "test_audio",
-		"oww_shadow", "oww_trigger", "button_hold", "audio_mix", "music_sync", "sendspin_native", "output_chain"}
+		"oww_shadow", "oww_trigger", "button_hold", "audio_mix", "sendspin_native", "output_chain"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}

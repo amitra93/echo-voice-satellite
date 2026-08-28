@@ -27,6 +27,13 @@ func (m *Manager) Configure(url string) {
 		m.mu.Unlock()
 		return
 	}
+	// Diagnostic for #<pending>: a device was found with its Sendspin
+	// connection silently gone (no TCP socket to MA, no error logged, no
+	// process restart) after running healthily for ~11 minutes. This log
+	// answers the first question — was Configure ever called again with a
+	// changed URL, tearing the session down on purpose — which the absence
+	// of any other sendspin log line could not.
+	log.Printf("[sendspin] manager: reconfigure %q -> %q", m.url, url)
 	if m.cancel != nil {
 		m.cancel()
 		m.cancel = nil
@@ -47,11 +54,20 @@ func (m *Manager) Close() { m.Configure("") }
 func (m *Manager) run(ctx context.Context, url string) {
 	backoff := time.Second
 	for ctx.Err() == nil {
-		if err := m.client.Run(ctx, url); err != nil && ctx.Err() == nil {
+		// Unconditional, unlike the line below it: this fires on EVERY
+		// return from Run — including a nil error, which the loop would
+		// otherwise treat as silent, and including a cancelled ctx, which
+		// the existing log line deliberately suppresses. Between them they
+		// account for every way this loop could stop mattering without
+		// telling anyone.
+		err := m.client.Run(ctx, url)
+		log.Printf("[sendspin] manager: Run returned err=%v (ctx.Err=%v)", err, ctx.Err())
+		if err != nil && ctx.Err() == nil {
 			log.Printf("[sendspin] connection to %s ended: %v; retrying in %s", url, err, backoff)
 		}
 		select {
 		case <-ctx.Done():
+			log.Printf("[sendspin] manager: ctx cancelled, run loop exiting")
 			return
 		case <-time.After(backoff):
 		}
@@ -59,4 +75,5 @@ func (m *Manager) run(ctx context.Context, url string) {
 			backoff *= 2
 		}
 	}
+	log.Printf("[sendspin] manager: run loop exiting, ctx already done at top of loop")
 }

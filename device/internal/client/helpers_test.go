@@ -148,7 +148,6 @@ func TestControlClientStateAndNetworkHelpers(t *testing.T) {
 	c.OnConfigApplied(nil)
 	c.OnVolumeSet(nil)
 	c.OnMuteToggle(nil)
-	c.OnBeamLock(nil)
 	c.OnSpeakerFlush(nil)
 	c.OnMusicFlush(nil)
 	c.OnDuck(nil)
@@ -253,7 +252,7 @@ func TestControlConnectRejectsPendingAndUnexpectedHandshake(t *testing.T) {
 			defer server.Close()
 			addr := strings.TrimPrefix(server.URL, "http://")
 			c := NewControlClient("handshake-test", nil, nil, nil)
-			err := c.connect(context.Background(), &discovery.ServerInfo{Addr: addr, Host: strings.Split(addr, ":")[0]}, NewDataClient("handshake-test", nil, nil, nil))
+			err := c.connect(context.Background(), &discovery.ServerInfo{Addr: addr, Host: strings.Split(addr, ":")[0]}, NewDataClient("handshake-test", nil, nil))
 			if first == "pending" {
 				if err != errPending {
 					t.Fatalf("pending handshake error = %v, want errPending", err)
@@ -287,8 +286,8 @@ func TestMusicSyncDecodersRejectInvalidFrames(t *testing.T) {
 	}
 }
 
-func TestDataClientHelpersReplaceReadyAddressAndTrackBeamRequests(t *testing.T) {
-	d := NewDataClient("test", nil, nil, nil)
+func TestDataClientHelpersReplaceReadyAddress(t *testing.T) {
+	d := NewDataClient("test", nil, nil)
 	d.NotifyReady("first")
 	d.NotifyReady("second")
 	select {
@@ -300,15 +299,6 @@ func TestDataClientHelpersReplaceReadyAddressAndTrackBeamRequests(t *testing.T) 
 		t.Fatal("NotifyReady did not publish an address")
 	}
 
-	d.RequestBeamLock()
-	if got := d.beamReq; got != beamReqLock {
-		t.Fatalf("beam request after lock = %d, want %d", got, beamReqLock)
-	}
-	d.RequestBeamUnlock()
-	if got := d.beamReq; got != beamReqUnlock {
-		t.Fatalf("beam request after unlock = %d, want %d", got, beamReqUnlock)
-	}
-	d.OnDirectionChanged(func(float64) {})
 	d.SetShadowScorer(nil)
 	if d.ShadowScorer() != nil {
 		t.Fatal("nil shadow scorer was not retained")
@@ -316,10 +306,9 @@ func TestDataClientHelpersReplaceReadyAddressAndTrackBeamRequests(t *testing.T) 
 }
 
 func TestDataClientStartMicWithoutConnectionIsSafe(t *testing.T) {
-	d := NewDataClient("test", nil, nil, nil)
+	d := NewDataClient("test", nil, nil)
 	d.StartMic(false)
 	d.StopMic()
-	d.OnDirectionChanged(nil)
 	if d.micActive {
 		t.Fatal("StartMic activated without a connection")
 	}
@@ -361,7 +350,7 @@ func TestDataConnectDispatchesAudioPlanes(t *testing.T) {
 	defer server.Close()
 
 	s := &helperSpeaker{}
-	d := NewDataClient("data-test", nil, s, nil)
+	d := NewDataClient("data-test", nil, s)
 	addr := "ws://" + strings.TrimPrefix(server.URL, "http://")
 	if err := d.connect(context.Background(), addr); err == nil {
 		t.Fatal("data connect unexpectedly succeeded after server close")

@@ -202,6 +202,12 @@ func (s *Server) VolumeLevel() int {
 	return s.volume.Get()
 }
 
+// UseAndroidVolume switches output attenuation to AudioFlinger for the
+// Amazon AFE backend. Direct ALSA keeps controlling the codec volume.
+func (s *Server) UseAndroidVolume() {
+	s.volume.UseAndroidVolume()
+}
+
 // SetVolumeChangeCallback wires a callback invoked when volume changes.
 // The callback receives the new level (0–volumeMax).
 func (s *Server) SetVolumeChangeCallback(cb func(level int)) {
@@ -362,6 +368,7 @@ func clampAdd(v uint8, delta int) uint8 {
 //     overlap mute (mic stopped), but mute-terminates-turn (2026-07-10)
 //     means the cancelled turn's LED cleanup arrives after the red ring
 //     is up — it must not clear it. Unmute clears the ring explicitly.
+//
 // listeningHint is the controller's explicit "this frame is the listening
 // ring" flag (nil from pre-scene controllers). When absent, fall back to
 // the historical heuristic — a 12-LED all-green frame — which only works

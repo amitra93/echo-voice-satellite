@@ -173,7 +173,6 @@ func TestConnectDispatchesControlMessagesAndAppliesConfig(t *testing.T) {
 			map[string]interface{}{"type": "led_anim", "anim": map[string]interface{}{"pattern": "spin"}},
 			map[string]interface{}{"type": "mic_start", "lock_mic": true},
 			map[string]interface{}{"type": "mic_stop"},
-			map[string]interface{}{"type": "beam_lock"}, map[string]interface{}{"type": "beam_unlock"},
 			map[string]interface{}{"type": "volume_set", "level": 77}, map[string]interface{}{"type": "mute_toggle"},
 			map[string]interface{}{"type": "config", "vadThreshold": 0.123, "owwThreshold": 0.321},
 			map[string]interface{}{"type": "wifi_change", "ssid": "Home", "psk": "password"},
@@ -189,12 +188,11 @@ func TestConnectDispatchesControlMessagesAndAppliesConfig(t *testing.T) {
 	}))
 	defer server.Close()
 
-	type events struct{ leds, anim, start, stop, beam, volume, mute, wifi, commit, scan, speaker, music, test, cleanup, config int }
+	type events struct{ leds, anim, start, stop, volume, mute, wifi, commit, scan, speaker, music, test, cleanup, config int }
 	var e events
 	configSeen := make(chan config.ConfigMessage, 1)
 	c := NewControlClient("test-device", func([]led.Led, *bool) { e.leds++ }, func(bool) { e.start++ }, func() { e.stop++ })
 	c.OnLEDAnim(func(json.RawMessage) { e.anim++ })
-	c.OnBeamLock(func(bool) { e.beam++ })
 	c.OnVolumeSet(func(int) { e.volume++ })
 	c.OnMuteToggle(func() { e.mute++ })
 	c.OnWifiChange(func(string, string) { e.wifi++ })
@@ -207,7 +205,7 @@ func TestConnectDispatchesControlMessagesAndAppliesConfig(t *testing.T) {
 	c.OnTestAudioCleanup(func() { e.cleanup++ })
 	c.OnConfigApplied(func(m config.ConfigMessage) { configSeen <- m })
 	addr := strings.TrimPrefix(server.URL, "http://")
-	err := c.connect(context.Background(), &discovery.ServerInfo{Addr: addr, Host: strings.Split(addr, ":")[0]}, NewDataClient("test", nil, nil, nil))
+	err := c.connect(context.Background(), &discovery.ServerInfo{Addr: addr, Host: strings.Split(addr, ":")[0]}, NewDataClient("test", nil, nil))
 	if err == nil {
 		t.Fatal("connect unexpectedly succeeded after server close")
 	}
@@ -217,7 +215,7 @@ func TestConnectDispatchesControlMessagesAndAppliesConfig(t *testing.T) {
 		t.Fatal("config callback did not run")
 	}
 	time.Sleep(20 * time.Millisecond) // test_audio is intentionally dispatched asynchronously.
-	if e != (events{leds: 1, anim: 1, start: 1, stop: 1, beam: 2, volume: 1, mute: 1, wifi: 1, commit: 1, scan: 1, speaker: 1, music: 2, test: 1, cleanup: 1}) {
+	if e != (events{leds: 1, anim: 1, start: 1, stop: 1, volume: 1, mute: 1, wifi: 1, commit: 1, scan: 1, speaker: 1, music: 2, test: 1, cleanup: 1}) {
 		t.Fatalf("dispatch counts = %+v", e)
 	}
 	if got := config.Get().VadThreshold; got != 0.123 {

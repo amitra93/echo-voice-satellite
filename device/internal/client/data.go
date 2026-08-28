@@ -7,14 +7,10 @@ import (
 	"log"
 	"math"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/wilbowes/EchoMuse/internal/aec"
-	"github.com/wilbowes/EchoMuse/internal/beamformer"
 	"github.com/wilbowes/EchoMuse/internal/config"
-	"github.com/wilbowes/EchoMuse/internal/processor"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
 	"github.com/wilbowes/EchoMuse/pkg/mic"
 	"github.com/wilbowes/EchoMuse/pkg/speaker"
@@ -156,14 +152,29 @@ func vadPeriodRMS(mono []byte) float64 {
 	return math.Sqrt(sum / float64(n))
 }
 
-// ─── DataClient ───────────────────────────────────────────────────────────────
+// applyS16Gain scales an in-place little-endian S16 frame and returns the
+// number of samples that saturated. Amazon AFE has already quantised its
+// capture, unlike direct S24 input, so saturation must be explicit.
+func applyS16Gain(mono []byte, gain float64) uint64 {
+	if gain == 1 {
+		return 0
+	}
+	var clipped uint64
+	for i := 0; i+1 < len(mono); i += 2 {
+		v := int(float64(int16(binary.LittleEndian.Uint16(mono[i:]))) * gain)
+		if v > 32767 {
+			v = 32767
+			clipped++
+		} else if v < -32768 {
+			v = -32768
+			clipped++
+		}
+		binary.LittleEndian.PutUint16(mono[i:], uint16(int16(v)))
+	}
+	return clipped
+}
 
-// Beam lock request states — see DataClient.beamReq.
-const (
-	beamReqNone   int32 = 0
-	beamReqLock   int32 = 1
-	beamReqUnlock int32 = 2
-)
+// ─── DataClient ───────────────────────────────────────────────────────────────
 
 type DataClient struct {
 	deviceID string
@@ -180,25 +191,8 @@ type DataClient struct {
 	// defer in connect for the zombie-stream incident this guards against).
 	micConn *websocket.Conn
 
-	// beamReq carries a pending beam lock/unlock request from the control
-	// plane to the mic streaming goroutine. Beamformer methods are not safe
-	// to call from other goroutines (same reason beam.Unlock is deferred
-	// inside streamMic rather than called from StopMic), so the control
-	// handler only sets this flag; streamMic consumes it with Swap at the
-	// top of each period. Lets the controller lock the beamformer onto the
-	// speaker's perimeter mic mid-stream at wake detection — wake-triggered
-	// turns don't restart the stream (P0-1), so without this they ran the
-	// entire turn on ch6 omni and the mic array did nothing for them.
-	beamReq int32
-
 	conn   *websocket.Conn
 	connMu sync.Mutex
-
-	beam              *beamformer.Beamformer
-	proc              *processor.Processor
-	aec               *aec.Canceller
-	onDirectionChange func(angle float64)
-	directionMu       sync.Mutex
 
 	// shadowScorer scores the always-on wake stream on the device without
 	// acting on it (internal/wakeword/shadow), nil when off. Guarded because
@@ -206,37 +200,18 @@ type DataClient struct {
 	// goroutine is pushing frames into it.
 	shadowMu     sync.Mutex
 	shadowScorer *shadow.Scorer
-
-	// pipeMu serialises access to beam and proc, which hold unsynchronised
-	// per-period state (reused analysis buffers, EWMA smoothers, AGC gain).
-	// Both are normally touched by a single streamMic goroutine, but a
-	// StopMic→StartMic pair (sent after every voice turn) spawns the
-	// replacement while the old goroutine may still be draining a period or
-	// two — the select on a closed stopCh vs a ready mic channel picks
-	// randomly, so the old goroutine can run Process() concurrently with
-	// the new one's Lock()/Process(). Uncontended outside that brief
-	// overlap, so the cost is a no-op lock per 160ms batch.
-	pipeMu sync.Mutex
 }
 
-// NewDataClient wires the mic/speaker pipeline. canceller is the shared AEC
-// instance — its far-end side is fed by the speaker's echo tap; this client
-// runs its near-end side on the mono mic stream. Disabled cancellers pass
-// audio through untouched.
-func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Speaker, canceller *aec.Canceller) *DataClient {
+// NewDataClient wires the mandatory Amazon AFE mono mic stream to the speaker.
+func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Speaker) *DataClient {
 	return &DataClient{
 		deviceID: deviceID,
 		mic:      microphone,
 		spk:      spk,
 		readyCh:  make(chan string, 1),
-		beam:     beamformer.New(),
-		proc:     processor.New(),
-		aec:      canceller,
 	}
 }
 
-// OnDirectionChanged registers a callback invoked when the estimated dominant
-// source direction changes. Called from the mic streaming goroutine — keep it fast.
 // SetShadowScorer installs (or removes, with nil) the on-device wake word
 // scorer. Any previous scorer is closed, which releases its ONNX Runtime
 // sessions — a config push that changes the wake model rebuilds it, and
@@ -262,12 +237,6 @@ func (d *DataClient) ShadowScorer() *shadow.Scorer {
 	return d.shadowScorer
 }
 
-func (d *DataClient) OnDirectionChanged(cb func(angle float64)) {
-	d.directionMu.Lock()
-	d.onDirectionChange = cb
-	d.directionMu.Unlock()
-}
-
 func (d *DataClient) NotifyReady(serverAddr string) {
 	select {
 	case d.readyCh <- serverAddr:
@@ -278,20 +247,6 @@ func (d *DataClient) NotifyReady(serverAddr string) {
 		}
 		d.readyCh <- serverAddr
 	}
-}
-
-// RequestBeamLock asks the running mic stream to lock the beamformer onto
-// the best perimeter mic (respecting BeamformingEnabled config). Safe to call
-// from any goroutine; consumed by streamMic on its next period. A later
-// request overwrites an unconsumed earlier one.
-func (d *DataClient) RequestBeamLock() {
-	atomic.StoreInt32(&d.beamReq, beamReqLock)
-}
-
-// RequestBeamUnlock asks the running mic stream to release the beam lock and
-// return to ch6 omni. Safe to call from any goroutine.
-func (d *DataClient) RequestBeamUnlock() {
-	atomic.StoreInt32(&d.beamReq, beamReqUnlock)
 }
 
 func (d *DataClient) StartMic(lockMic bool) {
@@ -562,37 +517,8 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			d.micActive = false
 		}
 		d.micMu.Unlock()
-		// Unlock the beam only while still the current stream: if a
-		// replacement stream has already started (StopMic→StartMic pair),
-		// the beam belongs to it — this goroutine's late Unlock would
-		// otherwise land after the replacement's Lock() and silently drop
-		// the new turn onto ch6 omni. The replacement's own exit unlocks
-		// instead (Unlock on an unlocked beam is a no-op, so the wake
-		// stream's unconditional unlock stays harmless).
-		if owner {
-			d.pipeMu.Lock()
-			d.beam.Unlock()
-			d.pipeMu.Unlock()
-		}
 		log.Println("[data] streamMic: exited")
 	}()
-
-	// Claim a clean beam: a superseded stream skips its unlock (see the
-	// exit defer), so a lock left behind by the previous turn is released
-	// here — otherwise a lockMic turn replaced by the wake stream would
-	// leave the wake stream on the old turn's perimeter mic with the
-	// baseline frozen. Fresh stream = fresh gain, same reasoning
-	// (Processor.ResetAGC — without it, a gain crushed by TTS echo
-	// persists into the next listening stream).
-	d.pipeMu.Lock()
-	d.beam.Unlock()
-	if lockMic {
-		lockSnap := config.Get().Snapshot()
-		turnBeamEnabled := lockSnap.BeamformingEnabled != nil && *lockSnap.BeamformingEnabled
-		d.beam.Lock(turnBeamEnabled)
-	}
-	d.proc.ResetAGC()
-	d.pipeMu.Unlock()
 
 	ch := d.mic.Subscribe()
 	defer d.mic.Unsubscribe(ch)
@@ -611,7 +537,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 	preroll := make([][]byte, 0, prerollBudgetMs/160+1) // capacity hint at the real batch cadence
 	var seqNum uint16
 	var periodCount uint64 // periodic RMS diagnostic
-	var lastClipped uint64 // clip count at last diag line
+	var afeClipped uint64
 
 	// Memoized linear mic gain — recomputed only when the config dB value
 	// changes (config push mid-stream). Sentinel forces computation on the
@@ -715,56 +641,22 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			snap := cfg.Snapshot()
 			threshold := snap.VadThreshold
 
-			beamAngle := float64(-1)
-			if snap.BeamAngle != nil {
-				beamAngle = *snap.BeamAngle
+			desiredGainDb := 0
+			if snap.AfeMicGainDb != nil {
+				desiredGainDb = *snap.AfeMicGainDb
 			}
-			// AGC is forced off on the always-on wake stream (!lockMic).
-			// Adaptive gain with persistent state on a stream that never
-			// restarts is a rebaselining mechanism by construction: in a
-			// room with steady background noise above vadThreshold, the
-			// RMS gate calls every noisy period "speech", the release path
-			// walks the gain up toward amplifying the noise floor, and the
-			// fast attack then compresses the wake word's envelope
-			// mid-utterance — depressing OWW scores. Wake word models
-			// are trained level-diverse and don't need AGC. The config
-			// toggle still governs bounded lockMic turns, which get a fresh
-			// ResetAGC each stream.
-			agcEnabled := lockMic && (snap.AgcEnabled == nil || *snap.AgcEnabled)
-
-			if snap.MicGainDb != nil && *snap.MicGainDb != gainDb {
-				gainDb = *snap.MicGainDb
+			if desiredGainDb != gainDb {
+				gainDb = desiredGainDb
 				gainLin = math.Pow(10, float64(gainDb)/20.0)
-				log.Printf("[data] mic gain: %ddB (linear %.2f)", gainDb, gainLin)
+				log.Printf("[data] AFE mic gain: %ddB (linear %.2f)", gainDb, gainLin)
 			}
 
-			d.pipeMu.Lock()
-			// Consume any pending beam lock/unlock request from the control
-			// plane (wake detection → lock, turn end → unlock). Handled on
-			// this goroutine because Beamformer methods aren't safe to call
-			// from the control handler. Lock() no-ops if already locked or
-			// if beamforming is disabled in config.
-			switch atomic.SwapInt32(&d.beamReq, beamReqNone) {
-			case beamReqLock:
-				turnBeam := snap.BeamformingEnabled != nil && *snap.BeamformingEnabled
-				d.beam.Lock(turnBeam)
-			case beamReqUnlock:
-				d.beam.Unlock()
-			}
-
-			mono, angle := d.beam.Process(raw, beamAngle, gainLin)
-			clipped := d.beam.ClippedSamples()
-
-			// AEC — subtract the speaker's own output (reference tapped at
-			// the ALSA write, aligned by aecDelayMs) before anything
-			// measures or gates the signal. No-op while aecEnabled=false.
-			// (Has its own mutex — inside pipeMu only for lock ordering
-			// simplicity; aec.mu is a leaf lock, no inversion possible.)
-			mono = d.aec.Process(mono)
+			// Amazon AFE supplies mono, beamformed, echo-cancelled S16 audio.
+			mono := raw
+			afeClipped += applyS16Gain(mono, gainLin)
 
 			// ── Processing pipeline ──────────────────────────────────────
-			// VAD on raw beamformed output — pre-NS/AGC so threshold is
-			// consistent regardless of gain state.
+			// VAD runs on the processed AFE output before it is sent upstream.
 			//
 			// vadThreshold is calibrated in pre-gain (acoustic) units —
 			// the values validated in the v2.6.3 session predate the fixed
@@ -803,33 +695,11 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			// measured on-device) while idle capture levels were being
 			// characterised — that job is done (2026-07-07 fleet
 			// analysis) and /tmp/server.log is RAM-backed and unrotated.
-			if periodCount%3750 == 0 || (clipped != lastClipped && periodCount%100 == 0) {
-				log.Printf("[data] VAD diag: rms=%.5f threshold=%.5f gain=%ddB clipped=%d gate=%v active=%v agc=%v",
-					rms, threshold*gainLin, gainDb, clipped, speech, active, agcEnabled)
-				lastClipped = clipped
+			if periodCount%3750 == 0 || (afeClipped > 0 && periodCount%100 == 0) {
+				log.Printf("[data] VAD diag: rms=%.5f threshold=%.5f gain=%ddB clipped=%d gate=%v active=%v",
+					rms, threshold*gainLin, gainDb, afeClipped, speech, active)
 			}
 			periodCount++
-
-			// AGC — lockMic turn streams only (see agcEnabled above). Pass
-			// the speech flag so AGC release freezes during silence,
-			// preventing noise floor amplification. When agcEnabled is
-			// false Process passes mono through untouched and gain state is
-			// frozen at whatever it last was. (RNNoise NS removed
-			// 2026-07-12 — see internal/processor package comment.)
-			mono = d.proc.Process(mono, agcEnabled, speech)
-			d.pipeMu.Unlock()
-			// ─────────────────────────────────────────────────────────────
-
-			// Notify direction listener — non-blocking, keep it fast.
-			// Only fire when angle is valid (beam locked).
-			if angle >= 0 {
-				d.directionMu.Lock()
-				cb := d.onDirectionChange
-				d.directionMu.Unlock()
-				if cb != nil {
-					cb(angle)
-				}
-			}
 
 			// Ungated wake stream: the always-on (!lockMic) stream sends
 			// every processed period, batched into 80ms chunks — no VAD

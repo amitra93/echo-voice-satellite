@@ -21,10 +21,9 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/wilbowes/EchoMuse/internal/aec"
+	"github.com/wilbowes/EchoMuse/internal/afeipc"
 	"github.com/wilbowes/EchoMuse/internal/bindings/als"
 	internalbuttons "github.com/wilbowes/EchoMuse/internal/bindings/buttons"
-	"github.com/wilbowes/EchoMuse/internal/bindings/jack"
 	"github.com/wilbowes/EchoMuse/internal/bindings/mic"
 	"github.com/wilbowes/EchoMuse/internal/bindings/speaker"
 	"github.com/wilbowes/EchoMuse/internal/bluetooth"
@@ -40,12 +39,18 @@ import (
 )
 
 func main() {
+	if afeipc.IsHelperMode(os.Args[1:]) {
+		log.SetOutput(os.Stderr)
+		if err := afeipc.RunHelper(""); err != nil {
+			log.Print(err)
+		}
+		return
+	}
 	log.SetOutput(os.Stdout)
 	log.Printf("EchoMuse %s starting", client.Version)
 
 	deviceID := client.GetSerialNo()
 	log.Printf("Device ID: %s", deviceID)
-
 	// A WiFi change that never got committed (crash/power cycle mid-switch)
 	// is rolled back before anything tries to use the network — same
 	// self-healing philosophy as the A/B binary slots.
@@ -70,21 +75,27 @@ func main() {
 		log.Fatalf("Failed to initialize Button controller: %v", err)
 	}
 
-	microphone, err := mic.NewMicrophone()
+	afeClient, err := afeipc.Start(os.Getenv("EM_AFE_HELPER"))
 	if err != nil {
-		log.Fatalf("Failed to initialize Microphone: %v", err)
+		log.Fatalf("Failed to start Amazon AFE helper: %v", err)
 	}
-
-	// AEC canceller — far end fed by the speaker's echo tap, near end run
-	// by the data client on the mono mic stream. Starts disabled; armed by
-	// applyAecConfig from env defaults below and on every config push.
-	canceller := aec.New()
+	if err := afeClient.Open(afeipc.OpenOptions{Helper: os.Getenv("EM_AFE_HELPER"), Preset: 1,
+		RecorderRate: 16000, RecorderPeriodFrames: 1280, RecorderBuffers: 8,
+		PlayerRate: 48000, PlayerBufferBytes: 4096, PlayerBuffers: 4}); err != nil {
+		_ = afeClient.Close()
+		log.Fatalf("Failed to open Amazon AFE audio pair: %v", err)
+	}
+	microphone := mic.NewAFEMicrophone(afeClient)
+	if err := microphone.Init(); err != nil {
+		_ = afeClient.Close()
+		log.Fatalf("Failed to start Amazon AFE microphone: %v", err)
+	}
 
 	// The level tap drives the energy-reactive LED ring ("meter" pattern).
 	// The Server doesn't exist yet when the speaker starts its pump loop,
 	// so the tap goes through an atomic pointer armed just below.
 	var srvPtr atomic.Pointer[server.Server]
-	pcmSpeaker, err := speaker.NewPcmSpeaker(canceller.WriteFar, func(rms float64) {
+	pcmSpeaker, err := speaker.NewAFEPcmSpeaker(afeClient, nil, func(rms float64) {
 		if srv := srvPtr.Load(); srv != nil {
 			srv.SetAudioLevel(rms)
 		}
@@ -94,6 +105,7 @@ func main() {
 	}
 
 	s := server.NewServer(buttonController, microphone, pcmSpeaker)
+	s.UseAndroidVolume()
 	srvPtr.Store(s)
 	// Native Sendspin owns only Music Assistant playback. Its volume is a
 	// player scale, while the device is capped at the codec's unity-gain index.
@@ -118,13 +130,7 @@ func main() {
 
 	ctx := context.Background()
 
-	dataClient := client.NewDataClient(deviceID, microphone, pcmSpeaker, canceller)
-	applyAecConfig(canceller) // arm from env defaults before any config push
-
-	// Direction callback — update LED ring to show estimated source angle
-	dataClient.OnDirectionChanged(func(angle float64) {
-		s.SetDirectionLEDs(angle)
-	})
+	dataClient := client.NewDataClient(deviceID, microphone, pcmSpeaker)
 	controlClient := client.NewControlClient(
 		deviceID,
 		func(leds []led.Led, listening *bool) {
@@ -218,18 +224,6 @@ func main() {
 		controlClient.SendAmbientLight(lux)
 	})
 
-	// Headphone jack — accdet mutes the internal speaker amp on insert and
-	// never restores it on removal, so without this the speaker stays dead
-	// until the next reboot (issue #80, reproduced and fixed on hardware
-	// 2026-08-09). Insert needs nothing from us: accdet already handles the
-	// mute, and the output routing itself is done by the jack's own switch
-	// contacts, not by any mixer control.
-	go jack.Watch(ctx, func(inserted bool) {
-		if !inserted {
-			pcmSpeaker.EnableSpeakerAmp()
-		}
-	})
-
 	controlClient.OnDisconnected(func() {
 		// Stop any device-local animation: the controller that owned it is
 		// gone, and the pulse below would otherwise fight its ticker.
@@ -297,11 +291,9 @@ func main() {
 		}
 	})
 
-	// Config applied — apply hardware changes via tinymix, AEC params to
-	// the canceller. AEC/BLE read the merged post-Apply snapshot rather than
+	// Config applied — BLE reads the merged post-Apply snapshot rather than
 	// the (partial) message so unmentioned fields keep their values.
 	controlClient.OnConfigApplied(func(msg config.ConfigMessage) {
-		applyHardwareConfig(msg)
 		// startupVolume is the controller's persisted record of this
 		// device's volume (updated on every volume_state report) — restore
 		// it through the Server, not a raw tinymix write: SeedVolume keeps
@@ -310,7 +302,6 @@ func main() {
 		if msg.StartupVolume > 0 {
 			s.SeedVolume(msg.StartupVolume)
 		}
-		applyAecConfig(canceller)
 		applyBleConfig(bleScanner)
 		applyOutputChainConfig(pcmSpeaker)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
@@ -383,17 +374,6 @@ func main() {
 		}()
 	})
 
-	// Beam lock/unlock — controller locks the beamformer onto the speaker's
-	// perimeter mic at wake detection (mid-stream, no restart) and releases
-	// it at turn end. Requests are consumed by the mic streaming goroutine.
-	controlClient.OnBeamLock(func(lock bool) {
-		if lock {
-			dataClient.RequestBeamLock()
-		} else {
-			dataClient.RequestBeamUnlock()
-		}
-	})
-
 	// Mute state change — notify controller so dashboard can reflect it,
 	// and stop/restart the mic stream device-side so mute is authoritative
 	// regardless of controller state (C5 fix, 2026-07-05 review). Previously
@@ -424,8 +404,12 @@ func main() {
 	// Volume change — notify controller so HA entity and dashboard reflect it.
 	// Fires on every Set() call: physical button press or future volume_set command.
 	s.SetVolumeChangeCallback(func(level int) {
+		pcmSpeaker.SetVolume(level)
 		controlClient.SendVolumeState(level)
 	})
+	// The controller callback only fires on a change. Apply the level restored
+	// from tinymix at boot too, so AFE begins at the same user-selected level.
+	pcmSpeaker.SetVolume(s.VolumeLevel())
 
 	// Volume set from controller (HA MediaPlayerCommandRequest forwarded down).
 	// Calls Set() which applies tinymix, updates LEDs, and fires the change
@@ -530,6 +514,8 @@ func main() {
 	bleScanner.SetEnabled(false) // scan off + /dev/stpbt closed so the chip idles
 	sendspinManager.Close()
 	pcmSpeaker.Close()
+	microphone.Close()
+	_ = afeClient.Close()
 	os.Exit(0)
 }
 
@@ -853,39 +839,6 @@ func wifiRSSI() *int {
 		return &rssi
 	}
 	return nil
-}
-
-// ─── Hardware config ──────────────────────────────────────────────────────────
-
-// applyHardwareConfig runs tinymix commands for fields that map to hardware.
-// Called whenever the controller pushes a config message.
-func applyHardwareConfig(msg config.ConfigMessage) {
-	if msg.AdcDigitalGain > 0 {
-		tinymix("89", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
-		tinymix("107", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
-		tinymix("125", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
-		tinymix("143", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
-	}
-	if msg.AdcMicpga > 0 {
-		tinymix("92", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
-		tinymix("110", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
-		tinymix("128", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
-		tinymix("146", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
-	}
-}
-
-// applyAecConfig pushes the current effective AEC config into the canceller.
-// SetParams no-ops when nothing changed, so calling it on every config push
-// is free; when delay/tail change it rebuilds the echo state (adaptive
-// filter state is meaningless across a timing change anyway).
-func applyAecConfig(canceller *aec.Canceller) {
-	snap := config.Get().Snapshot()
-	enabled := snap.AecEnabled != nil && *snap.AecEnabled
-	delayMs := 250
-	if snap.AecDelayMs != nil {
-		delayMs = *snap.AecDelayMs
-	}
-	canceller.SetParams(enabled, delayMs, snap.AecTailMs)
 }
 
 // applyOutputChainConfig configures the speaker from the merged snapshot, not

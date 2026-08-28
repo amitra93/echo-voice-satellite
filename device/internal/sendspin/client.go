@@ -2,6 +2,7 @@ package sendspin
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -101,6 +102,20 @@ func (c *Client) InitialMessages() ([][]byte, error) {
 			{Codec: CodecFLAC, Channels: 1, SampleRate: 48000, BitDepth: 16},
 			{Codec: CodecPCM, Channels: 1, SampleRate: 48000, BitDepth: 16},
 		}, BufferCapacity: defaultBufferCapacity, SupportedCommands: []string{"volume", "mute"},
+		// DO NOT add "pause"/"stop"/"play" etc. here. player_support.
+		// supported_commands is validated against a strict schema by MA's
+		// aiosendspin server (observed: ghcr.io/music-assistant/server:stable,
+		// error "Malformed client/hello: Field \"payload\" of type
+		// ClientHelloPayload... has invalid value") — an unrecognised entry
+		// fails client/hello validation and the connection is closed (code
+		// 1000, no reason, before MA even sends its own server/hello) before
+		// the player is registered at all. This is not the same list as the
+		// design doc's "play, pause, stop, next, previous, seek, volume,
+		// mute" — that describes controller@v1-role commands a client can
+		// SEND to control the whole queue, not values this field accepts.
+		// Confirmed by directly connecting to MA and diffing the accepted vs
+		// rejected hello payloads; see the group/update handling below for
+		// how pause/stop are actually detected instead.
 	})
 	if err != nil {
 		return nil, err
@@ -125,9 +140,20 @@ func (c *Client) HandleText(raw []byte) ([][]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Transport control (pause/stop/play) is diagnosed by what MA actually
+	// sends, not by reading the spec — server/hello, server/state and
+	// server/time are excluded because they are frequent/verbose and
+	// carry nothing about playback intent.
 	switch typ {
-	case TypeServerHello, TypeServerState, TypeGroupUpdate:
+	case TypeServerHello, TypeServerState, TypeServerTime:
+	default:
+		log.Printf("[sendspin] recv %s %s", typ, payload)
+	}
+	switch typ {
+	case TypeServerHello, TypeServerState:
 		return nil, nil
+	case TypeGroupUpdate:
+		return nil, c.handleGroupUpdate(payload)
 	case TypeServerTime:
 		st, err := ParseServerTime(payload)
 		if err != nil {
@@ -194,6 +220,44 @@ func (c *Client) HandleText(raw []byte) ([][]byte, error) {
 	default:
 		return nil, nil // Forward-compatible: unknown message types are ignored.
 	}
+}
+
+// handleGroupUpdate flushes the scheduled queue when MA reports the group has
+// stopped.
+//
+// THIS, NOT AN EXPLICIT PAUSE/STOP COMMAND, IS HOW MA SIGNALS PAUSE/STOP.
+// player_support.supported_commands has no room for them (see the comment on
+// SupportedCommands in InitialMessages) — MA's aiosendspin server hard-rejects
+// client/hello and never even opens the session if it's tried. Captured live
+// against a real pause: MA sends stream/end, then
+// group/update{playback_state:"stopped"}, and nothing else until the user
+// resumes. Without a flush here the renderer drains whatever MA had already
+// pushed ahead of real time (RequiredLeadMs) — routinely several seconds,
+// per the scheduled-music telemetry — so the room keeps playing for that long
+// after the user asked it to stop.
+//
+// "stopped" is what makes this safe to flush unconditionally, unlike
+// stream/end alone: a track ending naturally is ALSO a stream/end, but the
+// group stays "playing" through an immediate transition to the next track (a
+// skip is stream/end followed immediately by a new stream/start, captured
+// live, with no group/update in between) — so this never fires on an
+// ordinary track change, only when MA itself has decided nothing should be
+// audible right now.
+func (c *Client) handleGroupUpdate(payload json.RawMessage) error {
+	g, err := ParseGroupUpdate(payload)
+	if err != nil {
+		return err
+	}
+	if g.PlaybackState != "stopped" {
+		return nil
+	}
+	c.mu.Lock()
+	generation, sink := c.generation, c.Sink
+	c.mu.Unlock()
+	if generation != 0 && sink != nil {
+		sink.MusicSyncClear(generation)
+	}
+	return nil
 }
 
 func (c *Client) applyCommand(cmd *ServerCommand) ([][]byte, error) {

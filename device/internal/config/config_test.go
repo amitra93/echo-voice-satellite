@@ -72,23 +72,10 @@ func TestEnvStr(t *testing.T) {
 	}
 }
 
-// ─── clampMicGainDb ─────────────────────────────────────────────────────────
-
-func TestClampMicGainDb(t *testing.T) {
-	cases := []struct {
-		in, want int
-	}{
-		{-10, 0},
-		{-1, 0},
-		{0, 0},
-		{24, 24},
-		{42, 42},
-		{43, 42},
-		{1000, 42},
-	}
-	for _, c := range cases {
-		if got := clampMicGainDb(c.in); got != c.want {
-			t.Errorf("clampMicGainDb(%d) = %d, want %d", c.in, got, c.want)
+func TestClampAfeMicGainDb(t *testing.T) {
+	for _, c := range []struct{ in, want int }{{-1, 0}, {0, 0}, {12, 12}, {24, 24}, {25, 24}} {
+		if got := clampAfeMicGainDb(c.in); got != c.want {
+			t.Errorf("clampAfeMicGainDb(%d) = %d, want %d", c.in, got, c.want)
 		}
 	}
 }
@@ -122,20 +109,20 @@ func TestNormaliseOnDevice(t *testing.T) {
 func TestApplyIgnoresZeroFields(t *testing.T) {
 	// A partial config push must never zero out fields it didn't mention —
 	// that's the whole point of Apply's "non-zero means set" contract.
-	d := &Device{initialised: true, VadThreshold: 0.01, OwwModel: "orig", MicGainDb: 12}
+	d := &Device{initialised: true, VadThreshold: 0.01, OwwModel: "orig", AfeMicGainDb: 12}
 	d.Apply(ConfigMessage{})
-	if d.VadThreshold != 0.01 || d.OwwModel != "orig" || d.MicGainDb != 12 {
+	if d.VadThreshold != 0.01 || d.OwwModel != "orig" || d.AfeMicGainDb != 12 {
 		t.Fatalf("Apply(empty) changed fields: %+v", d)
 	}
 }
 
 func TestApplySetsProvidedFields(t *testing.T) {
 	d := &Device{initialised: true}
-	mg := 30
+	mg := 12
 	d.Apply(ConfigMessage{
 		VadThreshold: 0.02,
 		OwwModel:     "new_model",
-		MicGainDb:    &mg,
+		AfeMicGainDb: &mg,
 	})
 	if d.VadThreshold != 0.02 {
 		t.Errorf("VadThreshold = %v, want 0.02", d.VadThreshold)
@@ -143,8 +130,8 @@ func TestApplySetsProvidedFields(t *testing.T) {
 	if d.OwwModel != "new_model" {
 		t.Errorf("OwwModel = %q, want new_model", d.OwwModel)
 	}
-	if d.MicGainDb != 30 {
-		t.Errorf("MicGainDb = %d, want 30 (clamped-in-range passthrough)", d.MicGainDb)
+	if d.AfeMicGainDb != 12 {
+		t.Errorf("AfeMicGainDb = %d, want 12 (clamped-in-range passthrough)", d.AfeMicGainDb)
 	}
 }
 
@@ -196,11 +183,11 @@ func equalFloats(got, want []float64) bool {
 	return true
 }
 
-func TestApplyClampsMicGainDb(t *testing.T) {
+func TestApplyClampsAfeMicGainDb(t *testing.T) {
 	d := &Device{initialised: true}
-	d.Apply(ConfigMessage{MicGainDb: intPtr(100)})
-	if d.MicGainDb != 42 {
-		t.Fatalf("Apply did not clamp MicGainDb: got %d, want 42", d.MicGainDb)
+	d.Apply(ConfigMessage{AfeMicGainDb: intPtr(100)})
+	if d.AfeMicGainDb != 24 {
+		t.Fatalf("Apply did not clamp AfeMicGainDb: got %d, want 24", d.AfeMicGainDb)
 	}
 }
 
@@ -242,23 +229,11 @@ func TestApplyLoadsDefaultsWhenNotInitialised(t *testing.T) {
 func TestApplyBoolPointerFieldsReplaceDirectly(t *testing.T) {
 	d := &Device{initialised: true}
 	d.Apply(ConfigMessage{
-		BargeInEnabled:     boolPtr(true),
-		BeamformingEnabled: boolPtr(false),
-		AgcEnabled:         boolPtr(false),
-		AecEnabled:         boolPtr(true),
-		BleProxyEnabled:    boolPtr(true),
+		BargeInEnabled:  boolPtr(true),
+		BleProxyEnabled: boolPtr(true),
 	})
 	if !d.BargeInEnabled {
 		t.Errorf("BargeInEnabled not applied")
-	}
-	if d.BeamformingEnabled {
-		t.Errorf("BeamformingEnabled not applied")
-	}
-	if d.AgcEnabled == nil || *d.AgcEnabled != false {
-		t.Errorf("AgcEnabled not applied: %v", d.AgcEnabled)
-	}
-	if d.AecEnabled == nil || *d.AecEnabled != true {
-		t.Errorf("AecEnabled not applied: %v", d.AecEnabled)
 	}
 	if d.BleProxyEnabled == nil || *d.BleProxyEnabled != true {
 		t.Errorf("BleProxyEnabled not applied: %v", d.BleProxyEnabled)
@@ -270,34 +245,19 @@ func TestApplyBoolPointerFieldsReplaceDirectly(t *testing.T) {
 func TestSnapshotDefaultsWhenPointersNil(t *testing.T) {
 	d := &Device{initialised: true}
 	snap := d.Snapshot()
-	if snap.AgcEnabled == nil || *snap.AgcEnabled != true {
-		t.Errorf("Snapshot AgcEnabled default = %v, want true", snap.AgcEnabled)
-	}
-	if snap.AecEnabled == nil || *snap.AecEnabled != false {
-		t.Errorf("Snapshot AecEnabled default = %v, want false", snap.AecEnabled)
-	}
 	if snap.BleProxyEnabled == nil || *snap.BleProxyEnabled != false {
 		t.Errorf("Snapshot BleProxyEnabled default = %v, want false", snap.BleProxyEnabled)
 	}
 }
 
-// This is the C4 fix the code comment describes: Snapshot must copy values
-// into fresh locals, never hand out a pointer into the live mutex-guarded
-// struct. A caller reading the snapshot after the config changes underneath
-// it (a later Apply()) would otherwise see a torn or unexpected value.
 func TestSnapshotDoesNotAliasLiveFields(t *testing.T) {
-	agc := true
-	d := &Device{initialised: true, BeamAngle: 45, AgcEnabled: &agc}
+	d := &Device{initialised: true, AfeMicGainDb: 12}
 	snap := d.Snapshot()
 
-	d.BeamAngle = 999
-	*d.AgcEnabled = false
+	d.AfeMicGainDb = 20
 
-	if *snap.BeamAngle != 45 {
-		t.Errorf("snapshot BeamAngle aliased live field: got %v, want 45", *snap.BeamAngle)
-	}
-	if *snap.AgcEnabled != true {
-		t.Errorf("snapshot AgcEnabled aliased live pointer: got %v, want true", *snap.AgcEnabled)
+	if *snap.AfeMicGainDb != 12 {
+		t.Errorf("snapshot AfeMicGainDb aliased live field: got %v, want 12", *snap.AfeMicGainDb)
 	}
 }
 
