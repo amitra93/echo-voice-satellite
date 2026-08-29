@@ -418,6 +418,12 @@ function render() {
     const attr = [...input.attributes].find(a => a.name.startsWith('data-mix-'));
     if (card && attr) pendingMix[`${card.dataset.name}:${attr.name}`] = input.value;
   });
+  const pendingPiper = {};
+  wwRoot.querySelectorAll('input[data-piper-language], input[data-piper-voices], input[data-piper-samples]').forEach(input => {
+    const card = input.closest('.card.ww');
+    const attr = [...input.attributes].find(a => a.name.startsWith('data-piper-'));
+    if (card && attr) pendingPiper[`${card.dataset.name}:${attr.name}`] = input.value;
+  });
   let pendingEdit = null;
   if (editing && wwRoot.contains(editing) && (editing.tagName === 'INPUT' || editing.tagName === 'TEXTAREA')) {
     const card = editing.closest('.card.ww');
@@ -455,18 +461,6 @@ function render() {
       </div>
       <div class="stepper">${stepper}</div>
       ${w.features_stale ? `<div class="hint" style="color:var(--err);margin:-8px 0 12px">New or changed clips need mixing. Retrain will rebuild features automatically.</div>` : ''}
-      <div class="row">
-        <button class="accent" data-act="build" ${busy() ? 'disabled' : ''}>
-          ${w.features_stale ? 'Retrain new clips' : w.model_built ? 'Retrain' : w.clips_train ? 'Continue training' : 'Train'}</button>
-        ${w.model_built ? `
-          <button data-act="mic">🎤 Try it</button>
-          <button data-act="test">Test a recording…</button>
-          <button data-act="eval" ${busy() ? 'disabled' : ''} title="${w.features_stale ? 'Scores current clips against a model trained on older data' : 'Score all test clips and generate a full accuracy report'}">📊 Evaluation report</button>
-          <a href="/api/models/${esc(w.name)}.onnx"><button>Download model</button></a>` : ''}
-        <button class="danger" data-act="del" style="margin-left:auto">remove</button>
-        <input type="file" accept="audio/*" multiple style="display:none">
-        <input type="file" accept=".zip,application/zip" data-zip style="display:none">
-      </div>
       <div class="live-score" data-live-score style="display:none">
         <div class="head"><span>LIVE MIC SCORE <span data-live-state>connecting</span></span>
           <span><span data-live-level>MIC -- dBFS</span> <span class="score" data-live-value>0.000</span></span></div>
@@ -474,48 +468,7 @@ function render() {
         <div class="hint" style="color:var(--lcd-dim);margin:3px 0 0">Score over time. Dotted line: example threshold 0.50.</div>
       </div>
       <div class="actiongroup">
-        <div class="microlabel" style="margin-bottom:6px">Improve accuracy</div>
-        <div class="row">
-          <button class="small" data-act="gtts" ${busy() ? 'disabled' : ''}
-            title="Adds Chirp 3 positive samples for every selected locale and voice">+ Google Chirp 3 voices</button>
-          <button class="small" data-act="piper" ${busy() ? 'disabled' : ''}
-            title="Adds local Piper voices in another accent or language">+ Piper language voices</button>
-          <button class="small" data-act="preview-piper" ${busy() ? 'disabled' : ''}
-            title="Hear the first wake phrase in a British Piper voice">Preview Piper</button>
-          <button class="small" data-act="import" ${busy() ? 'disabled' : ''}
-            title="Import a labelled dataset (.zip) exported from the EchoMuse dashboard's Training tab">+ Import labeled dataset…</button>
-          <span class="hint" style="margin:0">then retrain to apply</span>
-        </div>
-        <div class="dataset-options" style="margin-top:10px">
-          <div class="microlabel">Google Chirp 3 voices</div>
-          <label>Locales <input data-gtts-languages value="${esc(w.google_tts_languages)}"
-            ${busy() ? 'disabled' : ''} style="width:100%"></label>
-          <label>Voice names <input data-gtts-voices value="${esc(w.google_tts_voices)}"
-            placeholder="Optional comma-separated exact Chirp 3 names; blank = all matching"
-            ${busy() ? 'disabled' : ''} style="width:100%"></label>
-          <label>Samples per voice per locale <input data-gtts-samples type="number" min="1" value="${w.google_tts_samples_per_voice}"
-            ${busy() ? 'disabled' : ''}></label>
-          <label>Queries per second <input data-gtts-qps type="number" min="0.1" step="0.1" value="${w.google_tts_qps}"
-            ${busy() ? 'disabled' : ''}></label>
-          <div class="hint">A voice available for two selected locales receives this many clips for each locale. Confusable negatives receive the same matrix.</div>
-          <div class="row" style="margin-top:6px">
-            <button class="small" data-act="save-gtts" ${busy() ? 'disabled' : ''}
-              title="Save Google TTS locales, voices, and sample count without starting synthesis">Save Google TTS config</button>
-            <button class="small" data-act="prune-gtts" ${busy() ? 'disabled' : ''}
-              title="Preview and remove generated Chirp clips outside the saved locale and voice selection">Preview prune unselected clips</button>
-          </div>
-        </div>
-        ${sourceMixPanel(w, 'positive')}
-        ${sourceMixPanel(w, 'negative')}
-        <div class="row" style="margin-top:6px"><button class="small" data-act="save-mix" ${busy() ? 'disabled' : ''}>Save training mix</button><span class="hint" data-mix-result style="margin:0"></span></div>
-        <div class="dataset-options" style="margin-top:10px">
-          <div class="microlabel">Piper languages</div>
-          <label>Locale <input data-piper-language value="en_GB" placeholder="e.g. en_GB, de_DE"></label>
-          <label>Exact voice names <input data-piper-voices placeholder="Optional comma-separated names; blank = best for locale"></label>
-          <label>Samples <input data-piper-samples type="number" min="1" value="4000"></label>
-          <div class="hint">Local, no account or API cost. Added clips displace the default US Piper set at build time.</div>
-        </div>
-        <div class="dataset-options" style="margin-top:10px">
+        <div class="dataset-options">
           <div class="microlabel">Confusable phrases</div>
           <label>Comma-separated phrases that must not wake
             <input data-confusables value="${esc(w.confusables.join(', '))}"
@@ -534,6 +487,61 @@ function render() {
           <label><input type="checkbox" data-dataset="musan" ${w.use_musan_background ? 'checked' : ''} ${!state.assets.find(a => a.part === 'musan').present ? 'disabled' : ''}> MUSAN augmentation background</label>
           <label><input type="checkbox" data-dataset="slr28" ${w.use_slr28_augmentation ? 'checked' : ''} ${!state.assets.find(a => a.part === 'slr28').present ? 'disabled' : ''}> OpenSLR 28 room/noise augmentation</label>
         </div>
+        <div class="dataset-options" style="margin-top:10px">
+          <div class="microlabel">Google Chirp 3 audio</div>
+          <label>Locales <input data-gtts-languages value="${esc(w.google_tts_languages)}"
+            ${busy() ? 'disabled' : ''} style="width:100%"></label>
+          <label>Voice names <input data-gtts-voices value="${esc(w.google_tts_voices)}"
+            placeholder="Optional comma-separated exact Chirp 3 names; blank = all matching"
+            ${busy() ? 'disabled' : ''} style="width:100%"></label>
+          <label>Samples per voice per locale <input data-gtts-samples type="number" min="1" value="${w.google_tts_samples_per_voice}"
+            ${busy() ? 'disabled' : ''}></label>
+          <label>Queries per second <input data-gtts-qps type="number" min="0.1" step="0.1" value="${w.google_tts_qps}"
+            ${busy() ? 'disabled' : ''}></label>
+          <div class="hint">A voice available for two selected locales receives this many clips for each locale. Confusable negatives receive the same matrix.</div>
+          <div class="row" style="margin-top:6px">
+            <button class="small" data-act="gtts" ${busy() ? 'disabled' : ''}
+              title="Adds Chirp 3 positive samples for every selected locale and voice">Generate audio</button>
+            <button class="small" data-act="save-gtts" ${busy() ? 'disabled' : ''}
+              title="Save Google TTS locales, voices, and sample count without starting synthesis">Save Google TTS config</button>
+            <button class="small" data-act="prune-gtts" ${busy() ? 'disabled' : ''}
+              title="Preview and remove generated Chirp clips outside the saved locale and voice selection">Preview prune unselected clips</button>
+          </div>
+        </div>
+        <div class="dataset-options" style="margin-top:10px">
+          <div class="microlabel">Piper audio</div>
+          <label>Locale <input data-piper-language value="en_GB" placeholder="e.g. en_GB, de_DE"></label>
+          <label>Exact voice names <input data-piper-voices placeholder="Optional comma-separated names; blank = best for locale"></label>
+          <label>Samples <input data-piper-samples type="number" min="1" value="4000"></label>
+          <div class="hint">Local, no account or API cost. Added clips displace the default US Piper set at build time.</div>
+          <div class="row" style="margin-top:6px">
+            <button class="small" data-act="piper" ${busy() ? 'disabled' : ''}
+              title="Adds local Piper voices in another accent or language">Generate audio</button>
+            <button class="small" data-act="preview-piper" ${busy() ? 'disabled' : ''}>Preview Piper</button>
+            <button class="small danger" data-act="delete-piper" ${busy() ? 'disabled' : ''}>Delete Piper samples</button>
+          </div>
+        </div>
+        <div class="dataset-options" style="margin-top:10px">
+          <div class="microlabel">Labelled dataset from controller</div>
+          <div class="row" style="margin-top:6px">
+            <button class="small" data-act="import" ${busy() ? 'disabled' : ''}
+              title="Import a labelled dataset (.zip) exported from the EchoMuse dashboard's Training tab">Import labelled dataset…</button>
+            <span class="hint" style="margin:0">then retrain to apply</span>
+          </div>
+        </div>
+        ${sourceMixPanel(w, 'positive')}
+        ${sourceMixPanel(w, 'negative')}
+        <div class="row" style="margin-top:6px"><button class="small" data-act="save-mix" ${busy() ? 'disabled' : ''}>Save training mix</button><span class="hint" data-mix-result style="margin:0"></span></div>
+      </div>
+      <div class="row" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">
+        <button class="accent" data-act="build" ${busy() ? 'disabled' : ''}>
+          ${w.features_stale ? 'Retrain new clips' : w.model_built ? 'Retrain' : w.clips_train ? 'Continue training' : 'Train'}</button>
+        ${w.model_built ? `
+          <button data-act="mic">🎤 Try it</button>
+          <button data-act="eval" ${busy() ? 'disabled' : ''} title="${w.features_stale ? 'Scores current clips against a model trained on older data' : 'Score all test clips and generate a full accuracy report'}">📊 Evaluation report</button>
+          <a href="/api/models/${esc(w.name)}.onnx"><button>Download model</button></a>` : ''}
+        <button class="danger" data-act="del" style="margin-left:auto">remove</button>
+        <input type="file" accept=".zip,application/zip" data-zip style="display:none">
       </div>
       <div class="verdict" style="display:none"></div>
       <div class="rawout" style="display:none"></div>
@@ -559,6 +567,11 @@ function render() {
       const attr = [...input.attributes].find(a => a.name.startsWith('data-mix-'));
       const key = `${card.dataset.name}:${attr?.name}`;
       if (key in pendingMix) input.value = pendingMix[key];
+    });
+    card.querySelectorAll('input[data-piper-language], input[data-piper-voices], input[data-piper-samples]').forEach(input => {
+      const attr = [...input.attributes].find(a => a.name.startsWith('data-piper-'));
+      const key = `${card.dataset.name}:${attr?.name}`;
+      if (key in pendingPiper) input.value = pendingPiper[key];
     });
   });
 }
@@ -769,19 +782,6 @@ async function startLiveTest(card, name, button) {
   }
 }
 
-/* Turn `forge.py test` output into a plain-language verdict */
-function showVerdict(card, output) {
-  const v = card.querySelector('.verdict'), raw = card.querySelector('.rawout');
-  const scores = [...output.matchAll(/peak score ([\d.]+)/g)].map(m => +m[1]);
-  raw.textContent = output.trim(); raw.style.display = '';
-  v.style.display = '';
-  if (!scores.length) { v.className = 'verdict no'; v.textContent = '✗ Could not score that audio'; return; }
-  const best = Math.max(...scores);
-  if (best >= 0.5) { v.className = 'verdict ok'; v.textContent = `✓ Heard it! (score ${best.toFixed(2)} — the device would wake)`; }
-  else if (best >= 0.2) { v.className = 'verdict info'; v.textContent = `~ Close but under the wake threshold (score ${best.toFixed(2)} of 0.5 needed) — try again closer to the mic, or import labeled captures and retrain`; }
-  else { v.className = 'verdict no'; v.textContent = `✗ Not recognised (score ${best.toFixed(2)}) — import labeled captures or a spelling variant, then retrain`; }
-}
-
 $('coreDetail').onclick = () => {
   const el = $('coreAssets');
   el.style.display = el.style.display === 'none' ? '' : 'none';
@@ -899,6 +899,10 @@ $('wakewords').addEventListener('click', async e => {
     if (!Number.isInteger(samples) || samples < 1 || !language) return alert('Enter a locale and positive sample count.');
     await api(`/api/wakewords/${name}/piper-voices`, {method: 'POST',
       headers: {'Content-Type': 'application/json'}, body: JSON.stringify({samples, language, voices})});
+  } else if (act === 'delete-piper') {
+    if (!confirm(`Delete generated Piper samples for '${name}'?`)) return;
+    const result = await api(`/api/wakewords/${name}/piper-voices/delete`, {method: 'POST'});
+    alert(`Deleted ${result.deleted} Piper sample(s). Retrain to rebuild features.`);
   } else if (act === 'preview-piper') {
     const language = card.querySelector('[data-piper-language]').value.trim() || 'en_GB';
     const voices = card.querySelector('[data-piper-voices]').value.trim().split(',').map(v => v.trim()).filter(Boolean);
@@ -937,19 +941,6 @@ $('wakewords').addEventListener('click', async e => {
       headers: {'Content-Type': 'application/json'}, body: JSON.stringify({confirm: true})});
     alert(`Deleted ${result.deleted} generated Chirp clip(s). Retrain to rebuild features.`);
     refresh();
-  } else if (act === 'test') {
-    const input = card.querySelector('input[type=file]');
-    input.onchange = async () => {
-      const fd = new FormData();
-      for (const f of input.files) fd.append('wav', f);
-      const v = card.querySelector('.verdict');
-      v.style.display = ''; v.className = 'verdict info';
-      v.textContent = 'Scoring…';
-      const r = await api(`/api/wakewords/${name}/test`, {method: 'POST', body: fd});
-      showVerdict(card, r.output);
-    };
-    input.click();
-    return;
   } else if (act === 'import') {
     const input = card.querySelector('input[data-zip]');
     input.onchange = async () => {

@@ -308,11 +308,6 @@ class WebGapTests(unittest.IsolatedAsyncioTestCase):
         req.multipart = multipart
         paths = await forge_web._save_uploads(req, "wav")
         self.assertEqual(len(paths), 1); paths[0].unlink()
-        forge.MODELS.joinpath("demo.onnx").write_bytes(b"x")
-        with patch.object(forge_web, "_save_uploads", AsyncMock(return_value=[self.root / "in.wav"])), patch.object(forge_web, "_to_wav16k") as convert, patch.object(forge_web.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="ok", stderr="")):
-            (self.root / "in.wav").write_bytes(b"x")
-            response = await forge_web.api_test(Request())
-            self.assertTrue(json.loads(response.body)["ok"]); convert.assert_called_once()
         with patch.object(forge_web, "_start_job") as start:
             with self.assertRaises(forge_web.web.HTTPBadRequest):
                 await forge_web.api_google_tts(Request({"samples": "bad"}))

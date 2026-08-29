@@ -585,6 +585,28 @@ async def api_piper_voices(request):
     return web.json_response({"ok": True})
 
 
+async def api_delete_piper_samples(request):
+    """Delete all clips classified as Piper for a wake word."""
+    name = request.match_info["name"]
+    _require_wakeword(name)
+    if _job and _job.poll() is None:
+        raise web.HTTPConflict(text="cannot delete Piper samples while a job is running")
+    cfg = yaml.safe_load((forge.WAKEWORDS / name / "config.yml").read_text())
+    work = Path(cfg["output_dir"]) / cfg["model_name"]
+    deleted = 0
+    for split in ("positive_train", "positive_test", "negative_train", "negative_test"):
+        directory = work / split
+        for path in directory.glob("*.wav") if directory.is_dir() else ():
+            if forge.clip_source(path) != "piper":
+                continue
+            try:
+                path.unlink()
+                deleted += 1
+            except OSError as error:
+                raise web.HTTPInternalServerError(text=f"could not delete {path.name}: {error}")
+    return web.json_response({"ok": True, "deleted": deleted})
+
+
 async def api_voices(request):
     """Read Piper's cached catalogue without blocking other Forge requests."""
     import piper_voices
@@ -615,33 +637,6 @@ async def api_preview(request):
     except Exception as error:
         raise web.HTTPBadGateway(text=f"could not synthesize preview: {error}")
     return web.Response(body=wav, content_type="audio/wav")
-
-
-async def api_test(request):
-    name = request.match_info["name"]
-    if not (forge.MODELS / f"{name}.onnx").exists():
-        raise web.HTTPNotFound(text="model not built yet")
-    uploads = await _save_uploads(request, "wav")
-    if not uploads:
-        raise web.HTTPBadRequest(text="no audio uploaded")
-    wavs = []
-    try:
-        for src in uploads:
-            wav = src.with_suffix(".conv.wav")
-            try:
-                _to_wav16k(src, wav)
-            except Exception as e:
-                return web.json_response({"ok": False, "output": f"could not decode audio: {e}"})
-            wavs.append(wav)
-        out = subprocess.run(
-            [sys.executable, FORGE_PY, "test", name, "--wav", *map(str, wavs)],
-            capture_output=True, text=True, timeout=300,
-        )
-        return web.json_response({"ok": out.returncode == 0,
-                                  "output": out.stdout + out.stderr})
-    finally:
-        for p in uploads + wavs:
-            p.unlink(missing_ok=True)
 
 
 async def ws_live_score(request):
@@ -738,9 +733,9 @@ def make_app() -> web.Application:
     app.router.add_post("/api/wakewords/{name}/google-tts-prune", api_prune_google_tts)
     app.router.add_get("/api/google-tts/voices", api_google_tts_voices)
     app.router.add_post("/api/wakewords/{name}/piper-voices", api_piper_voices)
+    app.router.add_post("/api/wakewords/{name}/piper-voices/delete", api_delete_piper_samples)
     app.router.add_get("/api/voices", api_voices)
     app.router.add_post("/api/preview", api_preview)
-    app.router.add_post("/api/wakewords/{name}/test", api_test)
     app.router.add_get("/api/wakewords/{name}/live-score", ws_live_score)
     app.router.add_post("/api/wakewords/{name}/evaluate", api_evaluate)
     app.router.add_post("/api/wakewords/{name}/import-dataset", api_import_dataset)

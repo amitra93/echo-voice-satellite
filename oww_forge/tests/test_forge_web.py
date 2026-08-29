@@ -114,6 +114,26 @@ class ForgeWebGoogleTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config["training_mix"]["positive"]["custom"], 60)
         self.assertEqual(config["training_mix"]["negative"]["piper"], 80)
 
+    async def test_delete_piper_samples_keeps_other_training_audio(self):
+        base = self.wakewords / "work" / "demo"
+        train = base / "positive_train"
+        test = base / "positive_test"
+        train.mkdir(parents=True)
+        test.mkdir(parents=True)
+        generated = [train / "piper_gb_000001_voice_s0.wav", test / "piper_gb_000002_voice_s0.wav"]
+        keep = train / "custom_recording.wav"
+        google = train / "google_voice.wav"
+        for path in generated + [keep, google]:
+            path.write_bytes(b"wav")
+
+        response = await forge_web.api_delete_piper_samples(Request({}))
+
+        self.assertEqual(response.status, 200)
+        self.assertEqual(json.loads(response.body)["deleted"], 2)
+        self.assertFalse(any(path.exists() for path in generated))
+        self.assertTrue(keep.exists())
+        self.assertTrue(google.exists())
+
     async def test_prune_google_tts_previews_then_deletes_only_unselected_clips(self):
         base = self.wakewords / "work" / "demo"
         for directory in ("positive_train", "positive_test", "negative_train", "negative_test"):
