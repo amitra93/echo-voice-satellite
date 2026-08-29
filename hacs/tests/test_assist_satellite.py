@@ -399,12 +399,16 @@ def test_intent_end_forwards_continue_conversation_flag():
 
     asyncio.run(entity._async_pipeline_event(PipelineEvent(
         type=PipelineEventType.INTENT_END,
-        data={"intent_output": {"continue_conversation": True}},
+        data={"intent_output": {
+            "continue_conversation": True,
+            "response": {"speech": {"plain": {"speech": "The answer."}}},
+        }},
     )))
 
     assert entity._continue_conversation is True
     assert ("turn_action", 1, "pipeline-event",
-            {"event": "intent_end", "continue_conversation": True}) in client.calls
+             {"event": "intent_end", "continue_conversation": True}) in client.calls
+    assert ("turn_action", 1, "tts-text", {"text": "The answer."}) in client.calls
 
 
 def test_tts_end_spawns_exactly_one_tts_task_even_if_seen_twice(monkeypatch):

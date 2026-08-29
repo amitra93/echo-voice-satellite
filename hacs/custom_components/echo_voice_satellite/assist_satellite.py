@@ -201,6 +201,12 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
                 await self.client.async_turn_action(turn_id, "endpoint")
                 self._endpoint_sent = True
             elif event_type == PipelineEventType.INTENT_END:
+                response = (event.data or {}).get("intent_output", {}).get("response", {})
+                speech = response.get("speech", {}).get("plain", {}).get("speech")
+                if isinstance(speech, str) and speech:
+                    await self.client.async_turn_action(
+                        turn_id, "tts-text", {"text": speech}
+                    )
                 continue_conversation = bool(
                     (event.data or {}).get("intent_output", {}).get("continue_conversation")
                 )
