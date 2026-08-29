@@ -3,6 +3,7 @@ import json
 import pytest
 
 import em_db
+import em_recordings
 
 
 @pytest.fixture
@@ -40,6 +41,34 @@ def test_device_registry_lifecycle(database):
     assert row["label"] == "Office"
     assert row["ip"] == "192.0.2.2"
     assert row["firmware_ver"] == "v2"
+
+
+def test_global_audio_prune_clears_old_file_references(database):
+    em_db.register_new_device("dev-1", "192.0.2.1", "v1")
+    em_db.register_new_device("dev-2", "192.0.2.2", "v1")
+    db_path = em_db._db_path
+    for device_id in ("dev-1", "dev-2"):
+        row = em_db.insert_turn(device_id, {"outcome": "ok"})
+        name = em_recordings.save(device_id, row, b"\0\0", db_path=db_path)
+        em_db.set_turn_audio(row, name)
+
+    result = em_db.prune_audio(keep=1)
+
+    assert result["files"] == 1
+    assert em_db.get_turn(1)["audio_file"] is None
+    assert em_db.get_turn(2)["audio_file"] is not None
+
+
+def test_reconcile_device_audio_clears_retention_stale_references(database):
+    em_db.register_new_device("dev-1", "192.0.2.1", "v1")
+    turn_id = em_db.insert_turn("dev-1", {"outcome": "ok"})
+    name = em_recordings.save("dev-1", turn_id, b"\0\0", db_path=em_db._db_path)
+    em_db.set_turn_audio(turn_id, name)
+    (em_recordings.recordings_dir(em_db._db_path) / name).unlink()
+
+    em_db.reconcile_device_audio("dev-1")
+
+    assert em_db.get_turn(turn_id)["audio_file"] is None
 
 
 def test_device_token_lifecycle(database):

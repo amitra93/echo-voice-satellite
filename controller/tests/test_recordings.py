@@ -191,3 +191,18 @@ def test_delete_device_removes_only_its_own(tmp_path):
     assert rec.delete_device("dev1", db) == 3
     assert rec.list_for("dev1", db) == []
     assert len(rec.list_for("dev2", db)) == 3
+
+
+def test_prune_all_keeps_newest_files_across_devices_and_kinds(tmp_path):
+    db = _db(tmp_path)
+    for turn in range(1, 13):
+        rec.save("dev1", turn, _pcm(20), db_path=db, keep=100, kind="stt")
+        rec.save("dev2", turn, _pcm(20), db_path=db, keep=100, kind="tts")
+
+    removed = rec.prune_all(db, keep=20)
+
+    assert len(removed) == 4
+    assert rec.list_all(db) == [
+        name for turn in range(12, 2, -1)
+        for name in (f"dev2_{turn}_tts.wav", f"dev1_{turn}.wav")
+    ]

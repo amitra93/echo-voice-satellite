@@ -730,6 +730,9 @@ function TurnObservability({ turns, devices, isAdmin }) {
   // playing then downloading costs one transfer, not two.
   const [playing, setPlaying] = useState(null);   // turn_id currently sounding
   const [gone, setGone]       = useState(() => new Set()); // 404 = pruned
+  const [removedAudio, setRemovedAudio] = useState(() => new Set());
+  const [pruningAudio, setPruningAudio] = useState(false);
+  const [pruneMessage, setPruneMessage] = useState(null);
   const audioRef = useRef(null);
   const urlsRef  = useRef({});    // turn_id -> object URL
 
@@ -778,6 +781,31 @@ function TurnObservability({ turns, devices, isAdmin }) {
     const device = devicesById.get(t.device_id);
     a.download = `${(device?.label || t.device_id).replace(/[^A-Za-z0-9]+/g, '-').toLowerCase()}-${when}-${kind}.wav`;
     a.click();
+  };
+
+  const pruneAudio = async () => {
+    if (!window.confirm('Delete all but the 20 newest STT/TTS audio files?')) return;
+    setPruningAudio(true); setPruneMessage(null);
+    try {
+      const result = await API.post('/api/recordings/prune', {});
+      const removed = new Set(result.removed || []);
+      setRemovedAudio(current => new Set([...current, ...removed]));
+      // The endpoint clears these references server-side; hide the same files
+      // immediately in the current history without waiting for a reload.
+      setGone(current => {
+        const next = new Set(current);
+        turns.forEach(t => {
+          if (removed.has(t.audio_file)) next.add(`${t.device_id}:${t.turn_id}:stt`);
+          if (removed.has(t.tts_audio_file)) next.add(`${t.device_id}:${t.turn_id}:tts`);
+        });
+        return next;
+      });
+      setPruneMessage(`Deleted ${result.files} file${result.files === 1 ? '' : 's'} · ${result.remaining} remain`);
+    } catch (e) {
+      setPruneMessage(e.error || 'Audio cleanup failed');
+    } finally {
+      setPruningAudio(false);
+    }
   };
 
   useEffect(() => () => {
@@ -893,6 +921,7 @@ function TurnObservability({ turns, devices, isAdmin }) {
                   style={{ background:'none', border:0, color:'var(--accent)', cursor:'pointer', fontFamily:mono, fontSize:9, width:72, textAlign:'left', flexShrink:0 }}>
                   {isExpanded ? '▾ Hide' : '▸ Details'}
                 </button>
+                <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--accent)', width: 48, flexShrink: 0 }}>Q#{t.turn_id}</span>
                 <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--text2)', width: 105, flexShrink: 0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{device?.label || t.device_id}</span>
                 <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)', width: 115, flexShrink: 0 }}>{date} {time}</span>
                 <div style={{ flex: 1, display: 'flex', height: 14, alignItems: 'stretch' }}>
@@ -915,14 +944,15 @@ function TurnObservability({ turns, devices, isAdmin }) {
                 <div className="em-inset" style={{ margin:'2px 0 8px', padding:'10px 12px', fontFamily:mono, fontSize:10, color:'var(--text2)', lineHeight:1.7 }}>
                   <div>{t.trigger || 'unknown trigger'} · total {fmtS(Math.max(t.total_ms || seg.shown, 0))}</div>
                   <div>STT {fmtS(seg.stt)} · HA response {fmtS(seg.ha)} · TTS + playback {fmtS(seg.tts)}</div>
-                  {t.stt_text && <div style={{ marginTop:4 }}>“{t.stt_text}”</div>}
+                   {t.stt_text && <div style={{ marginTop:4 }}>STT: “{t.stt_text}”</div>}
+                   {t.tts_text && <div style={{ marginTop:4 }}>TTS: “{t.tts_text}”</div>}
                   {t.wake_model && <div>wake {t.wake_model.replace(/\.[a-z]+$/, '').split('/').pop()} · score {t.wake_score?.toFixed(3)} · threshold {t.wake_threshold?.toFixed(2)}</div>}
                   {isAdmin && (t.audio_file || t.tts_audio_file) && (
                     <div style={{ display:'flex', gap:8, flexWrap:'wrap', marginTop:8 }}>
                       {['stt', 'tts'].map(kind => {
                         const exists = kind === 'stt' ? t.audio_file : t.tts_audio_file;
                         const audioKey = `${key}:${kind}`;
-                        if (!exists || gone.has(audioKey)) return null;
+                         if (!exists || gone.has(audioKey) || removedAudio.has(exists)) return null;
                         return <React.Fragment key={kind}>
                           <Pill small onClick={() => toggleAudio(t, kind)}>{playing === audioKey ? `Stop ${kind.toUpperCase()}` : `Play ${kind.toUpperCase()}`}</Pill>
                           <Pill small onClick={() => downloadAudio(t, kind)}>Download {kind.toUpperCase()}</Pill>
@@ -935,15 +965,19 @@ function TurnObservability({ turns, devices, isAdmin }) {
               </React.Fragment>
             );
           })}
-          {pages > 1 && (
+          {(pages > 1 || isAdmin) && (
             <div style={{ display:'flex', alignItems:'center', justifyContent:'flex-end', gap:8, marginTop:14 }}>
               <span style={{ fontFamily:mono, fontSize:10, color:'var(--muted)', marginRight:'auto' }}>
-                {currentPage * HISTORY_PAGE_SIZE + 1}–{Math.min((currentPage + 1) * HISTORY_PAGE_SIZE, recent.length)} of {recent.length}
+                 {currentPage * HISTORY_PAGE_SIZE + 1}–{Math.min((currentPage + 1) * HISTORY_PAGE_SIZE, recent.length)} of {recent.length}
               </span>
+              {isAdmin && <Pill small disabled={pruningAudio} onClick={pruneAudio}>
+                {pruningAudio ? 'Cleaning audio…' : 'Delete all but 20 old STT/TTS audio files'}
+              </Pill>}
               <Pill small disabled={currentPage === 0} onClick={() => setPage(p => Math.max(0, p - 1))}>Previous</Pill>
               <Pill small disabled={currentPage >= pages - 1} onClick={() => setPage(p => Math.min(pages - 1, p + 1))}>Next</Pill>
             </div>
           )}
+          {isAdmin && pruneMessage && <div style={{ marginTop:8, fontFamily:mono, fontSize:10, color:'var(--muted)', textAlign:'right' }}>{pruneMessage}</div>}
         </div>
       )}
     </div>
@@ -4920,7 +4954,7 @@ const STAGE_MONO = "'DM Mono',monospace";
 // control sitting under a toggle that does not govern it would look fine and
 // be silently wrong.
 const CONFIG_SECTIONS = {
-  "playback": ["eqBands", "eqLoudness", "duckDb", "limiterEnabled", "limiterRelease", "bassGuardEnabled", "bassGuardDb"],
+  "playback": ["eqBands", "eqLoudness", "ttsGainDb", "duckDb", "limiterEnabled", "limiterRelease", "bassGuardEnabled", "bassGuardDb"],
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "saveWakeCaptures", "wakeCaptureSec", "wakeNearMissFloor"],
   "microphones": ["afeMicGainDb", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
@@ -5163,7 +5197,9 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
           </div>
           <div>
             <div style={inputStyle}>
-              <Toggle label="Speech boost" sub="presence boost for voice" value={config.eqLoudness ?? false} onChange={v => set('eqLoudness', v)}/>
+              <Slider label="Speech boost" sub="additional gain applied to TTS before the speaker limiter"
+                value={config.ttsGainDb ?? 0} min={0} max={12} step={0.5} unit="dB"
+                disabled={disabled} onChange={v => set('ttsGainDb', v)}/>
             </div>
             {/* Speaker protection: ONE toggle for the bass guard here, plus
                 the limiter CEILING in the advanced panel below. The limiter's

@@ -15,7 +15,7 @@ def test_slug_produces_safe_filenames():
 
 
 def test_redact_turns_preserves_admin_rows_and_removes_transcripts():
-    turns = [{"id": 1, "stt_text": "private", "outcome": "ok"}]
+    turns = [{"id": 1, "stt_text": "private", "tts_text": "also private", "outcome": "ok"}]
     assert em_api._redact_turns_for(turns, {"role": "admin"}) is turns
     assert em_api._redact_turns_for(turns, {"role": "readonly"}) == [
         {"id": 1, "outcome": "ok"}

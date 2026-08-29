@@ -153,6 +153,7 @@ def apply(
     bands: list | None = None,
     loudness: bool = False,
     subsonic: bool = True,
+    gain_db: float = 0.0,
     limiter: "em_limiter.Limiter | None" = None,
     guard: "em_mbc.BassGuard | None" = None,
 ) -> bytes:
@@ -186,7 +187,8 @@ def apply(
         log.warning(f"[eq] Expected {NUM_BANDS} bands, got {len(bands)} — padding with zeros")
         bands = list(bands) + [0.0] * (NUM_BANDS - len(bands))
 
-    flat = not loudness and not subsonic and all(b == 0.0 for b in bands)
+    gain_db = float(gain_db)
+    flat = not loudness and not subsonic and gain_db == 0.0 and all(b == 0.0 for b in bands)
     if flat and limiter is None and guard is None:
         return pcm
 
@@ -199,6 +201,8 @@ def apply(
     # midrange for no reason.
     if guard is not None:
         samples = guard.process(samples)
+    if gain_db:
+        samples *= 10.0 ** (gain_db / 20.0)
     if limiter is not None:
         samples = np.concatenate([limiter.process(samples), limiter.flush()])
     # Backstop only. With a limiter attached this must never engage; without
@@ -218,12 +222,14 @@ class StreamingEQ:
 
     def __init__(self, sample_rate: int, bands: list | None = None,
                  loudness: bool = False, subsonic: bool = True,
+                 gain_db: float = 0.0,
                  limiter: "em_limiter.Limiter | None" = None,
                  guard: "em_mbc.BassGuard | None" = None):
         self._limiter = limiter
         self._guard = guard
         self._sample_rate = int(sample_rate)   # set_bands rebuilds against it
         self._subsonic = bool(subsonic)
+        self._gain_db = float(gain_db)
         # Last values update() applied; None until it is first called, so the
         # first call always lands rather than matching a coincidental default.
         self._applied = None
@@ -324,13 +330,15 @@ class StreamingEQ:
 
     def process(self, pcm: bytes) -> bytes:
         if len(pcm) < 2 or (self._sos is None and self._limiter is None
-                            and self._guard is None):
+                            and self._guard is None and self._gain_db == 0):
             return pcm
         samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float64)
         if self._sos is not None:
             samples, self._zi = sosfilt(self._sos, samples, zi=self._zi)
         if self._guard is not None:
             samples = self._guard.process(samples)
+        if self._gain_db:
+            samples *= 10.0 ** (self._gain_db / 20.0)
         if self._limiter is not None:
             samples = self._limiter.process(samples)
         return np.clip(samples, -32768, 32767).astype(np.int16).tobytes()

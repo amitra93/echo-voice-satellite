@@ -177,6 +177,7 @@ DEFAULT_DEVICE_CONFIG = {
     "bleProxyEnabled":  False,
     "eqBands":          [4.5, 3.0, -0.5, 0.0, 1.5, 1.0, 0.0, 1.5],
     "eqLoudness":       True,
+    "ttsGainDb":        0.0,
     # Output limiter and dynamic bass guard protect the device after EQ.
     # Dynamic bass guard. Removes low-frequency content the driver cannot
     # deliver, which is what makes the midrange clean — see em_mbc.
@@ -766,6 +767,13 @@ MIGRATIONS: list[str] = [
     # ── v24 — remove retired controller audio processing settings ───────────
     """
     UPDATE system_config SET value = '24' WHERE key = 'schema_version';
+    """,
+
+    # ── v25 — persist the text Home Assistant sends to TTS ─────────────────
+    """
+    ALTER TABLE turns ADD COLUMN tts_text TEXT;
+
+    UPDATE system_config SET value = '25' WHERE key = 'schema_version';
     """,
 ]
 
@@ -1632,6 +1640,7 @@ _TURN_COLUMNS = {
     # insert time; listed here so get_turns returns it.
     "audio_file":       "audio_file",
     "tts_audio_file":   "tts_audio_file",
+    "tts_text":         "tts_text",
     "stt_latency_ms":   "stt_latency_ms",
     "ha_latency_ms":    "ha_latency_ms",
     "tts_latency_ms":   "tts_latency_ms",
@@ -1759,6 +1768,57 @@ def set_turn_tts_audio(turn_id: int, audio_file: Optional[str]) -> None:
             "UPDATE turns SET tts_audio_file = ? WHERE id = ?",
             (audio_file, turn_id),
         )
+
+
+def reconcile_device_audio(device_id: str) -> None:
+    """Clear audio references whose retained files no longer exist."""
+    if _conn is None:
+        return
+    rows = _q(
+        "SELECT id, audio_file, tts_audio_file FROM turns WHERE device_id = ? "
+        "AND (audio_file IS NOT NULL OR tts_audio_file IS NOT NULL)",
+        (device_id,),
+    )
+    stale: list[tuple[int, Optional[str], Optional[str]]] = []
+    for row in rows:
+        stt = row["audio_file"] if row["audio_file"] and not em_recordings.resolve(
+            device_id, row["audio_file"], _db_path
+        ) else None
+        tts = row["tts_audio_file"] if row["tts_audio_file"] and not em_recordings.resolve(
+            device_id, row["tts_audio_file"], _db_path
+        ) else None
+        if stt or tts:
+            stale.append((row["id"], stt, tts))
+    if not stale:
+        return
+    with _tx() as conn:
+        for turn_id, stt, tts in stale:
+            if stt:
+                conn.execute("UPDATE turns SET audio_file = NULL WHERE id = ?", (turn_id,))
+            if tts:
+                conn.execute("UPDATE turns SET tts_audio_file = NULL WHERE id = ?", (turn_id,))
+
+
+def prune_audio(keep: int = 20) -> dict[str, object]:
+    """Remove old global STT/TTS files and clear their turn-row references."""
+    removed = em_recordings.prune_all(db_path=_db_path, keep=keep)
+    if not removed:
+        return {"files": 0, "removed": [], "remaining": len(em_recordings.list_all(_db_path)),
+                "stt_references": 0, "tts_references": 0}
+
+    placeholders = ", ".join("?" for _ in removed)
+    with _tx() as conn:
+        stt = conn.execute(
+            f"UPDATE turns SET audio_file = NULL WHERE audio_file IN ({placeholders})",
+            removed,
+        ).rowcount
+        tts = conn.execute(
+            f"UPDATE turns SET tts_audio_file = NULL WHERE tts_audio_file IN ({placeholders})",
+            removed,
+        ).rowcount
+    return {"files": len(removed), "removed": removed,
+            "remaining": len(em_recordings.list_all(_db_path)),
+            "stt_references": stt, "tts_references": tts}
 
 
 def set_turn_delivery(turn_id: int, send_ms: int, delivery_ms: int,

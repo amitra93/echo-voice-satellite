@@ -470,6 +470,7 @@ class Device:
         # Controller-only TTS makeup gain. Applied before the output limiter,
         # never to music, so it improves speech intelligibility/loudness
         # without changing the user's media volume.
+        self.tts_gain_db = 0.0
 
         # Recent voice-turn traces (turn_record-shaped dicts, appended by
         # em_turn_engine._remember_turn at turn completion) — powers the
@@ -1288,8 +1289,8 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
         # (observed as spinner stutter and console typing judder).
         def _prepare_pcm() -> bytes:
              return em_eq.apply(voice_response, SPEAKER_RATE, device.eq_bands,
-                                device.eq_loudness, limiter=_limiter,
-                                guard=_guard)
+                                device.eq_loudness, gain_db=device.tts_gain_db,
+                                limiter=_limiter, guard=_guard)
 
         _t_eq0 = asyncio.get_event_loop().time()
         speaker_pcm = await asyncio.get_event_loop().run_in_executor(None, _prepare_pcm)
@@ -1435,6 +1436,7 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
             SPEAKER_RATE,
             device.eq_bands,
             device.eq_loudness,
+            gain_db=device.tts_gain_db,
             limiter=_limiter,
             guard=_guard,
         )
@@ -2862,6 +2864,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         ).add_done_callback(_log_task_exception)
         device.eq_bands      = config.get("eqBands", [0.0] * 8)
         device.eq_loudness   = bool(config.get("eqLoudness", False))
+        device.tts_gain_db   = max(0.0, min(12.0, float(config.get("ttsGainDb", 0.0))))
         device.bass_guard_enabled = bool(config.get("bassGuardEnabled", True))
         device.bass_guard_db      = float(config.get(
             "bassGuardDb", em_mbc.DEFAULT_BASS_GUARD_DB))

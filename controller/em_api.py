@@ -339,6 +339,7 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/devices/{id}/activity",      _get_device_activity)
     app.router.add_get("/api/devices/{id}/turns/{turn}/audio", _get_turn_audio)
     app.router.add_get("/api/devices/{id}/turns/{turn}/audio/{kind}", _get_turn_audio)
+    app.router.add_post("/api/recordings/prune", _post_recordings_prune)
 
     # Wake-word training captures (admin-only)
     app.router.add_get("/api/training_captures", _get_training_captures)
@@ -384,7 +385,7 @@ async def create_app() -> web.Application:
     # 1 wires these handlers to em_turn_engine's live state machine.
     app.router.add_post("/api/devices/{id}/turn", auth.require_integration_or_admin(em_turn_engine.create_turn))
     for action in ("accept", "reject", "endpoint", "cancel", "tts/start",
-                   "tts/end", "transcript", "pipeline-event"):
+                   "tts/end", "tts-text", "transcript", "pipeline-event"):
         app.router.add_post(
             f"/api/turns/{{tid}}/{action}",
             auth.require_integration_or_admin(em_turn_engine.turn_action),
@@ -733,6 +734,7 @@ async def _get_device_turns(request: web.Request) -> web.Response:
     except ValueError:
         return _error("bad_request", "limit/since must be numeric", 400)
     loop  = asyncio.get_event_loop()
+    await loop.run_in_executor(None, db.reconcile_device_audio, device_id)
     turns = await loop.run_in_executor(
         None, lambda: db.get_turns(device_id, limit, since)
     )
@@ -756,7 +758,15 @@ def _redact_turns_for(turns: list, user: dict) -> list:
     """
     if user.get("role") == "admin":
         return turns
-    return [{k: v for k, v in t.items() if k != "stt_text"} for t in turns]
+    return [{k: v for k, v in t.items() if k not in ("stt_text", "tts_text")} for t in turns]
+
+
+@auth.require_admin
+async def _post_recordings_prune(request: web.Request) -> web.Response:
+    """POST /api/recordings/prune — keep the newest 20 STT/TTS files globally."""
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, db.prune_audio, 20)
+    return _ok(result)
 
 
 @auth.require_admin
@@ -1249,6 +1259,8 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         live.eq_bands = effective["eqBands"]
     if "eqLoudness" in effective:
         live.eq_loudness = bool(effective["eqLoudness"])
+    if "ttsGainDb" in effective:
+        live.tts_gain_db = max(0.0, min(12.0, float(effective["ttsGainDb"])))
     # The output chain is consumed HERE, not on the device — it ignores these
     # five keys entirely — so this mirror is the only thing that carries them.
     # Missing it meant a push wrote the database, sent JSON the device threw

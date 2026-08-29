@@ -83,6 +83,22 @@ def test_streaming_eq_flat_is_passthrough():
     assert eq.process(chunk) == chunk
 
 
+def test_tts_gain_increases_level_before_processing():
+    pcm = (np.ones(4800, dtype=np.int16) * 1000).tobytes()
+    flat = em_eq.apply(pcm, RATE, bands=[0.0] * 8, subsonic=False)
+    boosted = em_eq.apply(pcm, RATE, bands=[0.0] * 8, subsonic=False, gain_db=6)
+    assert np.mean(np.abs(np.frombuffer(boosted, dtype=np.int16))) > \
+        np.mean(np.abs(np.frombuffer(flat, dtype=np.int16))) * 1.9
+
+
+def test_streaming_tts_gain_matches_buffered_gain():
+    pcm = (np.ones(4800, dtype=np.int16) * 1000).tobytes()
+    eq = em_eq.StreamingEQ(RATE, bands=[0.0] * 8, subsonic=False, gain_db=6)
+    out = eq.process(pcm[:4000]) + eq.process(pcm[4000:])
+    want = em_eq.apply(pcm, RATE, bands=[0.0] * 8, subsonic=False, gain_db=6)
+    assert out == want
+
+
 def test_subsonic_filter_attenuates_sub_bass():
     sub = _sine(35)
     mid = _sine(1000)

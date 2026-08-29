@@ -128,10 +128,16 @@ def test_query_history_rows_are_filterable_and_paginated():
     assert 'label="HA response median"' in dashboard
     assert 'label="HA response P90"' in dashboard
     assert 'label="HA response P99"' in dashboard
+    assert 'label="Speech boost"' in dashboard
+    assert "ttsGainDb" in dashboard
     assert "ha_latency_ms" in dashboard
     assert "percentile(haResponse" in dashboard
+    assert "Deleted ${result.files}" in dashboard
+    assert "${result.remaining} remain" in dashboard
+    assert "removedAudio.has(exists)" in dashboard
     assert "stt_latency_ms" in dashboard
     assert "tts_latency_ms" in dashboard
+    assert 'TTS: “{t.tts_text}”' in dashboard
     assert "Play ${kind.toUpperCase()}" in dashboard
     assert "Download {kind.toUpperCase()}" in dashboard
     assert "isExpanded ? '▾ Hide' : '▸ Details'" in dashboard

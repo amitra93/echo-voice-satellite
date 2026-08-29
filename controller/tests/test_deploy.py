@@ -1116,6 +1116,11 @@ def test_recordings_and_transcripts_are_admin_only():
     assert audio.group(1) == "@auth.require_admin", (
         "the utterance audio route must be admin-only")
 
+    prune = re.search(
+        r"(@auth\.require_\w+)\s*\nasync def _post_recordings_prune\b", src)
+    assert prune and prune.group(1) == "@auth.require_admin", (
+        "global audio cleanup must be admin-only")
+
     turns = re.search(
         r"async def _get_device_turns\b.*?\n(?=\n@|\ndef |\nasync def )",
         src, re.S)

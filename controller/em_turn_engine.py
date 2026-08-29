@@ -130,6 +130,7 @@ class Turn:
     tts_started_mono: float | None = None
     tts_ended_mono: float | None = None
     stt_text: str | None = None
+    tts_text: str | None = None
     capture_audio: bool = False
     initial_audio: tuple[bytes, ...] = ()
     mic_audio: bytearray = field(default_factory=bytearray)
@@ -305,6 +306,14 @@ async def turn_action(request: web.Request) -> web.Response:
         if isinstance(text, str) and text:
             turn.stt_text = text
             turn.transcript_mono = turn.transcript_mono or time.monotonic()
+    elif action == "tts-text":
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        text = body.get("text")
+        if isinstance(text, str) and text:
+            turn.tts_text = text
     elif action == "pipeline-event":
         body = {}
         try:
@@ -479,6 +488,7 @@ def _turn_record(turn: Turn, outcome: str) -> dict:
     return {
         "outcome": outcome,
         "stt_text": turn.stt_text,
+        "tts_text": turn.tts_text,
         "total_ms": round((end - turn.started_mono) * 1000),
         "stt_latency_ms": round((stt_end - turn.started_mono) * 1000) if stt_end else None,
         "ha_latency_ms": round((ha_end - ha_start) * 1000) if ha_end else None,

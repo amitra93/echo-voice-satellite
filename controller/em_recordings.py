@@ -157,6 +157,21 @@ def list_for(device_id: str, db_path: str | None = None) -> list[str]:
     return [name for _, name in entries]
 
 
+def list_all(db_path: str | None = None) -> list[str]:
+    """All recording filenames, newest turn first across every device."""
+    directory = recordings_dir(db_path)
+    if not directory.is_dir():
+        return []
+    entries: list[tuple[int, str, str]] = []
+    for child in directory.iterdir():
+        parsed = parse_filename(child.name)
+        if parsed:
+            device, turn, kind = parsed
+            entries.append((turn, kind, child.name))
+    entries.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [name for _, _, name in entries]
+
+
 def prune(device_id: str, db_path: str | None = None,
           keep: int = KEEP_PER_DEVICE) -> list[str]:
     """
@@ -171,6 +186,19 @@ def prune(device_id: str, db_path: str | None = None,
         parsed = parse_filename(name)
         if parsed and parsed[1] in keep_turns:
             continue
+        try:
+            (directory / name).unlink()
+            removed.append(name)
+        except OSError as e:
+            log.warning(f"[recordings] Could not prune {name}: {e}")
+    return removed
+
+
+def prune_all(db_path: str | None = None, keep: int = 20) -> list[str]:
+    """Delete all but the newest `keep` STT/TTS files globally."""
+    directory = recordings_dir(db_path)
+    removed: list[str] = []
+    for name in list_all(db_path)[max(keep, 0):]:
         try:
             (directory / name).unlink()
             removed.append(name)

@@ -160,6 +160,9 @@ def test_turn_actions_record_transcript_and_component_latencies(monkeypatch):
             request.path = "/api/turns/11/transcript"
             request.body = {"text": "turn on the light"}
             await engine.turn_action(request)
+            request.path = "/api/turns/11/tts-text"
+            request.body = {"text": "The light is on."}
+            await engine.turn_action(request)
             request.path = "/api/turns/11/endpoint"
             await engine.turn_action(request)
             request.path = "/api/turns/11/pipeline-event"
@@ -177,6 +180,7 @@ def test_turn_actions_record_transcript_and_component_latencies(monkeypatch):
 
             rec = engine._turn_record(turn, "ok")
             assert rec["stt_text"] == "turn on the light"
+            assert rec["tts_text"] == "The light is on."
             assert rec["stt_latency_ms"] >= 900
             assert rec["ha_latency_ms"] >= 0
             assert rec["tts_latency_ms"] >= 1900
