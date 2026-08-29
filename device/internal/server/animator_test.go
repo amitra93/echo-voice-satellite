@@ -188,17 +188,17 @@ func TestAnimationGoroutinesRenderAndStop(t *testing.T) {
 			s.SetAudioLevel(0.2)
 			s.StartAnim(AnimSpec{Pattern: pattern, Colors: [][3]uint8{{10, 20, 30}}, PeriodMs: 1})
 			deadline := time.Now().Add(250 * time.Millisecond)
-			for len(c.sets) == 0 && time.Now().Before(deadline) {
+			for c.frameCount() == 0 && time.Now().Before(deadline) {
 				time.Sleep(time.Millisecond)
 			}
 			s.StopAnim()
-			if len(c.sets) == 0 {
+			if c.frameCount() == 0 {
 				t.Fatal("animation did not render a frame")
 			}
-			count := len(c.sets)
+			count := c.frameCount()
 			time.Sleep(10 * time.Millisecond)
-			if len(c.sets) > count+1 {
-				t.Fatalf("animation continued after StopAnim: %d -> %d frames", count, len(c.sets))
+			if got := c.frameCount(); got > count+1 {
+				t.Fatalf("animation continued after StopAnim: %d -> %d frames", count, got)
 			}
 		})
 	}
