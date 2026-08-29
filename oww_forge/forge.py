@@ -1634,6 +1634,15 @@ def cmd_piper_voices(args) -> None:
         assets=ASSETS, voices=args.voices.split(",") if args.voices else None,
         language=args.language,
     )
+    confusables = cfg.get("custom_negative_phrases") or []
+    if confusables:
+        log(f"adding Piper confusable negatives: {confusables}")
+        piper_voices.synthesize(
+            phrases=confusables, n_samples=args.samples,
+            train_dir=out_base / "negative_train", test_dir=out_base / "negative_test",
+            assets=ASSETS, voices=args.voices.split(",") if args.voices else None,
+            language=args.language,
+        )
 
 
 # ---------------------------------------------------------------- ui

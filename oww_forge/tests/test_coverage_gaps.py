@@ -246,15 +246,19 @@ class ForgeGapTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp); old_w = forge.WAKEWORDS; forge.WAKEWORDS = root / "ww"
             cfgdir = forge.WAKEWORDS / "demo"; cfgdir.mkdir(parents=True)
-            (cfgdir / "config.yml").write_text("model_name: demo\noutput_dir: %s\ntarget_phrase: [hi]\n" % root)
+            (cfgdir / "config.yml").write_text("model_name: demo\noutput_dir: %s\ntarget_phrase: [hi]\ncustom_negative_phrases: [stop]\n" % root)
             fake = types.ModuleType("piper_voices"); fake.languages = lambda a: [{"language": "en", "voices": 1, "max_speakers": 1, "label": "English"}]
             fake.catalogue = lambda a: [{"language": "en_GB", "speakers": 1, "quality": "x", "name": "v"}]
-            fake.synthesize = lambda **kw: kw
+            syntheses = []
+            fake.synthesize = lambda **kw: syntheses.append(kw)
             old_p = sys.modules.get("piper_voices"); sys.modules["piper_voices"] = fake
             try:
                 with patch("builtins.print"):
                     forge.cmd_voices(SimpleNamespace(language=None)); forge.cmd_voices(SimpleNamespace(language="en_GB"))
                 forge.cmd_piper_voices(SimpleNamespace(name="demo", samples=2, language="en_GB", voices="v"))
+                self.assertEqual(len(syntheses), 2)
+                self.assertEqual(syntheses[1]["phrases"], ["stop"])
+                self.assertIn("negative_train", str(syntheses[1]["train_dir"]))
                 with patch.object(forge.subprocess, "run") as run:
                     forge._convert_16k(root / "a.ogg", root / "b.wav")
                     run.assert_called_once()
