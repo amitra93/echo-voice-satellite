@@ -3,12 +3,14 @@ package server
 import (
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 
 	"github.com/wilbowes/EchoMuse/pkg/led"
 )
 
 type recordingLEDController struct {
+	mu   sync.Mutex
 	sets [][]led.Led
 }
 
@@ -33,9 +35,17 @@ func (c *recordingLEDController) Init() error { return nil }
 func (c *recordingLEDController) GetNumLEDs() (int, error) { return numLEDs, nil }
 
 func (c *recordingLEDController) SetLEDs(values ...led.Led) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	copyValues := append([]led.Led(nil), values...)
 	c.sets = append(c.sets, copyValues)
 	return nil
+}
+
+func (c *recordingLEDController) frameCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.sets)
 }
 
 func newTestServer(c *recordingLEDController) *Server {
@@ -248,6 +258,28 @@ func TestMuteControllerNotifiesAndPersistsBothTransitions(t *testing.T) {
 	}
 }
 
+// applyMute()/Toggle() never run with a non-nil LED controller in any other
+// test in this file, so showMuteLEDs' actual paint — as opposed to its
+// lc==nil early return — is otherwise untested.
+func TestShowMuteLEDsPaintsRedRing(t *testing.T) {
+	fake := &recordingLEDController{}
+	m := newMuteController(func() led.Controller { return fake }, nil)
+	m.showMuteLEDs()
+	if len(fake.sets) == 0 {
+		t.Fatal("showMuteLEDs did not paint anything")
+	}
+	for _, pixel := range fake.sets[len(fake.sets)-1] {
+		if pixel.R != 180 || pixel.G != 0 || pixel.B != 0 {
+			t.Fatalf("mute ring pixel = %+v, want solid red", pixel)
+		}
+	}
+}
+
+func TestShowMuteLEDsLogsOnSetFailureWithoutPanicking(t *testing.T) {
+	m := newMuteController(func() led.Controller { return &failingLEDController{set: true} }, nil)
+	m.showMuteLEDs() // must not panic
+}
+
 func TestMuteRestoreSetsStateBeforeHardwareIsReady(t *testing.T) {
 	m := newMuteController(func() led.Controller { return nil }, nil)
 	m.RestoreMuted()
@@ -266,7 +298,7 @@ func TestServerVolumeAndMuteCallbacks(t *testing.T) {
 	s.SetMuteChangeCallback(func(value bool) { muted = value })
 	s.SetVolume(12)
 	s.MuteToggle()
-	if volume != 12 || !muted || !s.IsMuted() || s.VolumeLevel() != 12 {
+	if volume != volumeButtonFloor || !muted || !s.IsMuted() || s.VolumeLevel() != volumeButtonFloor {
 		t.Fatalf("server state volume=%d muteCallback=%v muted=%v level=%d", volume, muted, s.IsMuted(), s.VolumeLevel())
 	}
 	s.LEDModeDirection()

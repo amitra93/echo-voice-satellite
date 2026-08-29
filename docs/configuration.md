@@ -144,6 +144,11 @@ It is also never inherited from the fleet, whatever the section's Fleet /
 Device switch says — otherwise a device would come back at another room's
 volume.
 
+On the AFE/OpenSL path, the ten physical volume levels map directly to Android
+`STREAM_MUSIC` indices **21 through 30**. Level 1 is index 21 and level 10 is
+index 30. Home Assistant and Music Assistant commands snap every nonzero
+volume to the same ten levels; `0` remains mute.
+
 **The top of the range changed in 2.20.0.** EchoMuse used to drive the
 codec's digital volume past the point where it can only clip — measured at
 65% distortion three button presses above the midpoint, and 89% at the

@@ -2,6 +2,7 @@ package server
 
 import (
 	"github.com/wilbowes/EchoMuse/pkg/led"
+	"sync"
 	"testing"
 	"time"
 )
@@ -9,17 +10,44 @@ import (
 // fakeLEDController records what it was asked to paint — enough to observe
 // showLEDs actually running, unlike passing a nil led.Controller (showLEDs
 // returns before touching displayActive when its getter yields nil).
+//
+// Guarded by a mutex because showLEDs' 2s expiry paints from its own
+// AfterFunc goroutine — any test that forces that timer to fire (rather
+// than only ever calling showLEDs synchronously, as the older tests below
+// do) reads setCalls/leds concurrently with that goroutine's write.
 type fakeLEDController struct {
+	mu       sync.Mutex
 	setCalls int
 	leds     []led.Led
+}
+
+func TestRemoteVolumeLevelSnapsNonzeroValuesToPhysicalSteps(t *testing.T) {
+	for _, tt := range []struct{ in, want int }{
+		{0, 0}, {1, 73}, {72, 73}, {73, 73}, {76, 79}, {97, 97}, {127, 127}, {200, 127},
+	} {
+		if got := remoteVolumeLevel(tt.in); got != tt.want {
+			t.Errorf("remoteVolumeLevel(%d) = %d, want %d", tt.in, got, tt.want)
+		}
+	}
 }
 
 func (f *fakeLEDController) Init() error              { return nil }
 func (f *fakeLEDController) GetNumLEDs() (int, error) { return numLEDs, nil }
 func (f *fakeLEDController) SetLEDs(leds ...led.Led) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
 	f.setCalls++
 	f.leds = append([]led.Led(nil), leds...)
 	return nil
+}
+
+// snapshotLeds is the safe read side of the mutex above — for tests that
+// read after forcing the expiry timer, where a direct f.leds access would
+// race the timer goroutine's write.
+func (f *fakeLEDController) snapshotLeds() []led.Led {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]led.Led(nil), f.leds...)
 }
 
 // SetVolume (the controller/HA remote-command path) used to pass showRing
@@ -260,5 +288,148 @@ func TestVolumeStepUpUnmutesWhenMuted(t *testing.T) {
 
 	if s.mute.IsMuted() {
 		t.Fatal("VolumeStepUp must unmute the device when muted")
+	}
+}
+
+// nextButtonLevel/previousButtonLevel each have a branch StepUp/StepDown
+// never reach in practice (Set() already clamps vc.level into the button
+// band before these run) but must still answer correctly: a stored level
+// from before the cap, or one HA set directly below the floor, has to land
+// ON the floor from a single press rather than being treated as in-band.
+func TestNextButtonLevelBelowFloorLandsOnFloor(t *testing.T) {
+	if got := nextButtonLevel(volumeButtonFloor - 20); got != volumeButtonFloor {
+		t.Fatalf("nextButtonLevel(below floor) = %d, want %d", got, volumeButtonFloor)
+	}
+}
+
+func TestPreviousButtonLevelAtOrBelowFloorStaysOnFloor(t *testing.T) {
+	if got := previousButtonLevel(volumeButtonFloor); got != volumeButtonFloor {
+		t.Fatalf("previousButtonLevel(floor) = %d, want %d", got, volumeButtonFloor)
+	}
+	if got := previousButtonLevel(volumeButtonFloor - 20); got != volumeButtonFloor {
+		t.Fatalf("previousButtonLevel(below floor) = %d, want %d", got, volumeButtonFloor)
+	}
+}
+
+// showLEDs is called directly (not through Set) by a remote HA volume set
+// below the button floor — Set() does not floor explicit values — so the
+// arc math must not go negative and paint garbage.
+func TestShowLEDsHandlesALevelBelowTheButtonFloor(t *testing.T) {
+	fake := &fakeLEDController{}
+	vc := newVolumeController(func() led.Controller { return fake })
+	vc.showLEDs(1)
+	lit := 0
+	for _, pixel := range fake.leds {
+		if pixel.G != 0 {
+			lit++
+		}
+	}
+	if lit != 1 {
+		t.Fatalf("lit = %d, want the floor of 1 LED, not a negative/zero arc", lit)
+	}
+}
+
+// The volume arc's 2s hold ends by handing the ring to whichever of three
+// things owns it next: the mute indicator, the caller's own repaint hook,
+// or (absent both) a plain clear. All three are wired through the same
+// AfterFunc closure, which no other test waits for — Reset to a near-zero
+// duration exercises the real closure instead of waiting out the real 2s.
+func TestVolumeArcExpiryRestoresMuteRing(t *testing.T) {
+	fake := &fakeLEDController{}
+	vc := newVolumeController(func() led.Controller { return fake })
+	vc.isMuted = func() bool { return true }
+	vc.showLEDs(volumeButtonFloor)
+
+	vc.mu.Lock()
+	vc.timer.Reset(time.Millisecond)
+	vc.mu.Unlock()
+	time.Sleep(30 * time.Millisecond)
+
+	if vc.DisplayActive() {
+		t.Fatal("arc still marked active after its timer fired")
+	}
+	leds := fake.snapshotLeds()
+	for _, pixel := range leds {
+		if pixel.R != 180 || pixel.G != 0 || pixel.B != 0 {
+			t.Fatalf("expiry while muted did not restore the red ring: %+v", leds)
+		}
+	}
+}
+
+func TestVolumeArcExpiryCallsOnDisplayExpireWhenSet(t *testing.T) {
+	fake := &fakeLEDController{}
+	vc := newVolumeController(func() led.Controller { return fake })
+	done := make(chan struct{})
+	vc.onDisplayExpire = func() { close(done) }
+	vc.showLEDs(volumeButtonFloor)
+
+	vc.mu.Lock()
+	vc.timer.Reset(time.Millisecond)
+	vc.mu.Unlock()
+	select {
+	case <-done:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("expiry did not hand the ring back via onDisplayExpire")
+	}
+}
+
+// ─── readFromDevice's tinymix output parsing ────────────────────────────────
+//
+// tinymixGet is a seam specifically so these branches — not just "tinymix
+// binary is missing", which every other test above exercises for free by
+// running on a host without it — get covered: the actual dB-linear cap this
+// package exists to enforce lives in the clamp below.
+
+func withFakeTinymixGet(t *testing.T, out string, err error) {
+	t.Helper()
+	old := tinymixGet
+	tinymixGet = func() ([]byte, error) { return []byte(out), err }
+	t.Cleanup(func() { tinymixGet = old })
+}
+
+func TestReadFromDeviceParsesTinymixOutput(t *testing.T) {
+	withFakeTinymixGet(t, "PCM Playback Volume: 100 100 (range 0->175)", nil)
+	vc := newVolumeController(func() led.Controller { return nil })
+	if got := vc.readFromDevice(); got != 100 {
+		t.Fatalf("readFromDevice() = %d, want 100", got)
+	}
+}
+
+// A device left above the codec's unity-gain cap (index 127) — an older
+// config, or manual tinkering — must not report back into the distorting
+// range; the whole point of volumeMax is that nothing ever sets it there
+// deliberately, including a read of the control's own state.
+func TestReadFromDeviceClampsAboveVolumeMax(t *testing.T) {
+	withFakeTinymixGet(t, "PCM Playback Volume: 175 175 (range 0->175)", nil)
+	vc := newVolumeController(func() led.Controller { return nil })
+	if got := vc.readFromDevice(); got != volumeMax {
+		t.Fatalf("readFromDevice() = %d, want clamped to volumeMax %d", got, volumeMax)
+	}
+}
+
+func TestReadFromDeviceFallsBackOnUnparsableOutput(t *testing.T) {
+	withFakeTinymixGet(t, "not tinymix output at all", nil)
+	vc := newVolumeController(func() led.Controller { return nil })
+	want := (volumeButtonFloor + volumeMax) / 2
+	if got := vc.readFromDevice(); got != want {
+		t.Fatalf("readFromDevice() = %d, want fallback %d", got, want)
+	}
+}
+
+func TestVolumeArcExpiryClearsWhenNeitherMutedNorExpireHookIsSet(t *testing.T) {
+	fake := &fakeLEDController{}
+	vc := newVolumeController(func() led.Controller { return fake })
+	vc.showLEDs(volumeButtonFloor)
+
+	vc.mu.Lock()
+	vc.timer.Reset(time.Millisecond)
+	vc.mu.Unlock()
+	time.Sleep(30 * time.Millisecond)
+
+	leds := fake.snapshotLeds()
+	for _, pixel := range leds {
+		if pixel.R != 0 || pixel.G != 0 || pixel.B != 0 {
+			t.Fatalf("expiry with no mute/expire hook did not clear the ring: %+v", leds)
+		}
 	}
 }

@@ -123,12 +123,20 @@ func (vc *volumeController) UseAndroidVolume() {
 	vc.mu.Unlock()
 }
 
+// tinymixGet is a seam over the raw tinymix read, the same reasoning as
+// wifi.go's wpaCli: production shells out for real, host tests supply
+// deterministic output so the Sscanf/clamp logic below — not just the
+// "tinymix is missing" fallback — is exercised.
+var tinymixGet = func() ([]byte, error) {
+	return exec.Command("tinymix", "-D", "0", "61").Output()
+}
+
 // readFromDevice reads current tinymix level. Returns the midpoint of the
 // button band on failure — volumeMax/2 is -32dB on this dB-linear scale,
 // which is quiet enough to read as broken.
 func (vc *volumeController) readFromDevice() int {
 	fallback := (volumeButtonFloor + volumeMax) / 2
-	out, err := exec.Command("tinymix", "-D", "0", "61").Output()
+	out, err := tinymixGet()
 	if err != nil {
 		log.Printf("Volume read failed: %v", err)
 		return fallback
@@ -185,6 +193,26 @@ func (vc *volumeController) Set(level int, showRing bool) {
 	if cb != nil {
 		cb(level)
 	}
+}
+
+// remoteVolumeLevel keeps Home Assistant/controller volume commands aligned
+// with the ten physical button levels. Zero remains a real mute request; every
+// nonzero value selects one of the audible STREAM_MUSIC 21..30 steps.
+func remoteVolumeLevel(level int) int {
+	if level <= volumeMin {
+		return volumeMin
+	}
+	if level >= volumeMax {
+		return volumeMax
+	}
+	step := (level-volumeButtonFloor+volumeStep/2)/volumeStep + 1
+	if step < 1 {
+		step = 1
+	}
+	if step > 10 {
+		step = 10
+	}
+	return volumeButtonFloor + (step-1)*volumeStep
 }
 
 // CancelDisplay ends the volume arc's hold early, releasing the ring back to

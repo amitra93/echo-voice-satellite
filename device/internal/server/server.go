@@ -173,7 +173,7 @@ func (s *Server) VolumeStepDown() {
 // the same visual confirmation a physical button press does.
 func (s *Server) SetVolume(level int) {
 	s.volumeSeeded.Store(true)
-	s.volume.Set(level, true)
+	s.volume.Set(remoteVolumeLevel(level), true)
 }
 
 // SeedVolume restores the controller's stored startupVolume — the source of

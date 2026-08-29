@@ -217,15 +217,7 @@ func (h *helper) handle(request Frame, defaultLib string) error {
 // IAudioService.setStreamVolume on FireOS 5.1; the package name must be the
 // system package, not com.android.shell, or AudioService rejects it.
 func setMusicStreamVolume(level int) error {
-	if level < 0 {
-		level = 0
-	}
-	if level > 127 {
-		level = 127
-	}
-	// Keep the existing 0..127 scale proportional to Android's 0..30 policy
-	// scale. The top EchoMuse level therefore reaches the route maximum.
-	index := (level*30 + 63) / 127
+	index := musicStreamVolumeIndex(level)
 	out, err := exec.Command("service", "call", "audio", "4",
 		"i32", "3", "i32", fmt.Sprint(index), "i32", "0", "s16", "android").CombinedOutput()
 	if err != nil {
