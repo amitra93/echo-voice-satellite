@@ -67,11 +67,12 @@ type Client struct {
 	maxDecode        time.Duration
 	maxTargetErrorUs int64
 	nextAudioLog     time.Time
+	stateUpdates     chan []byte
 }
 
 func NewClient(id, name string, sink ScheduledSink) *Client {
 	return &Client{ID: id, Name: name, Sink: sink, NowUs: deviceclock.NowUs,
-		filter: NewTimeFilter(), volume: 100}
+		filter: NewTimeFilter(), volume: 100, stateUpdates: make(chan []byte, 1)}
 }
 
 // SetPlayerState seeds state from the device before the first hello. It does
@@ -87,6 +88,31 @@ func (c *Client) SetPlayerState(volume int, muted bool) {
 	c.mu.Lock()
 	c.volume, c.muted = volume, muted
 	c.mu.Unlock()
+}
+
+// SetLocalVolume updates the MA player state after a physical device change.
+// Keep only the newest update if the websocket writer is briefly busy.
+func (c *Client) SetLocalVolume(volume int) {
+	if volume < 0 {
+		volume = 0
+	}
+	if volume > 100 {
+		volume = 100
+	}
+	c.mu.Lock()
+	c.volume = volume
+	muted := c.muted
+	c.mu.Unlock()
+	state, err := EncodeClientState(ClientState{State: "synchronized", Volume: &volume, Muted: &muted})
+	if err != nil {
+		return
+	}
+	select {
+	case c.stateUpdates <- state:
+	default:
+		<-c.stateUpdates
+		c.stateUpdates <- state
+	}
 }
 
 // InitialMessages performs the hello plus the first state and time request.
@@ -399,6 +425,10 @@ func (c *Client) RunConn(ctx context.Context, conn Conn) error {
 			case <-ticker.C:
 				timeMsg, err := EncodeClientTime(c.now())
 				if err != nil || write(websocket.TextMessage, timeMsg) != nil {
+					return
+				}
+			case state := <-c.stateUpdates:
+				if write(websocket.TextMessage, state) != nil {
 					return
 				}
 			}

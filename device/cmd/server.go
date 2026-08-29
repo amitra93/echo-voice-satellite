@@ -406,6 +406,7 @@ func main() {
 	s.SetVolumeChangeCallback(func(level int) {
 		pcmSpeaker.SetVolume(level)
 		controlClient.SendVolumeState(level)
+		sendspinClient.SetLocalVolume(sendspin.DeviceVolumeToMA(level))
 	})
 	// The controller callback only fires on a change. Apply the level restored
 	// from tinymix at boot too, so AFE begins at the same user-selected level.

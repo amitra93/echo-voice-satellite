@@ -4,22 +4,22 @@ package afeipc
 
 import "testing"
 
-func TestMusicStreamVolumeIndexReservesTopTenStepsForPhysicalButtons(t *testing.T) {
+func TestMusicStreamVolumeIndexMapsPhysicalLevelsFromThreeToThirty(t *testing.T) {
 	for _, tt := range []struct {
 		level int
 		want  int
 	}{
 		{0, 0},
-		{72, 20},
-		{73, 21},
-		{79, 22},
-		{85, 23},
-		{91, 24},
-		{97, 25},
-		{103, 26},
-		{109, 27},
-		{115, 28},
-		{121, 29},
+		{72, 2},
+		{73, 3},
+		{79, 6},
+		{85, 9},
+		{91, 12},
+		{97, 15},
+		{103, 18},
+		{109, 21},
+		{115, 24},
+		{121, 27},
 		{127, 30},
 	} {
 		got := musicStreamVolumeIndex(tt.level)

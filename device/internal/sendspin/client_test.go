@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ type fakeSink struct {
 }
 
 type fakeConn struct {
+	mu    sync.Mutex
 	reads []struct {
 		kind int
 		data []byte
@@ -44,7 +46,12 @@ func (c *fakeConn) WriteMessage(_ int, data []byte) error {
 	return nil
 }
 func (c *fakeConn) SetReadDeadline(time.Time) error { return nil }
-func (c *fakeConn) Close() error                    { c.closed = true; return nil }
+func (c *fakeConn) Close() error {
+	c.mu.Lock()
+	c.closed = true
+	c.mu.Unlock()
+	return nil
+}
 
 func (s *fakeSink) MusicSyncStart(uint32) bool { s.starts++; return true }
 func (s *fakeSink) MusicSyncPCM(g, seq uint32, target int64, pcm []byte) bool {
@@ -266,6 +273,19 @@ func TestClientInitialMessagesAdvertiseFormatsAndState(t *testing.T) {
 	if state.Player == nil || state.Player.Volume == nil || *state.Player.Volume != 42 ||
 		state.Player.Muted == nil || !*state.Player.Muted {
 		t.Fatalf("seeded state missing from hello: %+v", state.Player)
+	}
+}
+
+func TestClientQueuesLocalVolumeState(t *testing.T) {
+	c := NewClient("id", "Study", &fakeSink{})
+	c.SetPlayerState(40, true)
+	c.SetLocalVolume(70)
+
+	got := <-c.stateUpdates
+	state := decodePayload[clientStatePayload](t, got, TypeClientState)
+	if state.Player == nil || state.Player.Volume == nil || *state.Player.Volume != 70 ||
+		state.Player.Muted == nil || !*state.Player.Muted {
+		t.Fatalf("local volume state = %+v, want volume 70 and muted", state.Player)
 	}
 }
 
