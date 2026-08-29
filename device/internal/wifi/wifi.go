@@ -66,21 +66,35 @@ import (
 )
 
 const (
-	confPath   = "/data/misc/wifi/wpa_supplicant.conf"
-	backupPath = "/data/misc/wifi/wpa_supplicant.conf.echomuse-bak"
-	markerPath = "/data/local/tmp/echomuse_wifi_pending"
-
 	wpaSockDir = "/data/misc/wifi/sockets"
 	iface      = "wlan0"
 
 	// AID_WIFI — fixed uid/gid on Android; the framework reads the conf
 	// as this user.
 	aidWifi = 1010
+)
+
+var (
+	// confPath/backupPath/markerPath are vars, not consts, so host tests
+	// can point them at a temp directory instead of the real Android
+	// paths — the same reasoning as `wpaCli` and `sleep` below. Change()
+	// and RecoverIfPending() are the crash-safe rollback logic this
+	// package exists for; without this seam neither is reachable off a
+	// real device.
+	confPath   = "/data/misc/wifi/wpa_supplicant.conf"
+	backupPath = "/data/misc/wifi/wpa_supplicant.conf.echomuse-bak"
+	markerPath = "/data/local/tmp/echomuse_wifi_pending"
 
 	// 20s (the provisioning wizard's window) proved too tight on hardware
 	// for a network the framework hasn't joined before — autojoin's scan
 	// cycle alone can eat most of it. Reverts re-associate to a known
 	// network well inside 20s, so only first-join pays the longer wait.
+	//
+	// vars rather than consts so tests can shrink them: on a host with no
+	// `svc`/`wpa_cli` binaries, svcWifi fails instantly and Change() falls
+	// straight through to the revert path's waitFor — which would
+	// otherwise burn the real associateTimeout/reconnectTimeout waiting on
+	// a condition that can never become true off real hardware.
 	associateTimeout = 45 * time.Second
 	ipTimeout        = 20 * time.Second
 	// The reconnect gate covers mDNS rediscovery plus the control client's
@@ -349,6 +363,14 @@ func reloadConf(content string) error {
 	return enableWifi()
 }
 
+// reload is the seam Change/RecoverIfPending call through. Production wires
+// it to reloadConf; host tests replace it, the same reasoning as wpaCli —
+// reloadConf's real path always fails off real hardware (no svc/wpa_cli
+// binaries), which only lets Change()/RecoverIfPending() reach their
+// failure branches. Success is real, load-bearing behaviour too (the "self
+// heals back to the old network" case) and needs a way to be exercised.
+var reload = reloadConf
+
 func waitFor(what string, timeout time.Duration, cond func() bool) bool {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
@@ -484,7 +506,7 @@ func Change(ssid, psk string, connected func() bool) {
 		// Restore with WiFi down (see reloadConf) — but if the restore
 		// write fails, conf is beyond self-healing: leave the marker so
 		// RecoverIfPending retries on next start.
-		restoreErr := reloadConf(string(old))
+		restoreErr := reload(string(old))
 		if restoreErr != nil {
 			log.Printf("[wifi] REVERT FAILED: %v — marker left for recovery on restart", restoreErr)
 		} else {
@@ -495,7 +517,7 @@ func Change(ssid, psk string, connected func() bool) {
 		setResult(Result{OK: false, SSID: ssid, Error: reason})
 	}
 
-	if err := reloadConf(composeConf(ssid, psk)); err != nil {
+	if err := reload(composeConf(ssid, psk)); err != nil {
 		revert(err.Error())
 		return
 	}
@@ -545,7 +567,7 @@ func RecoverIfPending() {
 		_ = os.Remove(markerPath)
 		return
 	}
-	if err := reloadConf(string(backup)); err != nil {
+	if err := reload(string(backup)); err != nil {
 		log.Printf("[wifi] startup restore failed: %v — leaving marker for next start", err)
 		return
 	}

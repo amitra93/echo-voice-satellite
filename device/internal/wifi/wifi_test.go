@@ -1,6 +1,7 @@
 package wifi
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -283,5 +284,219 @@ func TestChangeReportsMissingCurrentConfig(t *testing.T) {
 	result := PendingResult()
 	if result == nil || result.OK || result.SSID != "Home" || !strings.Contains(result.Error, "cannot read current config") {
 		t.Fatalf("missing config result = %#v", result)
+	}
+}
+
+// ─── Change() / RecoverIfPending() against a fake filesystem and reload ────
+//
+// confPath/backupPath/markerPath and reload() are vars specifically so this
+// safety-critical file-handling logic (back up → mark pending → apply →
+// verify → revert-on-failure) can run against a throwaway directory and a
+// controllable outcome instead of the real Android paths and svc/wpa_cli,
+// neither of which exist on a host. See the doc comments on those vars.
+
+// withTempWifiPaths points confPath/backupPath/markerPath at a throwaway
+// directory and restores the real paths on cleanup.
+func withTempWifiPaths(t *testing.T) (conf, backup, marker string) {
+	t.Helper()
+	dir := t.TempDir()
+	conf = filepath.Join(dir, "wpa_supplicant.conf")
+	backup = filepath.Join(dir, "wpa_supplicant.conf.bak")
+	marker = filepath.Join(dir, "pending")
+	oldConf, oldBackup, oldMarker := confPath, backupPath, markerPath
+	confPath, backupPath, markerPath = conf, backup, marker
+	t.Cleanup(func() { confPath, backupPath, markerPath = oldConf, oldBackup, oldMarker })
+	return conf, backup, marker
+}
+
+// withFastWifiWaits shrinks every timeout Change()/RecoverIfPending() poll
+// against and makes the retry sleep a no-op. Off real hardware svc/wpa_cli
+// do not exist, so any condition gated on them can never become true —
+// without this, every test below would burn the real 45-90s production
+// timeouts finding that out.
+func withFastWifiWaits(t *testing.T) {
+	t.Helper()
+	oldAssociate, oldIP, oldReconnect, oldSleep := associateTimeout, ipTimeout, reconnectTimeout, sleep
+	associateTimeout, ipTimeout, reconnectTimeout = time.Millisecond, time.Millisecond, time.Millisecond
+	sleep = func(time.Duration) {}
+	t.Cleanup(func() {
+		associateTimeout, ipTimeout, reconnectTimeout, sleep = oldAssociate, oldIP, oldReconnect, oldSleep
+	})
+}
+
+func withFakeReload(t *testing.T, fn func(content string) error) {
+	t.Helper()
+	old := reload
+	reload = fn
+	t.Cleanup(func() { reload = old })
+}
+
+func resetChangeState(t *testing.T) {
+	t.Helper()
+	oldPending, oldInFlight := pending, inFlight
+	pending, inFlight = nil, false
+	t.Cleanup(func() { pending, inFlight = oldPending, oldInFlight })
+}
+
+// The worst case the safety design has to answer for: a change that cannot
+// be applied AND cannot be undone. The marker must survive so
+// RecoverIfPending retries on the next start — losing it here would strand
+// the device on a half-applied conf with no way back.
+func TestChangeLeavesMarkerWhenRevertAlsoFails(t *testing.T) {
+	resetChangeState(t)
+	withFastWifiWaits(t)
+	conf, backup, marker := withTempWifiPaths(t)
+	if err := os.WriteFile(conf, []byte("old-conf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	withFakeReload(t, func(string) error {
+		return errors.New("svc wifi disable: no such file or directory")
+	})
+
+	Change("Home", "password", nil)
+
+	result := PendingResult()
+	if result == nil || result.OK || !strings.Contains(result.Error, "svc wifi disable") {
+		t.Fatalf("result = %#v", result)
+	}
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("marker removed after a failed revert — recovery on restart is now impossible: %v", err)
+	}
+	if _, err := os.Stat(backup); err != nil {
+		t.Fatalf("backup removed after a failed revert: %v", err)
+	}
+}
+
+// The common case: the new conf cannot be applied, but reverting to the old
+// one works. Marker and backup must both be cleaned up — a leftover marker
+// here would make a future RecoverIfPending "restore" a network the device
+// never actually left.
+func TestChangeCleansUpAfterASuccessfulRevert(t *testing.T) {
+	resetChangeState(t)
+	withFastWifiWaits(t)
+	conf, backup, marker := withTempWifiPaths(t)
+	if err := os.WriteFile(conf, []byte("old-conf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	withFakeReload(t, func(string) error {
+		calls++
+		if calls == 1 {
+			return errors.New("did not associate")
+		}
+		return nil // the revert's own reload succeeds
+	})
+
+	Change("Home", "password", nil)
+
+	result := PendingResult()
+	if result == nil || result.OK || !strings.Contains(result.Error, "did not associate") {
+		t.Fatalf("result = %#v", result)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("marker still present after a successful revert")
+	}
+	if _, err := os.Stat(backup); !os.IsNotExist(err) {
+		t.Fatalf("backup still present after a successful revert")
+	}
+}
+
+// reload() succeeding is not the same as the change succeeding: the device
+// must actually observe association to the NEW ssid, or a supplicant that
+// silently kept the old network would read as success. This drives that
+// gate through wpaCli — the same seam CurrentSSID uses — so it needs no
+// real hardware.
+func TestChangeRevertsWhenAssociationNeverHappens(t *testing.T) {
+	resetChangeState(t)
+	withFastWifiWaits(t)
+	conf, _, _ := withTempWifiPaths(t)
+	if err := os.WriteFile(conf, []byte("old-conf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	withFakeReload(t, func(string) error { return nil }) // both directions "succeed"
+	oldWpaCli := wpaCli
+	wpaCli = func(...string) (string, error) { return "wpa_state=SCANNING", nil } // never COMPLETED
+	t.Cleanup(func() { wpaCli = oldWpaCli })
+
+	Change("Home", "password", nil)
+
+	result := PendingResult()
+	if result == nil || result.OK || !strings.Contains(result.Error, "did not associate") {
+		t.Fatalf("result = %#v, want a did-not-associate failure", result)
+	}
+}
+
+// A marker with no backup means a previous run reverted its conf but could
+// not remove the marker, or the backup was lost — there is nothing to
+// restore, so this must clear the marker and stop, not report a result.
+func TestRecoverIfPendingWithMarkerButNoBackupClearsMarkerOnly(t *testing.T) {
+	resetChangeState(t)
+	_, _, marker := withTempWifiPaths(t)
+	if err := os.WriteFile(marker, []byte(`{"newSsid":"Home"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	RecoverIfPending()
+
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("marker not cleared when there was no backup to restore from")
+	}
+	if PendingResult() != nil {
+		t.Fatalf("a marker-without-backup recovery must not report a result — there was nothing to restore")
+	}
+}
+
+// A restore that fails at startup must leave the marker in place so the
+// NEXT start retries — clearing it here would silently give up on ever
+// getting back to the old network.
+func TestRecoverIfPendingLeavesMarkerWhenRestoreFails(t *testing.T) {
+	resetChangeState(t)
+	_, backup, marker := withTempWifiPaths(t)
+	if err := os.WriteFile(marker, []byte(`{"newSsid":"Home"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backup, []byte("old-conf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	withFakeReload(t, func(string) error {
+		return errors.New("svc wifi disable: no such file or directory")
+	})
+
+	RecoverIfPending()
+
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("marker removed despite the restore failing — next start will not retry: %v", err)
+	}
+	if PendingResult() != nil {
+		t.Fatalf("a failed startup restore must not report a result yet — RecoverIfPending will retry")
+	}
+}
+
+// The success case this whole mechanism exists for: a crash or power cycle
+// left a pending marker, and the previous network is restored on the next
+// start with no operator action, then reported once a connection exists to
+// carry it.
+func TestRecoverIfPendingRestoresAndReportsOnSuccess(t *testing.T) {
+	resetChangeState(t)
+	_, backup, marker := withTempWifiPaths(t)
+	if err := os.WriteFile(marker, []byte(`{"newSsid":"Guest"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(backup, []byte("old-conf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	withFakeReload(t, func(string) error { return nil })
+
+	RecoverIfPending()
+
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("marker still present after a successful restore")
+	}
+	if _, err := os.Stat(backup); !os.IsNotExist(err) {
+		t.Fatalf("backup still present after a successful restore")
+	}
+	result := PendingResult()
+	if result == nil || result.OK || result.SSID != "Guest" || !strings.Contains(result.Error, "restarted") {
+		t.Fatalf("result = %#v", result)
 	}
 }
