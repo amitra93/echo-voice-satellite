@@ -28,9 +28,7 @@ integration talks to the device it manages.
 - `switch` — privacy mute. It reflects device state and uses the device's
   toggle command only when the requested state differs, so the hardware
   button remains the underlying mute authority.
-- `media_player` — Music Assistant/Sendspin playback for `music_sync` devices,
-  including play, pause, stop, seek, track controls, volume, and mute.
-- `number` — volume where separately supported by the device configuration.
+- Music Assistant owns the Sendspin media player and its volume/mute controls.
 - `sensor` — firmware version, wake-word model, and (capability-gated)
   ambient light.
 - `event` — the action button's single/double/triple/long gestures

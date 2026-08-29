@@ -19,12 +19,6 @@ PLATFORMS = (
     "select",
     "switch",
 )
-
-# "number" is deliberately absent: the Volume number entity (a continuous
-# slider) was replaced by a 9-level select (select.py, EchoVolumeSelect) —
-# the slider let HA's frontend send drag deltas that never reliably reached
-# the low end, even though the backend/device path itself has no floor. See
-# __init__.py's _remove_stale_volume_number_entities.
 #
 # "button" is deliberately absent: the momentary Privacy mute button
 # (button.py, EchoMuteButton) plus binary_sensor.py's read-only mute sensor

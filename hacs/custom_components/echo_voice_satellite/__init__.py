@@ -117,8 +117,7 @@ def _remove_stale_diagnostic_sensor_entities(hass, entry) -> None:
 
 
 def _remove_stale_volume_select_entities(hass, entry) -> None:
-    """The discrete Volume select entity (select.py, EchoVolumeSelect) was
-    superseded by the Media Player volume slider. Matched by unique_id suffix.
+    """Remove the retired EchoMuse volume entity. Matched by unique_id suffix.
     """
     _remove_matching_entities(
         hass, entry,
