@@ -41,6 +41,7 @@
     if (!d.approved) return { key: 'pending', label: 'Pending', color: 'var(--accent-hi)', dot: '#8ab0d0' };
     if (!d.connected) return { key: 'offline', label: 'Offline', color: 'var(--warn)', dot: '#d4703a' };
     if (d.muted) return { key: 'muted', label: 'Muted', color: 'var(--error)', dot: '#c04040' };
+    if (d.timer_firing) return { key: 'timer_firing', label: 'Timer firing', color: 'var(--accent-hi)', dot: '#d4703a' };
     if (d.speaking) return { key: 'speaking', label: 'Speaking', color: 'var(--accent)', dot: '#4080d0' };
     if (d.thinking) return { key: 'thinking', label: 'Thinking', color: 'var(--warn)', dot: '#a08020' };
     if (d.listening) return { key: 'listening', label: 'Listening', color: 'var(--ok)', dot: '#40906a' };

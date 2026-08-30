@@ -86,6 +86,8 @@ COPY em_firmware.py .
 COPY em_announce.py .
 COPY em_runbarrier.py .
 COPY em_volume.py .
+COPY em_timers.py .
+COPY em_timer_alarm.py .
 COPY em_audio_frame.py .
 COPY em_clock.py .
 COPY em_sendspin.py .
@@ -97,6 +99,7 @@ COPY em_ha_sidechannels.py .
 COPY version.py .
 # Device payloads (start_server.sh etc.) — canonical copies served to devices
 COPY device_payloads/ ./device_payloads/
+COPY sounds/ ./sounds/
 
 # ONNX Runtime for the DEVICE (armeabi-v7a) — on-device wake word assets.
 #

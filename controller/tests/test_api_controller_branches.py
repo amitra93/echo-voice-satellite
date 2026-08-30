@@ -131,6 +131,152 @@ def test_request_and_state_helpers_cover_invalid_values(monkeypatch):
     assert em_api._dropped_keys({"b": 2}, {"a": 1, "b": 2}) == ["a"]
 
 
+def test_timer_event_is_broadcast_once_and_duplicate_is_idempotent(monkeypatch):
+    em_api._timer_sessions.clear()
+    events = []
+
+    async def push(event):
+        events.append(event)
+
+    monkeypatch.setattr(em_api, "_push_event", push)
+    body = {
+        "event": "finished", "timer_id": "01J", "ha_device_id": "ha-dev",
+        "name": "pizza", "total_seconds": 600, "seconds_left": 0,
+        "is_active": False,
+    }
+    request = Request(body, match_info={"id": "controller-dev"})
+
+    first = run(em_api._post_timer_event.__wrapped__(request))
+    second = run(em_api._post_timer_event.__wrapped__(request))
+
+    assert json.loads(first.text)["duplicate"] is False
+    assert json.loads(second.text)["duplicate"] is True
+    assert events == [
+        {"type": "timer.event", "device_id": "controller-dev", **body},
+        {
+            "type": "timer.alarm", "device_id": "controller-dev", "state": "ringing",
+            "current": {
+                "timer_id": "01J", "name": "pizza", "total_seconds": 600,
+                "seconds_left": 0, "is_active": False, "ha_device_id": "ha-dev",
+            }, "queue": [],
+        },
+    ]
+
+
+def test_timer_event_state_changes_are_forwarded_once_per_lifecycle_state(monkeypatch):
+    em_api._timer_sessions.clear()
+    events = []
+
+    async def push(event):
+        events.append(event)
+
+    monkeypatch.setattr(em_api, "_push_event", push)
+    base = {"timer_id": "01J", "ha_device_id": "ha-dev", "name": "pizza"}
+
+    for event_name in ("started", "updated", "cancelled"):
+        response = run(em_api._post_timer_event.__wrapped__(Request(
+            {**base, "event": event_name}, match_info={"id": "controller-dev"}
+        )))
+        assert response.status == 200
+    response = run(em_api._post_timer_event.__wrapped__(Request(
+        {**base, "timer_id": "02J", "event": "finished"},
+        match_info={"id": "controller-dev"},
+    )))
+    assert response.status == 200
+
+    assert [event["event"] for event in events if event["type"] == "timer.event"] == [
+        "started", "updated", "cancelled", "finished"
+    ]
+    assert [event["event"] for event in events if event["type"] == "timer.event"][-1] == "finished"
+    assert events[-1]["type"] == "timer.alarm"
+
+
+def test_timer_event_rejects_non_object_json():
+    response = run(em_api._post_timer_event.__wrapped__(Request(
+        ["finished", "01J"], match_info={"id": "controller-dev"}
+    )))
+    assert response.status == 400
+
+
+def test_timer_event_rejects_invalid_numeric_values():
+    response = run(em_api._post_timer_event.__wrapped__(Request(
+        {"event": "started", "timer_id": "01J", "total_seconds": "bad"},
+        match_info={"id": "controller-dev"},
+    )))
+    assert response.status == 400
+
+
+def test_timer_event_disconnect_discards_alarm_queue_and_publishes_idle(monkeypatch):
+    em_api._timer_sessions.clear()
+    events = []
+
+    async def push(event):
+        events.append(event)
+
+    monkeypatch.setattr(em_api, "_push_event", push)
+    request = Request(
+        {"event": "finished", "timer_id": "01J"},
+        match_info={"id": "controller-dev"},
+    )
+    run(em_api._post_timer_event.__wrapped__(request))
+    events.clear()
+
+    run(em_api.notify_device_disconnected("controller-dev"))
+
+    assert events == [
+        {"type": "device_disconnected", "device_id": "controller-dev"},
+        {
+            "type": "timer.alarm", "device_id": "controller-dev", "state": "idle",
+            "current": None, "queue": [],
+        },
+    ]
+
+
+def test_muted_timer_expiry_is_discarded_without_starting_alarm(monkeypatch):
+    em_api._timer_sessions.clear()
+    old_devices = em_api._devices
+    old_runner = em_api._timer_alarm_runner
+    events = []
+
+    class MutedDevice:
+        muted = True
+
+    class UnexpectedRunner:
+        def start(self, *_args):
+            raise AssertionError("muted expiry must not start alarm playback")
+
+    async def push(event):
+        events.append(event)
+
+    em_api._devices = {"controller-dev": MutedDevice()}
+    em_api._timer_alarm_runner = UnexpectedRunner()
+    monkeypatch.setattr(em_api, "_push_event", push)
+    try:
+        response = run(em_api._post_timer_event.__wrapped__(Request(
+            {"event": "finished", "timer_id": "muted-timer"},
+            match_info={"id": "controller-dev"},
+        )))
+    finally:
+        em_api._devices = old_devices
+        em_api._timer_alarm_runner = old_runner
+
+    assert response.status == 200
+    assert events[-1]["type"] == "timer.alarm"
+    assert events[-1]["state"] == "idle"
+
+
+@pytest.mark.parametrize("body", [
+    {"event": "unknown", "timer_id": "01J"},
+    {"event": "finished"},
+    {"event": "finished", "timer_id": "01J", "ha_device_id": 3},
+])
+def test_timer_event_rejects_malformed_payload(body):
+    response = run(em_api._post_timer_event.__wrapped__(Request(
+        body, match_info={"id": "controller-dev"}
+    )))
+    assert response.status == 400
+
+
 def test_merge_device_handles_offline_and_live_state(monkeypatch):
     row = {
         "device_id": "dev", "label": "Room", "approved": 1, "ip": "192.0.2.2",
@@ -145,7 +291,8 @@ def test_merge_device_handles_offline_and_live_state(monkeypatch):
         assert not offline["connected"] and offline["volume"] is not None
         assert offline["volumeLevel"] == 2
         live = SimpleNamespace(
-            speaking=True, muted=True, listening=True, thinking=False, stats={"ambientLux": 0},
+            speaking=True, muted=True, listening=True, thinking=False, timer_firing=True,
+            stats={"ambientLux": 0},
             rtt_last_ms=12, volume=0.5, ble_proxy_enabled=True, oww_near_misses=3,
             capabilities=["ambient_light"], secure=True,
             oww_shadow_capable=True, oww_trigger_capable=True, audio_mix_capable=True,
@@ -156,8 +303,60 @@ def test_merge_device_handles_offline_and_live_state(monkeypatch):
         assert merged["connected"] and merged["ambient_light_lux"] == 0
         assert merged["capabilities"] == ["ambient_light"]
         assert merged["volumeLevel"] == 1
+        assert merged["timer_firing"] is True
     finally:
         em_api._devices = old
+
+
+def test_timer_alarm_state_callback_owns_leds_and_dashboard_state(monkeypatch):
+    old_devices = em_api._devices
+    old_runner = em_api._timer_alarm_runner
+    calls = []
+
+    class Device:
+        def __init__(self, animated):
+            self.led_anim_capable = animated
+            self.led_scene = {"timer_anim": {"pattern": "pulse"}, "listening": ["green"]}
+            self.timer_firing = False
+            self.timer_alarm_audio_ready = True
+            self.timer_alarm_listen_after = 9.0
+
+        async def send_led_anim(self, spec):
+            calls.append(("anim", spec))
+
+        async def set_leds(self, frame, **kwargs):
+            calls.append(("leds", frame, kwargs))
+
+    async def leds_off(device):
+        calls.append(("off", device))
+
+    async def push(device):
+        calls.append(("push", device.timer_firing))
+
+    fake_controller = types.SimpleNamespace(leds_off=leds_off, _push_device_state=push)
+    monkeypatch.setitem(sys.modules, "em_controller", fake_controller)
+    animated = Device(True)
+    legacy = Device(False)
+    em_api._devices = {"animated": animated, "legacy": legacy}
+    try:
+        em_api.init(em_api._devices, {}, {})
+        callback = em_api._timer_alarm_runner._on_state
+        run(callback("animated", True))
+        assert animated.timer_firing is True
+        assert animated.timer_alarm_audio_ready is False
+        assert animated.timer_alarm_listen_after == 0.0
+        assert calls == [("anim", {"pattern": "pulse"}), ("push", True)]
+
+        calls.clear()
+        run(callback("legacy", True))
+        assert calls == [("leds", ["green"], {"listening": True}), ("push", True)]
+
+        calls.clear()
+        run(callback("animated", False))
+        assert calls == [("off", animated), ("push", False)]
+    finally:
+        em_api._devices = old_devices
+        em_api._timer_alarm_runner = old_runner
 
 
 def test_patch_user_validates_and_changes_roles(monkeypatch):

@@ -1,6 +1,8 @@
 import asyncio
 import importlib
 import inspect
+import sys
+import types
 
 import pytest
 
@@ -34,6 +36,12 @@ def test_no_start_conversation_method_is_defined():
     assert "async_start_conversation" not in module.EchoAssistSatellite.__dict__
 
 
+def test_timer_speech_offer_ends_pipeline_at_stt():
+    source = inspect.getsource(module.EchoAssistSatellite._run_wake_pipeline)
+    assert "timer_speech" in source
+    assert "end_stage=PipelineStage.STT" in source
+
+
 # ── Behavioural tests — object.__new__'d against the real AssistSatelliteEntity
 # base class. super().async_accept_pipeline_from_satellite is monkeypatched on
 # the base class for the duration of a test (never on the instance — it's
@@ -63,6 +71,10 @@ class _FakeClient:
         if self.attach_should_fail:
             raise ControllerError("audio_unavailable")
         return self.attached_channel
+
+    async def async_timer_event(self, device_id, event):
+        self.calls.append(("timer_event", device_id, event))
+        return {"accepted": True}
 
 
 class _FakeCoordinator:
@@ -122,6 +134,96 @@ def test_available_is_false_while_muted():
 def test_available_is_true_when_connected_and_not_muted():
     entity, _client, _coord = _make_satellite(muted=False)
     assert entity.available is True
+
+
+def test_timer_event_is_forwarded_with_timer_metadata():
+    entity, client, _coord = _make_satellite()
+    timer = type("Timer", (), {
+        "id": "01J", "device_id": "ha-device", "name": "pizza",
+        "created_seconds": 600, "seconds_left": 425, "is_active": True,
+    })()
+    event = type("Event", (), {"value": "updated"})()
+
+    asyncio.run(entity._async_forward_timer_event(event, timer))
+
+    assert client.calls[-1] == (
+        "timer_event", "A", {
+            "event": "updated", "timer_id": "01J", "ha_device_id": "ha-device",
+            "name": "pizza", "total_seconds": 600, "seconds_left": 425,
+            "is_active": True,
+        },
+    )
+
+
+@pytest.mark.parametrize("event_name", ["started", "updated", "cancelled", "finished"])
+def test_all_timer_lifecycle_events_are_forwarded(event_name):
+    entity, client, _coord = _make_satellite()
+    timer = type("Timer", (), {
+        "id": "01J", "device_id": "ha-device", "name": None,
+        "created_seconds": 60, "seconds_left": 12, "is_active": event_name != "cancelled",
+    })()
+    event = type("Event", (), {"value": event_name})()
+
+    asyncio.run(entity._async_forward_timer_event(event, timer))
+
+    assert client.calls[-1][0:2] == ("timer_event", "A")
+    assert client.calls[-1][2]["event"] == event_name
+
+
+def test_timer_event_forwarding_logs_controller_failure_without_raising(caplog):
+    entity, client, _coord = _make_satellite()
+    timer = type("Timer", (), {
+        "id": "01J", "device_id": "ha-device", "name": "pizza",
+        "created_seconds": 60, "seconds_left": 12, "is_active": True,
+    })()
+    client.async_timer_event = _raise_controller_error
+
+    with caplog.at_level("ERROR"):
+        asyncio.run(entity._async_forward_timer_event(
+            type("Event", (), {"value": "updated"})(), timer
+        ))
+
+    assert "Failed to forward timer 01J" in caplog.text
+
+
+async def _raise_controller_error(*_args, **_kwargs):
+    raise ControllerError("controller_unreachable")
+
+
+def test_added_to_hass_registers_timer_handler_for_registry_device(monkeypatch):
+    entity, _client, _coord = _make_satellite()
+    registered = []
+    removed = []
+
+    async def base_added(_self):
+        return None
+
+    monkeypatch.setattr(AssistSatelliteEntity, "async_added_to_hass", base_added, raising=False)
+    entity.async_on_remove = lambda callback: removed.append(callback)
+
+    registry = types.SimpleNamespace(
+        async_get_device=lambda identifiers: types.SimpleNamespace(id="ha-device-1")
+    )
+    device_registry = types.ModuleType("homeassistant.helpers.device_registry")
+    device_registry.async_get = lambda hass: registry
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.device_registry", device_registry)
+    monkeypatch.setattr(sys.modules["homeassistant.helpers"], "device_registry", device_registry, raising=False)
+
+    intent = types.ModuleType("homeassistant.components.intent")
+
+    def register(hass, device_id, handler):
+        registered.append((hass, device_id, handler))
+        return lambda: removed.append("unregistered")
+
+    intent.async_register_timer_handler = register
+    monkeypatch.setitem(sys.modules, "homeassistant.components.intent", intent)
+
+    asyncio.run(entity.async_added_to_hass())
+
+    assert registered == [(entity.hass, "ha-device-1", entity._timer_event)]
+    assert len(removed) == 1
+    removed[0]()
+    assert removed[-1] == "unregistered"
 
 
 def test_tts_response_finished_reaches_the_base_class_and_returns_to_idle():
@@ -494,6 +596,21 @@ def test_stream_pipeline_tts_sends_tts_end_when_ha_gives_no_result_stream(monkey
 
     asyncio.run(entity._stream_pipeline_tts("tok", 1, object()))
 
+    assert ("turn_action", 1, "tts/end", None) in client.calls
+
+
+def test_stream_pipeline_tts_ends_turn_when_provider_stream_fails(monkeypatch):
+    entity, client, _coord = _make_satellite()
+    monkeypatch.setattr(module.tts, "async_get_stream", lambda hass, token: _FakeResultStream(), raising=False)
+
+    async def quota_error(result, channel):
+        raise RuntimeError("429 Resource has been exhausted")
+
+    monkeypatch.setattr(module, "stream_result_to_audio", quota_error)
+
+    asyncio.run(entity._stream_pipeline_tts("tok", 1, object()))
+
+    assert ("turn_action", 1, "tts/start", None) in client.calls
     assert ("turn_action", 1, "tts/end", None) in client.calls
 
 

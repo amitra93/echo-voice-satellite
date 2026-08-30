@@ -190,6 +190,38 @@ def test_turn_actions_record_transcript_and_component_latencies(monkeypatch):
     asyncio.run(run())
 
 
+def test_transcript_callback_only_runs_for_recognized_speech():
+    async def run():
+        turn = engine.Turn(12, FakeDevice(), None, None)
+        received = []
+
+        async def on_transcript(text):
+            received.append(text)
+
+        turn.on_transcript = on_transcript
+        engine.ENGINE.turns[12] = turn
+
+        class Request:
+            match_info = {"tid": "12"}
+            path = "/api/turns/12/transcript"
+
+            def __init__(self, body):
+                self.body = body
+
+            async def json(self):
+                return self.body
+
+        try:
+            await engine.turn_action(Request({"text": ""}))
+            assert received == []
+            await engine.turn_action(Request({"text": "stop"}))
+            assert received == ["stop"]
+        finally:
+            engine.ENGINE.turns.pop(12, None)
+
+    asyncio.run(run())
+
+
 def test_test_audio_decoder_normalizes_wav_to_16k_mono(monkeypatch):
     raw = b"\x00\x00" * 160
     buf = io.BytesIO()

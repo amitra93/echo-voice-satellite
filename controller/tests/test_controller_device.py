@@ -183,6 +183,10 @@ def test_dashboard_state_and_led_helpers(monkeypatch):
         monkeypatch.setattr(em_controller.api, "_push_event", lambda event: asyncio.sleep(0, result=events.append(event)))
         await em_controller._push_device_state(device)
         assert events[0]["state"]["connected"] is True
+        assert events[0]["state"]["timer_firing"] is False
+        device.timer_firing = True
+        await em_controller._push_device_state(device)
+        assert events[1]["state"]["timer_firing"] is True
         assert len(em_controller._make_leds(1, 2, 3)) == em_controller.NUM_LEDS
 
         animations = []
@@ -206,6 +210,87 @@ def test_dashboard_state_and_led_helpers(monkeypatch):
         assert frames[1][1] == {"listening": True}
 
     asyncio.run(run())
+
+
+def test_timer_speech_dismissal_waits_for_stt_and_does_not_generate_response(monkeypatch):
+    device = new_device()
+    dismissed = []
+
+    async def dismiss(device_id):
+        dismissed.append(device_id)
+        return True
+
+    async def voice_turn(_device, **kwargs):
+        assert kwargs["trigger_label"] == "timer-speech"
+        assert kwargs["stt_only"] is True
+        assert kwargs["initial_audio"] == (b"first",)
+        await kwargs["on_transcript"]("stop")
+
+    monkeypatch.setattr(em_controller.api, "dismiss_timer_alarm", dismiss)
+    monkeypatch.setattr(em_controller, "_run_voice_locked", voice_turn)
+    device.beam_lock = lambda: asyncio.sleep(0)
+    device.beam_unlock = lambda: asyncio.sleep(0)
+
+    asyncio.run(em_controller._run_timer_speech_turn(device, b"first"))
+    assert dismissed == [device.device_id]
+
+
+def test_timer_speech_without_stt_transcript_keeps_alarm_running(monkeypatch):
+    device = new_device()
+    dismissed = []
+
+    async def dismiss(_device_id):
+        dismissed.append(True)
+        return True
+
+    async def voice_turn(_device, **kwargs):
+        return None
+
+    monkeypatch.setattr(em_controller.api, "dismiss_timer_alarm", dismiss)
+    monkeypatch.setattr(em_controller, "_run_voice_locked", voice_turn)
+    device.beam_lock = lambda: asyncio.sleep(0)
+    device.beam_unlock = lambda: asyncio.sleep(0)
+
+    asyncio.run(em_controller._run_timer_speech_turn(device, b"first"))
+    assert dismissed == []
+
+
+def test_timer_button_tap_dismisses_locally_without_voice_turn(monkeypatch):
+    device = new_device()
+    dismissed = []
+
+    async def dismiss(device_id):
+        dismissed.append(device_id)
+        return True
+
+    monkeypatch.setattr(em_controller.api, "timer_alarm_ringing", lambda _id: True)
+    monkeypatch.setattr(em_controller.api, "dismiss_timer_alarm", dismiss)
+    monkeypatch.setattr(
+        em_controller, "_run_voice_locked",
+        lambda *args, **kwargs: (_ for _ in ()).throw(
+            AssertionError("timer tap must not start an Assist turn")
+        ),
+    )
+
+    asyncio.run(em_controller.handle_button_event(
+        device, {"clickType": 138, "down": False, "heldMs": 100, "muted": False}
+    ))
+    assert dismissed == [device.device_id]
+
+
+def test_timer_button_hold_remains_an_ha_event(monkeypatch):
+    device = new_device(["button_hold"])
+    events = []
+    monkeypatch.setattr(em_controller.api, "timer_alarm_ringing", lambda _id: True)
+    monkeypatch.setattr(
+        em_controller.ha_sidechannels, "button_event",
+        lambda *args: events.append(args),
+    )
+
+    asyncio.run(em_controller.handle_button_event(
+        device, {"clickType": 138, "down": False, "heldMs": 800, "muted": False}
+    ))
+    assert events == [(device.device_id, "long", 800)]
 
 
 def test_legacy_spinner_stops_and_cleans_up():
@@ -694,6 +779,38 @@ def test_voice_playback_helpers_wait_for_device_completion(monkeypatch):
 
         device.cancel_event.set()
         assert await em_controller._run_streaming_post_turn_playback(device, chunks()) == 0
+
+    asyncio.run(run())
+
+
+def test_speaker_lock_serializes_buffered_and_streaming_playback(monkeypatch):
+    async def run():
+        device = new_device()
+        entered = []
+        release_buffered = asyncio.Event()
+
+        async def buffered(_device, _pcm, _cancel=None):
+            entered.append("buffered")
+            await release_buffered.wait()
+
+        async def streamed(_device, _chunks):
+            entered.append("streamed")
+            return 1
+
+        monkeypatch.setattr(em_controller, "_run_post_turn_playback_unlocked", buffered)
+        monkeypatch.setattr(em_controller, "_run_streaming_post_turn_playback_unlocked", streamed)
+
+        async def chunks():
+            yield b"pcm"
+
+        first = asyncio.create_task(em_controller._run_post_turn_playback(device, b"pcm"))
+        await asyncio.sleep(0)
+        second = asyncio.create_task(em_controller._run_streaming_post_turn_playback(device, chunks()))
+        await asyncio.sleep(0)
+        assert entered == ["buffered"]
+        release_buffered.set()
+        await asyncio.gather(first, second)
+        assert entered == ["buffered", "streamed"]
 
     asyncio.run(run())
 

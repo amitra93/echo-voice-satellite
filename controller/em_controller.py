@@ -88,6 +88,7 @@ import em_player
 import em_volume
 import em_wake_audio
 import em_clock
+import em_timers
 
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s — %(message)s"
 
@@ -304,6 +305,9 @@ class Device:
         self.muted     = False
         self.listening = False
         self.thinking  = False
+        self.timer_firing = False
+        self.timer_alarm_audio_ready = False
+        self.timer_alarm_listen_after = 0.0
 
         # Volume as HA float (0.0–1.0). Initialised from stored config in
         # handle_control() after config is read; updated on volume_state
@@ -516,6 +520,8 @@ class Device:
         # in place of the wall-clock estimate that used to clear the ring
         # while the device was still playing (up to 6.1s early, 2026-07-24).
         self.playback_done = asyncio.Event()
+        # Exclusive ownership of the speaker plane, including device drain.
+        self.speaker_lock = asyncio.Lock()
         # Outcome of the most recently persisted turn, set by em_esphome and
         # consumed once by the turn loop's ring cleanup (see _leds_turn_end).
         self.last_turn_outcome: str | None = None
@@ -967,6 +973,7 @@ async def _push_device_state(device: Device) -> None:
             "muted":     device.muted,
             "listening": device.listening,
             "thinking":  device.thinking,
+            "timer_firing": device.timer_firing,
         },
     })
 
@@ -1257,7 +1264,9 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
         )
 
 
-async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None:
+async def _run_post_turn_playback_unlocked(
+    device: Device, voice_response: bytes, cancel_event: asyncio.Event | None = None
+) -> None:
     """
     Post-turn timing concern: EQ, stream to device, acoustic-feedback wait.
 
@@ -1302,7 +1311,8 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
             f"({len(speaker_pcm)//SPEAKER_BYTES} periods) — "
             f"{em_eq.describe_activity(_limiter, _guard)}"
         )
-    cancel_task    = asyncio.create_task(device.cancel_event.wait())
+    cancel_signal = cancel_event or device.cancel_event
+    cancel_task    = asyncio.create_task(cancel_signal.wait())
     device.playback_done.clear()
     done_task      = asyncio.create_task(device.playback_done.wait())
     stream_task    = asyncio.create_task(device.stream_speaker(speaker_pcm))
@@ -1320,7 +1330,7 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
         log.info(f"[{device.device_id}] Cancelled during playback")
         stream_task.cancel()
     else:
-        if not device.cancel_event.is_set():
+        if not cancel_signal.is_set():
             # Wait for the DEVICE to say it finished, rather than estimating.
             #
             # The old code slept `audio_duration - elapsed` and declared
@@ -1355,7 +1365,7 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
                 return_when=asyncio.FIRST_COMPLETED,
             )
             timeout_task.cancel()
-            if device.cancel_event.is_set():
+            if cancel_signal.is_set():
                 log.info(f"[{device.device_id}] Cancelled during playback drain")
             elif done_task.done():
                 actual = asyncio.get_event_loop().time() - t_stream_start
@@ -1381,6 +1391,19 @@ async def _run_post_turn_playback(device: Device, voice_response: bytes) -> None
     await device._set_speaking(False)
     cancel_task.cancel()
     done_task.cancel()
+
+
+async def _run_post_turn_playback(
+    device: Device, voice_response: bytes, cancel_event: asyncio.Event | None = None
+) -> None:
+    """Serialize buffered playback with timer alarms and announcements.
+
+    The locked implementation below waits for playback_stats before
+    `_set_speaking(False)`; the wrapper keeps that device-confirmed transition
+    inside the exclusive speaker lease.
+    """
+    async with device.speaker_lock:
+        await _run_post_turn_playback_unlocked(device, voice_response, cancel_event)
 
 
 async def _meter_at_playback_start(pcm_chunks, on_start):
@@ -1413,7 +1436,7 @@ async def _meter_at_playback_start(pcm_chunks, on_start):
         await on_start()
 
 
-async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
+async def _run_streaming_post_turn_playback_unlocked(device: Device, pcm_chunks) -> int:
     """
     Play decoded HA TTS while the HTTP response is still arriving.
 
@@ -1538,8 +1561,19 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
                 log.debug(f"[{device.device_id}] TTS stream close: {e}")
 
 
+async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
+    """Serialize streaming playback with timer alarms and announcements.
+
+    The locked implementation waits for playback_stats before
+    `_set_speaking(False)` so a timer alarm cannot enter during device drain.
+    """
+    async with device.speaker_lock:
+        return await _run_streaming_post_turn_playback_unlocked(device, pcm_chunks)
+
+
 async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_wakeword: bool = False,
-                            initial_audio: tuple[bytes, ...] | None = None):
+                            initial_audio: tuple[bytes, ...] | None = None,
+                            on_transcript=None, stt_only: bool = False):
     """
     is_wakeword: explicit flag for whether this turn was triggered by wake-
     word detection (as opposed to a button press). Used to decide preroll
@@ -1612,6 +1646,8 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                 nonlocal spin_task, watcher
                 if stop_spin.is_set():
                     return  # cleanup already ran; turn is over
+                if stt_only:
+                    return
                 device.thinking  = True
                 device.listening = False
                 await _push_device_state(device)
@@ -1774,6 +1810,8 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                         trigger_label=turn_label,
                         preroll_discard=preroll_discard,
                         initial_audio=turn_initial_audio,
+                        on_transcript=on_transcript,
+                        stt_only=stt_only,
                     )
                 finally:
                     # Watcher spans thinking→playback and is owned here:
@@ -1992,6 +2030,34 @@ def _supervise_wake_listener(device: Device, failures: int = 0) -> asyncio.Task:
     return task
 
 
+async def _run_timer_speech_turn(device: Device, first_frame: bytes) -> None:
+    """Use HA STT to confirm speech before dismissing a timer alarm."""
+    if device.voice_lock.locked():
+        return
+
+    async def on_transcript(text: str) -> None:
+        if await api.dismiss_timer_alarm(device.device_id):
+            log.info(
+                "[%s] Timer alarm dismissed by STT transcript: %r",
+                device.device_id, text,
+            )
+
+    device.oww_paused.set()
+    device.oww_paused_since = asyncio.get_event_loop().time()
+    await device.beam_lock()
+    try:
+        await _run_voice_locked(
+            device,
+            trigger_label="timer-speech",
+            is_wakeword=False,
+            initial_audio=(first_frame,),
+            on_transcript=on_transcript,
+            stt_only=True,
+        )
+    finally:
+        await device.beam_unlock()
+
+
 async def wake_word_listener(device: Device):
     loop = asyncio.get_event_loop()
 
@@ -2151,7 +2217,13 @@ async def wake_word_listener(device: Device):
                 del buf[:CHUNK_BYTES]
                 samples = np.frombuffer(frame, dtype=np.int16)
 
-                if device.speaking:
+                # Timer alarms are deliberately listenable, but never inspect
+                # mic energy while the alarm is on the speaker. The device's
+                # AEC is not guaranteed to remove this controller-generated
+                # chime, and doing so would dismiss every alarm on its first
+                # burst. Speech is picked up during the gap between bursts.
+                timer_ringing = api.timer_alarm_ringing(device.device_id)
+                if device.speaking and not timer_ringing:
                     continue
 
                 # Per-room noise floor tracking (measurement only — the audio
@@ -2172,6 +2244,16 @@ async def wake_word_listener(device: Device):
                     device.noise_floor += 0.3 * (rms - device.noise_floor)
                 else:
                     device.noise_floor += 0.008 * (rms - device.noise_floor)
+
+                if (timer_ringing and device.timer_alarm_audio_ready
+                        and loop.time() >= device.timer_alarm_listen_after
+                        and not device.speaking
+                        and em_timers.alarm_should_capture(rms, device.noise_floor)):
+                    await _run_timer_speech_turn(device, frame)
+                    model.reset()
+                    warmup.reset()
+                    buf.clear()
+                    continue
 
                 prediction = await loop.run_in_executor(
                     None, model.predict, samples
@@ -2205,6 +2287,8 @@ async def wake_word_listener(device: Device):
                 # the user's opt-in to trusting AEC not to self-trigger.
                 eff_threshold = device.oww_threshold
                 if device.barge_in_enabled and em_player.is_playing(device.device_id):
+                    eff_threshold = min(eff_threshold, device.barge_threshold)
+                if timer_ringing:
                     eff_threshold = min(eff_threshold, device.barge_threshold)
                 near_miss_floor = float(getattr(device, "wake_near_miss_floor", 0.05))
 
@@ -2323,6 +2407,14 @@ async def wake_word_listener(device: Device):
                         device.device_id, "info", "device",
                         f"Wake word detected (score={score:.3f}, {source})"
                     )
+                    if timer_ringing:
+                        # Route a wake through HA STT as a timer dismissal
+                        # candidate; do not run intent handling or TTS.
+                        await _run_timer_speech_turn(device, frame)
+                        model.reset()
+                        warmup.reset()
+                        buf.clear()
+                        continue
                     if not device.voice_lock.locked():
                         # P0-1: do NOT send mic_stop/mic_start_turn.
                         # The stream stays running continuously. Flipping
@@ -2547,6 +2639,16 @@ async def handle_button_event(device: Device, event: dict):
         # carries the state at the instant of the press, where device.muted is
         # whatever the last message left behind.
         muted = bool(event.get("muted", device.muted))
+
+        # A tap dismisses an active alarm locally. Do this before the normal
+        # tap-event/voice-turn policy so it cannot become an HA command.
+        # Holds remain HA events and use the normal gesture policy below.
+        if (api.timer_alarm_ringing(device.device_id)
+                and held_ms < turn_engine.BUTTON_HOLD_MS):
+            if await api.dismiss_timer_alarm(device.device_id):
+                log.info(f"[{device.device_id}] Dot button tap dismissed timer alarm")
+            return
+
         action = em_button.decide(
             held_ms=held_ms,
             hold_ms=turn_engine.BUTTON_HOLD_MS,

@@ -71,6 +71,8 @@ import em_shadow
 import em_support
 import em_test_audio
 import em_turn_engine
+import em_timers
+import em_timer_alarm
 import em_ha_sidechannels as ha_sidechannels
 from version import VERSION as CONTROLLER_VERSION
 from version import compare as _compare_versions
@@ -273,6 +275,8 @@ _shell_lock:      dict = {}   # device_id → asyncio.Lock (one session at a tim
 _test_audio:      dict[str, bytes] = {}  # device_id → normalized 16k mono WAV
 _test_audio_lock: dict[str, asyncio.Lock] = {}
 TEST_AUDIO_DEVICE_PATH = "/data/local/tmp/echomuse-test-query.wav"
+_timer_sessions: dict[str, em_timers.AlarmSession] = {}
+_timer_alarm_runner: em_timer_alarm.TimerAlarmRunner | None = None
 
 def init(devices_ref: dict, shell_pending_ref: dict, shell_dashboard_ref: dict) -> None:
     """
@@ -280,10 +284,39 @@ def init(devices_ref: dict, shell_pending_ref: dict, shell_dashboard_ref: dict) 
 
     Must be called before create_app().
     """
-    global _devices, _shell_pending, _shell_dashboard
+    global _devices, _shell_pending, _shell_dashboard, _timer_alarm_runner
     _devices         = devices_ref
     _shell_pending   = shell_pending_ref
     _shell_dashboard = shell_dashboard_ref
+    _timer_sessions.clear()
+    async def _play(device, pcm, cancel):
+        import em_controller
+        await em_controller._run_post_turn_playback(device, pcm, cancel)
+        device.timer_alarm_audio_ready = True
+        device.timer_alarm_listen_after = (
+            asyncio.get_running_loop().time() + em_timers.ALARM_LISTEN_SETTLE_S
+        )
+
+    async def _timer_state(device_id: str, firing: bool) -> None:
+        import em_controller
+        device = _devices.get(device_id)
+        if device is None:
+            return
+        device.timer_firing = firing
+        device.timer_alarm_audio_ready = False
+        device.timer_alarm_listen_after = 0.0
+        if firing:
+            if device.led_anim_capable:
+                await device.send_led_anim(device.led_scene["timer_anim"])
+            else:
+                await device.set_leds(device.led_scene["listening"], listening=True)
+        else:
+            await em_controller.leds_off(device)
+        await em_controller._push_device_state(device)
+
+    _timer_alarm_runner = em_timer_alarm.TimerAlarmRunner(
+        _devices.get, _play, on_state=_timer_state
+    )
 
 
 async def create_app() -> web.Application:
@@ -408,6 +441,10 @@ async def create_app() -> web.Application:
     app.router.add_post("/api/devices/{id}/secure_link",  _post_secure_link)
     app.router.add_post("/api/devices/{id}/debloat",      _post_debloat)
     app.router.add_post("/api/devices/{id}/media",        _post_media_command)
+    app.router.add_post(
+        "/api/devices/{id}/timer-events",
+        auth.require_integration_or_admin(_post_timer_event),
+    )
     app.router.add_post("/api/devices/{id}/test_audio",   _post_test_audio)
     app.router.add_post("/api/devices/{id}/test_turn",    _post_test_turn)
     app.router.add_delete("/api/devices/{id}/test_audio", _delete_test_audio)
@@ -1152,6 +1189,60 @@ async def _post_media_command(request: web.Request) -> web.Response:
         log.warning("[%s] media command failed: %s", device_id, e)
         return _error("media_command_failed", str(e), 409)
     return _ok({"device_id": device_id, "command": command or "play_media"})
+
+
+@auth.require_integration_or_admin
+async def _post_timer_event(request: web.Request) -> web.Response:
+    """Accept one lifecycle event from the EchoMuse Home Assistant integration."""
+    device_id = request.match_info["id"]
+    body = await _json_body(request)
+    if not isinstance(body, dict):
+        return _error("invalid_timer_event", "Request body must be an object", 400)
+    event = body.get("event")
+    timer_id = body.get("timer_id")
+    if event not in {"started", "updated", "cancelled", "finished"}:
+        return _error("invalid_timer_event", "Unknown timer event", 400)
+    if not isinstance(timer_id, str) or not timer_id.strip():
+        return _error("invalid_timer_event", "Missing timer_id", 400)
+    if body.get("ha_device_id") is not None and not isinstance(body["ha_device_id"], str):
+        return _error("invalid_timer_event", "Invalid ha_device_id", 400)
+
+    timer_id = timer_id.strip()
+    session = _timer_sessions.setdefault(device_id, em_timers.AlarmSession())
+    try:
+        transition = session.apply(body)
+    except (KeyError, TypeError, ValueError):
+        return _error("invalid_timer_event", "Invalid timer event values", 400)
+    if not transition.accepted:
+        return _error("invalid_timer_event", "Invalid timer event", 400)
+    if transition.duplicate:
+        return _ok({"accepted": True, "duplicate": True, "timer_id": timer_id})
+
+    forwarded = {"type": "timer.event", "device_id": device_id, **body}
+    await _push_event(forwarded)
+    device = _devices.get(device_id)
+    if event == "finished" and device is not None and device.muted:
+        # A muted device must not leak an expiry through the alarm worker. HA
+        # remains the timer authority; this only discards the local alert.
+        session.dismiss_all()
+        await _push_event({
+            "type": "timer.alarm",
+            "device_id": device_id,
+            **session.snapshot(),
+        })
+        log.info("[%s] Timer expiry discarded while muted", device_id)
+        return _ok({"accepted": True, "duplicate": False, "timer_id": timer_id})
+    if transition.alarm_changed:
+        await _push_event({
+            "type": "timer.alarm",
+            "device_id": device_id,
+            **session.snapshot(),
+        })
+        if session.current is not None and event == "finished" and _timer_alarm_runner:
+            if device is not None:
+                _timer_alarm_runner.start(device_id, session)
+    log.info("[%s] Timer %s: %s", device_id, timer_id, event)
+    return _ok({"accepted": True, "duplicate": False, "timer_id": timer_id})
 
 
 @auth.require_admin
@@ -4723,6 +4814,37 @@ async def notify_device_connected(device_id: str, version: str | None = None) ->
 async def notify_device_disconnected(device_id: str) -> None:
     """Called by em_controller when a device disconnects."""
     await _push_event({"type": "device_disconnected", "device_id": device_id})
+    session = _timer_sessions.get(device_id)
+    if _timer_alarm_runner is not None:
+        await _timer_alarm_runner.disconnect(device_id)
+    if session is not None and session.disconnect():
+        await _push_event({
+            "type": "timer.alarm",
+            "device_id": device_id,
+            **session.snapshot(),
+        })
+
+
+def timer_alarm_ringing(device_id: str) -> bool:
+    return _timer_alarm_runner is not None and _timer_alarm_runner.is_running(device_id)
+
+
+async def dismiss_timer_alarm(device_id: str) -> bool:
+    """Dismiss the current alarm and publish the next queue state."""
+    session = _timer_sessions.get(device_id)
+    if session is None or session.current is None:
+        return False
+    session.dismiss_current()
+    if _timer_alarm_runner is not None:
+        await _timer_alarm_runner.stop(device_id)
+    await _push_event({
+        "type": "timer.alarm",
+        "device_id": device_id,
+        **session.snapshot(),
+    })
+    if session.current is not None and _timer_alarm_runner is not None:
+        _timer_alarm_runner.start(device_id, session)
+    return True
 
 
 async def notify_device_pending(device_id: str, ip: str) -> None:
@@ -4857,6 +4979,7 @@ def _merge_device(row) -> dict:
         "muted":            getattr(live, "muted",     False) if live else False,
         "listening":        getattr(live, "listening", False) if live else False,
         "thinking":         getattr(live, "thinking",  False) if live else False,
+        "timer_firing":     getattr(live, "timer_firing", False) if live else False,
         "stats":            live.stats if live else None,
         # Control-plane round trip, controller-measured. The RF counters are
         # structurally zero on this hardware (the MTK driver populates

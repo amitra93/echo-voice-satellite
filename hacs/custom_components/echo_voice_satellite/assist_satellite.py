@@ -20,6 +20,14 @@ from typing import Any
 
 from homeassistant.components import tts
 from homeassistant.components.assist_pipeline import PipelineEvent, PipelineEventType
+try:
+    from homeassistant.components.assist_pipeline import PipelineStage
+except ImportError:
+    try:
+        from homeassistant.components.assist_pipeline.pipeline import PipelineStage
+    except ImportError:
+        class PipelineStage:
+            STT = "stt"
 from homeassistant.components.assist_satellite import (
     AssistSatelliteAnnouncement,
     AssistSatelliteConfiguration,
@@ -29,6 +37,7 @@ from homeassistant.components.assist_satellite import (
 )
 
 from .client import ControllerError
+from .const import DOMAIN
 from .entities import EchoCoordinatorEntity, add_dynamic_entities
 from .tts_stream import TTSIncompatible, stream_result_to_audio
 
@@ -63,6 +72,47 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
         self._event_remove()
         await super().async_will_remove_from_hass()
 
+    async def async_added_to_hass(self) -> None:
+        """Register this satellite as the owner of its HA timer events."""
+        await super().async_added_to_hass()
+        from homeassistant.components.intent import async_register_timer_handler
+        from homeassistant.helpers import device_registry as dr
+
+        device = dr.async_get(self.hass).async_get_device(
+            identifiers={(DOMAIN, self.device_id)}
+        )
+        if device is None:
+            raise RuntimeError(f"HA device registry entry missing for {self.device_id}")
+
+        self._timer_unregister = async_register_timer_handler(
+            self.hass, device.id, self._timer_event
+        )
+        self.async_on_remove(self._timer_unregister)
+
+    def _timer_event(self, event, timer) -> None:
+        """TimerManager invokes handlers synchronously from its event loop."""
+        self.hass.async_create_task(
+            self._async_forward_timer_event(event, timer),
+            name=f"echo-timer-event-{timer.id}",
+        )
+
+    async def _async_forward_timer_event(self, event, timer) -> None:
+        try:
+            await self.client.async_timer_event(
+                self.device_id,
+                {
+                    "event": getattr(event, "value", event),
+                    "timer_id": timer.id,
+                    "ha_device_id": timer.device_id,
+                    "name": timer.name,
+                    "total_seconds": timer.created_seconds,
+                    "seconds_left": timer.seconds_left,
+                    "is_active": timer.is_active,
+                },
+            )
+        except ControllerError:
+            _LOGGER.exception("Failed to forward timer %s for %s", timer.id, self.device_id)
+
     @property
     def available(self) -> bool:
         return super().available and not bool(self.record.get("muted"))
@@ -86,6 +136,7 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
                 self._active_channel = None
             self._active_turn_id = None
 
+
     async def _handle_wake_offer(self, offer: dict[str, Any]) -> None:
         turn_id = offer.get("turn_id")
         try:
@@ -100,12 +151,19 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
         self._continue_conversation = False
         self._tts_task = None
         asyncio.create_task(
-            self._run_wake_pipeline(channel), name=f"echo-wake-{self.device_id}"
+            self._run_wake_pipeline(
+                channel, timer_speech=offer.get("trigger") == "timer-speech"
+            ), name=f"echo-wake-{self.device_id}"
         )
 
-    async def _run_wake_pipeline(self, channel) -> None:
+    async def _run_wake_pipeline(self, channel, timer_speech: bool = False) -> None:
         try:
-            await super().async_accept_pipeline_from_satellite(channel.mic_frames())
+            if timer_speech:
+                await super().async_accept_pipeline_from_satellite(
+                    channel.mic_frames(), end_stage=PipelineStage.STT
+                )
+            else:
+                await super().async_accept_pipeline_from_satellite(channel.mic_frames())
         except Exception:
             _LOGGER.exception("Pipeline failed for %s", self.device_id)
         finally:
@@ -238,7 +296,11 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
             await self.client.async_turn_action(turn_id, "tts/end")
         except asyncio.CancelledError:
             raise
-        except (ControllerError, TTSIncompatible):
+        except Exception:
+            # A provider failure can surface while ResultStream is consumed
+            # (for example, a cloud-TTS quota error), not just as
+            # TTSIncompatible. The controller is waiting for this terminal
+            # signal; without it its audio-timeout spinner lasts two minutes.
             _LOGGER.exception("TTS stream failed for turn %s", turn_id)
             with contextlib.suppress(ControllerError):
                 await self.client.async_turn_action(turn_id, "tts/end")

@@ -37,6 +37,7 @@ test('device state priority and event accents', () => {
   assert.equal(logic.deviceState({ approved: true, connected: false }).key, 'offline');
   assert.equal(logic.deviceState({ approved: true, connected: true, muted: true }).key, 'muted');
   assert.equal(logic.deviceState({ approved: true, connected: true, speaking: true, thinking: true }).key, 'speaking');
+  assert.equal(logic.deviceState({ approved: true, connected: true, timer_firing: true, speaking: true }).key, 'timer_firing');
   assert.equal(logic.deviceState({ approved: true, connected: true, thinking: true }).key, 'thinking');
   assert.equal(logic.deviceState({ approved: true, connected: true, listening: true }).key, 'listening');
   assert.equal(logic.deviceState({ approved: true, connected: true }).key, 'idle');

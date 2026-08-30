@@ -98,6 +98,7 @@ METER_TTL_PAD = 20
 # playback estimate this release replaces. Keep these two in step if either
 # moves.
 SPIN_TTL = 135
+TIMER_TTL = 135
 
 # Meter response-curve config keys → the wire field the device reads, with
 # the range the dashboard offers. The device clamps independently
@@ -226,6 +227,12 @@ def resolve(config: dict) -> dict:
         "listening_anim": listening_anim,
         "spin_anim":      spin_anim,
         "meter_anim":     meter_anim,
+        # Timer alarms can outlast a single chime and must remain visible for
+        # the whole firing window, including while music is being interrupted.
+        "timer_anim":     {
+            "pattern": "pulse", "colors": outcome_colors,
+            "periodMs": 700, "ttlSec": TIMER_TTL,
+        },
         # One slow throb — "I was listening and heard nothing."
         "nospeech_anim":  {
             "pattern": "pulse", "colors": outcome_colors,

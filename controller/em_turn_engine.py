@@ -133,6 +133,8 @@ class Turn:
     tts_text: str | None = None
     capture_audio: bool = False
     initial_audio: tuple[bytes, ...] = ()
+    on_transcript: object = None
+    stt_only: bool = False
     mic_audio: bytearray = field(default_factory=bytearray)
     tts_audio: bytearray = field(default_factory=bytearray)
 
@@ -306,6 +308,8 @@ async def turn_action(request: web.Request) -> web.Response:
         if isinstance(text, str) and text:
             turn.stt_text = text
             turn.transcript_mono = turn.transcript_mono or time.monotonic()
+            if turn.on_transcript is not None:
+                await turn.on_transcript(text)
     elif action == "tts-text":
         try:
             body = await request.json()
@@ -570,6 +574,8 @@ async def trigger_voice_turn(
     trigger_label: str = "unknown",
     preroll_discard: int = 0,
     initial_audio: tuple[bytes, ...] = (),
+    on_transcript=None,
+    stt_only: bool = False,
 ) -> bool:
     """Offer a controller-triggered turn to the connected HACS integration."""
     # Pop, not read: a continuation turn loops back into trigger_voice_turn
@@ -585,6 +591,8 @@ async def trigger_voice_turn(
         preroll_remaining=preroll_discard,
         capture_audio=bool(getattr(device, "save_utterances", False)),
         initial_audio=initial_audio,
+        on_transcript=on_transcript,
+        stt_only=stt_only,
     )
     ENGINE.turns[turn_id] = turn
     await _push_event({

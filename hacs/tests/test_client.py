@@ -87,6 +87,11 @@ async def _media_command(request):
     return web.json_response({"device_id": request.match_info["id"], **body})
 
 
+async def _timer_event(request):
+    _require_key(request)
+    return web.json_response(await request.json())
+
+
 async def _server_error(request):
     _require_key(request)
     return web.Response(status=500, text="boom")
@@ -106,6 +111,7 @@ def _make_app():
     app.router.add_get("/api/devices", _get_devices)
     app.router.add_post("/api/devices/{id}/turn", _create_turn)
     app.router.add_post("/api/devices/{id}/media", _media_command)
+    app.router.add_post("/api/devices/{id}/timer-events", _timer_event)
     app.router.add_post("/api/turns/{tid}/endpoint", _turn_action)
     app.router.add_post("/api/turns/{tid}/reject", _turn_action_error)
     app.router.add_post("/api/turns/{tid}/error500", _server_error)
@@ -231,6 +237,27 @@ def test_media_command_posts_json_body_and_returns_reply():
 
     reply = asyncio.run(_run(body))
     assert reply == {"device_id": "ABC123", "volume": 0.42}
+
+
+def test_timer_event_posts_lifecycle_payload_and_returns_reply():
+    async def body(base_url):
+        client = ControllerClient(base_url, API_KEY)
+        event = {
+            "event": "finished", "timer_id": "01J", "ha_device_id": "ha-dev",
+            "name": "pizza", "total_seconds": 600, "seconds_left": 0,
+            "is_active": False,
+        }
+        try:
+            reply = await client.async_timer_event("ABC123", event)
+        finally:
+            await client.async_close()
+        return reply
+
+    assert asyncio.run(_run(body)) == {
+        "event": "finished", "timer_id": "01J", "ha_device_id": "ha-dev",
+        "name": "pizza", "total_seconds": 600, "seconds_left": 0,
+        "is_active": False,
+    }
 
 
 def test_post_error_without_json_reason_still_raises_controller_error():

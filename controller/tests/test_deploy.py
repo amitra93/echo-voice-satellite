@@ -23,6 +23,12 @@ def test_dockerfile_copies_every_controller_module():
     )
 
 
+def test_timer_alarm_sound_is_packaged_in_the_controller_image():
+    dockerfile = (CONTROLLER / "Dockerfile").read_text()
+    assert (CONTROLLER / "sounds" / "timer_finished.flac").is_file()
+    assert "COPY sounds/ ./sounds/" in dockerfile
+
+
 def test_dashboard_bundle_is_cache_busted():
     """
     /dashboard must not hand the browser a bare /static/dashboard.js URL.

@@ -105,6 +105,12 @@ class ControllerClient:
         """POST /api/devices/{id}/media — play/pause/resume/stop/volume."""
         return await self._post(f"/api/devices/{device_id}/media", body)
 
+    async def async_timer_event(
+        self, device_id: str, event: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Forward one Home Assistant timer lifecycle event."""
+        return await self._post(f"/api/devices/{device_id}/timer-events", event)
+
     async def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         session = await self._ensure_session()
         try:

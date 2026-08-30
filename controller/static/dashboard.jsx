@@ -6477,7 +6477,7 @@ function App() {
           console.log('[ws] device_disconnected:', msg.device_id);
           setDevices(prev => prev.map(d =>
             d.device_id === msg.device_id
-              ? { ...d, connected: false, speaking: false, listening: false, thinking: false }
+               ? { ...d, connected: false, speaking: false, listening: false, thinking: false, timer_firing: false }
               : d
           ));
           break;
