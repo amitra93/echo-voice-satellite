@@ -126,6 +126,14 @@
   .dot.on { background: #40906a; }
 
   /* wake word cards */
+  .wake-tabs { display: flex; gap: 6px; overflow-x: auto; padding: 2px 2px 12px; margin-bottom: 2px; scrollbar-width: thin; }
+  .wake-tab { flex: 0 0 auto; border-radius: 8px 8px 0 0; padding: 8px 13px; background: var(--surface); box-shadow: none; color: var(--text2); border-color: var(--border); }
+  .wake-tab[aria-selected="true"] { background: var(--card); color: var(--text); border-bottom: 2px solid var(--accent); }
+  .wake-tab .tab-status { display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; background: var(--muted); }
+  .wake-tab .tab-status.ready { background: var(--ok); }
+  .wake-tab .tab-status.warn { background: var(--warn); }
+  .wake-tab .tab-status.error { background: var(--err); }
+  .wake-panel { margin-top: 0; }
   .ww .top { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
   .ww h3 { font-size: 16px; font-weight: 600; }
   .ww .phrase { color: var(--text2); font-style: italic; font-size: 13px; }
@@ -411,6 +419,12 @@ function render() {
   // land inside one 2.5s window before the next poll erases them. Remember
   // whichever field the user is actively editing, and put it back afterwards.
   const wwRoot = $('wakewords');
+  const wakeNames = state.wakewords.map(w => w.name);
+  let activeWakeword = localStorage.getItem('em-forge-active-wakeword');
+  if (!wakeNames.includes(activeWakeword)) {
+    activeWakeword = wakeNames[0] || null;
+    if (activeWakeword) localStorage.setItem('em-forge-active-wakeword', activeWakeword);
+  }
   const editing = document.activeElement;
   const pendingMix = {};
   wwRoot.querySelectorAll('input[data-mix-positive-custom], input[data-mix-positive-piper], input[data-mix-positive-google], input[data-mix-negative-custom], input[data-mix-negative-piper], input[data-mix-negative-google]').forEach(input => {
@@ -438,7 +452,12 @@ function render() {
       };
     }
   }
-  $('wakewords').innerHTML = state.wakewords.length ? state.wakewords.map(w => {
+  const wakeTabs = state.wakewords.map(w => {
+    const ready = w.model_built && !w.features_stale;
+    const status = ready ? 'ready' : w.features_stale ? 'warn' : 'error';
+    return `<button class="wake-tab" role="tab" data-wake-tab="${esc(w.name)}" aria-selected="${w.name === activeWakeword}" type="button"><span class="tab-status ${status}"></span>${esc(w.name)}</button>`;
+  }).join('');
+  const wakeCards = state.wakewords.filter(w => w.name === activeWakeword).map(w => {
     const stages = [
       ['Created', true],
       ['Voices', w.clips_train > 0],
@@ -453,7 +472,7 @@ function render() {
              (i < stages.length - 1 ? `<div class="conn ${stages[i+1][1] ? 'done' : ''}"></div>` : '');
     }).join('');
     return `
-    <div class="card ww" data-name="${esc(w.name)}">
+    <div class="card ww wake-panel" role="tabpanel" data-name="${esc(w.name)}">
         <div class="top">
         <h3>${esc(w.name)}</h3>
         <span class="phrase">“${esc(w.phrases.join('” / “'))}”</span>
@@ -546,7 +565,8 @@ function render() {
       <div class="verdict" style="display:none"></div>
       <div class="rawout" style="display:none"></div>
     </div>`;
-  }).join('') : `<div class="card empty">No wake words yet.<br>
+  }).join('');
+  $('wakewords').innerHTML = state.wakewords.length ? `<div class="wake-tabs" role="tablist" aria-label="Wake words">${wakeTabs}</div>${wakeCards}` : `<div class="card empty">No wake words yet.<br>
       Download the voice data (step 1), then create your first wake word on the left —
       after training you can try it with the microphone right here.</div>`;
 
@@ -862,6 +882,12 @@ $('listGttsVoices').onclick = async () => {
 };
 
 $('wakewords').addEventListener('click', async e => {
+  const tab = e.target.closest('[data-wake-tab]');
+  if (tab) {
+    localStorage.setItem('em-forge-active-wakeword', tab.dataset.wakeTab);
+    render();
+    return;
+  }
   const btn = e.target.closest('button[data-act]');
   if (!btn) return;
   const card = btn.closest('.ww'), name = card.dataset.name;
