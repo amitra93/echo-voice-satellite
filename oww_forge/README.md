@@ -46,50 +46,9 @@ The UI covers the whole flow: asset download with live progress, wake-word
 creation, build with a streaming log console, Google-TTS mix-in, wav-upload
 testing, and `.onnx` download. One job runs at a time (training saturates
 the machine anyway); state is derived from disk on every poll, so it
-survives container restarts. Light and dark follow the dashboard, sharing
-its `em-theme` setting. No auth — LAN tool.
+survives container restarts. No auth — LAN tool.
 
-A run can be **stopped** from the console bar, its settings changed under
-*training settings*, and started again. Stopping keeps everything already
-produced: clip generation is resumable and both later steps check what
-exists, so the loop is stop, adjust, train again rather than start over. The
-stop kills the whole process group, because `forge.py` is only the parent —
-openWakeWord's `train.py` underneath it is what holds the GPU, and killing
-the parent alone leaves that running behind a UI that says it stopped.
-
-Note the credentials endpoint writes a Google service-account key, and there
-is no auth in front of it. That is the same trust model as everything else
-here (the UI can already delete training data and run arbitrary jobs), but
-it is a secret at rest now, so keep the port on the LAN.
-
-## Quickstart — published image
-
-```bash
-cd oww_forge
-docker compose -f docker-compose.deploy.yml up -d forge-ui   # http://<host>:8769
-```
-
-Two images, and picking the wrong one costs a night:
-
-| tag | torch | platforms | for |
-|-----|-------|-----------|-----|
-| `:latest` | CUDA 12.8 | linux/amd64 | a machine with an NVIDIA GPU |
-| `:latest-cpu` | CPU | linux/amd64, linux/arm64 | everything else, including Apple Silicon |
-
-On Apple Silicon use `-cpu` and the `forge-ui-cpu` / `forge-cpu` services. The
-arm64 image runs natively instead of under emulation, which is the difference
-between the overnight CPU run described below and one nobody would sit
-through. It is **still CPU training**: Docker on macOS runs containers in a
-Linux VM with no Metal passthrough, so there is no GPU in there to reach. Using
-the M-series GPU means running the trainer outside Docker against torch's MPS
-backend, which is not what this ships.
-
-Prefer the published image unless you are changing the trainer itself. Every
-pin in the Dockerfile is load-bearing, and a local build re-resolves the
-floating layers underneath them on every run; the published image is the only
-artifact that preserves what was actually verified.
-
-## Quickstart — local build
+## Quickstart — CLI
 
 ```bash
 cd oww_forge
@@ -118,6 +77,34 @@ Every stage is resumable: `assets` skips completed parts, clip generation
 tops up to the target count, and `build --from-step augment|train` restarts
 mid-pipeline.
 
+### Optional speech corpora
+
+The Forge UI lists and downloads both optional corpora individually:
+
+- **Common Voice 26 English** downloads the complete 88.14GB CC0 archive from
+  Mozilla Data Collective, then a separate feature-build action embeds every
+  validated clip for use as training negatives. It needs roughly 150GB total
+  alongside the standard Forge assets. Mozilla requires accepting its corpus
+  terms and an API key: export `MDC_API_KEY` before starting Docker Compose.
+- **AMI distant microphone** streams about seven hours of CC-BY-4.0 meeting
+  audio into a compact false-positive validation array. No source archive is
+  retained.
+
+Enable either corpus per wake word after its feature asset is ready. Common
+Voice features resume from `.npy.part` plus a checkpoint. A stale or corrupt
+checkpoint is preserved and requires an explicit reset rather than being
+silently overwritten.
+
+### Optional-data mix
+
+The original ACAV100M draw remains a 1,024-example negative batch. Optional
+speech sources replace part of it rather than increasing the batch: Common
+Voice receives 128 examples, FLEURS 96, and VoxPopuli 96; ACAV receives the
+remainder. Adversarial negatives and positives remain 50 each. This keeps
+multilingual/accent coverage meaningful without allowing any new corpus to
+overpower the proven broad ACAV baseline. MUSAN and OpenSLR 28 are augmentation
+sources, so they affect generated clips rather than classifier batch sampling.
+
 ## GPU / CPU
 
 The default image builds **CUDA 12.8 torch 2.7.1**, which supports Blackwell
@@ -131,6 +118,34 @@ badge).
 - Host **without** it: `docker compose run --rm forge-cpu …` (same image, no
   GPU reservation), or build with `GPU: "0"` for a ~3GB CPU-only image
   instead of ~10GB.
+
+### ROCm Feature Extraction
+
+The ROCm compose file can embed optional speech corpora through runtime
+conversion of openWakeWord's frozen ONNX feature models. Assets remain on the
+proven `onnx` backend by default until the local ROCm gate passes.
+`--feature-backend auto` selects ROCm PyTorch when available and ONNX CPU
+otherwise; `--feature-backend torch` requires the GPU path.
+
+The tuned ONNX corpus path uses six extraction workers, feature batches of 256,
+and two bounded audio-decoder workers. These defaults were selected on the
+six-core Ryzen host; the bounded queue prevents compressed audio from growing
+without limit in memory.
+
+Before enabling `auto` for a release, run the required local parity test and
+measure both extractors on the same predecoded input:
+
+```bash
+docker compose -f docker-compose-rocm-wsl.yml run --rm --entrypoint python forge \
+  -m unittest discover -s /opt/forge/tests -p 'test_torch_features.py'
+docker compose -f docker-compose-rocm-wsl.yml run --rm forge \
+  bench-features --backend onnx --clips 10000 --batch-size 64
+docker compose -f docker-compose-rocm-wsl.yml run --rm forge \
+  bench-features --backend torch --clips 10000 --batch-size 64
+```
+
+The ROCm result must be at least 2x the ONNX CPU end-to-end benchmark before
+`auto` becomes the default for a release.
 
 ### Asset sizes
 
@@ -170,39 +185,39 @@ US vowel, not a British "clar-ra". Three levers, in increasing strength:
    small classifier makes the auto-trainer more conservative (the two-spelling
    `hey_clarra` trained to *zero* false positives/hour but lower recall than
    single-spelling `hey_clara`, 0.43 vs 0.52 on the augmented test set) —
-   if a variant model feels deaf, add real recordings and retrain, or lower
+   if a variant model feels deaf, import labeled captures and retrain, or lower
    the device's `owwThreshold` a notch.
-2. **Piper voices in another accent or language** (local, free) — the
-   `+ Accents & languages` button, or `forge.py piper-voices <name>
-   --language en_GB`. Piper publishes voices in **55 languages** and the
-   catalogue is read at runtime, so this is not an English-only lever.
-   Where a language has a multi-speaker voice it is chosen automatically,
-   because speaker identity is what buys variety: en_US 904 speakers,
-   de_DE 236, fr_FR 125, en_GB 109, vi_VN 65. `forge.py voices` lists what
-   is available; the first run downloads the voice (20–80MB) and keeps it.
+2. **Google TTS mix-in** — Forge uses Chirp 3 voices. Select exact locales
+   and optionally provide a comma-separated list of exact voice names. The
+   sample count applies to every usable locale/voice pair, so `500` over two
+   voices available in `en-IN` and `en-PH` produces 2,000 positive clips.
+3. **Controller-labeled captures** (best) — use EchoMuse's controller to
+   capture activations and near-misses, then label them as "should have
+   activated" or "should have ignored". Import the exported ZIP below so the
+   positive and negative labels are preserved; do not add arbitrary speech to
+   the positive set.
 
-   Note the wake-word model still rests on openWakeWord's frozen **English**
-   speech embedding, so a wake word in another language is not as well
-   served by the rest of the pipeline as an English one.
-3. **Google TTS mix-in** — defaults to `en-US,en-GB,en-AU` voices, so a
-   `google-tts` pass before build adds genuinely British/Australian
-   synthetic speakers (`--languages en-GB,en-AU` to skip the US ones).
-4. **Real recordings** (best) — the UI's "+ Recordings…" button (or dropping
-   16kHz wavs into `positive_train/`) adds actual samples of you and the
-   kids to the training set; any phone recording format works (ffmpeg
-   converts). Even 20–50 real clips measurably pull the model toward the
-   voices that matter. They're augmented with reverb/noise like everything
-   else, and displace synthetic clips rather than growing the set.
+### Import labelled captures from EchoMuse
 
-### Hearing the phrase before training on it
+The EchoMuse controller can record the audio around real wake **activations**
+and **near-misses** and let an admin label each clip in the dashboard
+(Settings → Training): "should have activated" (positive) or "should have
+ignored" (negative). Download the finished dataset there as a `.zip` and bring
+it here:
 
-Spelling variants only pay off if they read the way you intended, and until
-2026-08-20 the only way to find out was to generate 30,000 clips and train
-on them. **Hear each spelling** (when creating a wake word) speaks the
-variants in order, and each spelling on an existing wake word is clickable.
-The speaker is held fixed, so two spellings can be compared without the
-voice changing underneath the comparison. It uses the same Piper voices as
-the accent lever above, so the first press downloads one.
+- **UI:** on the wake word's card, **+ Import labeled dataset…** and pick the
+  `.zip`, then **Retrain**.
+- **CLI:** `docker compose run --rm forge import hey_biscuit --zip /data/hey_biscuit-dataset.zip`
+
+The ZIP is `positive/…` + `negative/…`; Forge converts every clip to 16kHz
+mono, names them `custom_*`, and splits **10% of each polarity into the test
+set** (the same `TEST_FRACTION` as Google-TTS positives) so the held-out
+evaluation stays honest. Positives labelled from near-misses teach the model
+the voices/pronunciations it is currently missing; negatives labelled from
+false activations are the cheapest fix for false wakes — the real-world
+equivalent of `custom_negative_phrases`. Imported clips displace synthetic
+ones at generate time while preserving the positive/negative labels from the
+controller.
 
 ### Testing a built model
 
@@ -214,42 +229,25 @@ controller's default threshold is ~0.5.
 
 ### Google TTS positives (optional)
 
-`forge.py google-tts <name>` synthesizes the phrase across all premium Google
-voices (Neural2/Studio/WaveNet/Chirp, en-US/GB/AU by default) with
-rate/pitch variation, and drops the clips into the same positive train/test
-dirs — the subsequent piper generation counts them toward `n_samples`, so
-you get a mixed-family training set at no extra training cost. Piper remains
-the volume source; Google adds acoustic character a single TTS family can't.
+`forge.py google-tts <name>` synthesizes Chirp 3 samples. The requested sample
+count applies to every usable locale/voice pair; pass `--voices` with a
+comma-separated exact voice list to constrain it, or leave it empty to use all
+matching Chirp 3 voices. Each request uses only the selected voice name,
+locale, and reported gender; Chirp 3 speaking-rate and pitch variation are not
+sent. The UI's **Queries per second** setting controls the request pacer and
+defaults to 2; the CLI equivalent is `--qps`. Clips land in the same positive train/test dirs — the subsequent Piper
+generation counts them toward `n_samples`, so Google clips displace rather than
+expand the configured positive set. After adding Chirp clips or importing a
+labelled dataset, select **Retrain**: Forge detects changed clips and
+automatically rebuilds feature arrays before training.
 
-**It will be rate-limited, and that is handled.** Google refuses requests at
-any real concurrency — measured at 1388 of 2000 clips on one run — so
-transient failures back off and retry the same request five times, jittered,
-at four workers. A run of a few thousand clips therefore takes minutes
-rather than seconds, and the log distinguishes errors absorbed by retrying
-from clips actually abandoned. Do not read "absorbed N transient errors" as
-a fault; it means the quota was hit and the retries covered it.
-
-Two related behaviours worth knowing: a voice is only retired from a run for
-a **permanent** refusal (Chirp rejects `pitch`, for instance, and is then
-asked without it), never for a transient one; and the working request shape
-is remembered per voice, which removes about a third of the API calls.
-
-Setup, from the web UI: **Google voices** on the left, then upload (or paste)
-the JSON key and press **Test connection**. The key is written to
-`./data/google-credentials.json` with mode 600 and picked up by the next job
-with no container restart, so the compose mapping is no longer something you
-have to arrange yourself. Test connection is worth pressing: the usual
-failure is a perfectly valid key on a project where the Text-to-Speech API
-was never enabled, and nothing local can see that.
-
-Setup, by hand: create a GCP service account with the Text-to-Speech API
-enabled, save the JSON key as `./data/google-credentials.json`. Note this
-must be a **service account** key, not an OAuth client secret — the UI
-rejects the latter, but the CLI will only fail later, inside a job.
-**Usually free**: the API's
-always-free tier covers ~1M premium-voice characters/month and a 2,000-clip
-wake-word run is ~25k characters (~2% of it). Past the free tier it's ~$16/1M
-chars; the command prints an estimate and asks before running.
+Setup: create a GCP service account with the Text-to-Speech API enabled and
+provide its JSON key to the deployment through
+`GOOGLE_APPLICATION_CREDENTIALS`. Forge never accepts, inspects, or removes
+this credential through its browser UI. **Usually free**: the API's always-free
+tier covers ~1M premium-voice characters/month and a 2,000-clip wake-word run
+is ~25k characters (~2% of it). Past the free tier it's ~$16/1M chars; the
+command prints an estimate and asks before running.
 
 ## Installing a model into EchoMuse
 
@@ -288,14 +286,10 @@ scores (`em_oww_models.prediction_key`), so keep filenames unique.
 oww_forge/
   Dockerfile           pinned training environment (openWakeWord + piper + deps)
   docker-compose.yml   forge-ui (web) + forge/forge-cpu (CLI) services
-  forge.py             CLI: assets | new | voices | piper-voices | google-tts |
-                            build | test | ui
+  forge.py             CLI: assets | new | google-tts | import | build | test | ui
   forge_web.py         aiohttp web UI (port 8769) — thin layer over forge.py
   static/index.html    the web frontend (single file, no build step)
   google_tts.py        Google Cloud TTS positive-sample generator
-  piper_voices.py      Piper ONNX voices — accents/languages, and the phrase
-                       preview; catalogue fetched, never hardcoded
-  docker-compose.deploy.yml   pulls the published image instead of building
   config.template.yml  per-wake-word training config template
   data/                (gitignored) assets, per-word workdirs, finished models
 ```

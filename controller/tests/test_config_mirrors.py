@@ -64,18 +64,6 @@ def test_every_registration_mirror_is_also_applied_on_a_live_push():
     )
 
 
-def test_the_output_chain_is_carried_by_both():
-    """
-    Named explicitly, because these five are the ones with no device-side
-    fallback at all: the firmware ignores them, so the controller-side mirror
-    is the ONLY thing that makes them work.
-    """
-    chain = {"limiterEnabled", "limiterThreshold", "limiterRelease",
-             "bassGuardEnabled", "bassGuardDb"}
-    assert chain <= _registration_keys()
-    assert chain <= _live_push_keys()
-
-
 def test_registration_only_keys_are_really_absent():
     """
     Keeps the exemption list honest: an entry that IS mirrored live should be

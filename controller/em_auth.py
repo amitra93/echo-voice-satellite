@@ -104,6 +104,28 @@ def generate_token() -> str:
     return secrets.token_hex(TOKEN_BYTES)
 
 
+def generate_api_key() -> str:
+    """Return a long-lived bearer key for the HA integration."""
+    return "em_" + secrets.token_urlsafe(TOKEN_BYTES)
+
+
+async def _resolve_api_key(request: web.Request) -> Optional[dict]:
+    """Resolve the controller-managed integration key as an integration principal."""
+    auth_header = request.headers.get(AUTH_HEADER, "")
+    candidate = ""
+    if auth_header.lower().startswith("bearer "):
+        candidate = auth_header[7:].strip()
+    if not candidate:
+        candidate = request.rel_url.query.get("api_key", "").strip()
+    if not candidate:
+        return None
+    loop = asyncio.get_event_loop()
+    configured = await loop.run_in_executor(None, db.get_config, "ha_api_key")
+    if not configured or not secrets.compare_digest(candidate, configured):
+        return None
+    return {"id": None, "username": "home-assistant-integration", "role": "integration", "token": candidate}
+
+
 # ─── Login / logout ───────────────────────────────────────────────────────────
 
 async def login(username: str, password: str) -> tuple[str, str]:
@@ -238,12 +260,12 @@ async def resolve_session(request: web.Request) -> Optional[dict]:
 
     token = _extract_token(request)
     if not token:
-        return None
+        return await _resolve_api_key(request)
 
     loop = asyncio.get_event_loop()
     session = await loop.run_in_executor(None, db.get_session, token)
     if session is None:
-        return None
+        return await _resolve_api_key(request)
 
     user = await loop.run_in_executor(None, db.get_user_by_id, session["user_id"])
     if user is None:
@@ -297,6 +319,27 @@ def require_admin(handler):
     return wrapper
 
 
+def require_integration_or_admin(handler):
+    """
+    Decorator: require an admin session or the HA integration API key.
+
+    The integration role is a trusted-LAN principal (Q8): it may control
+    media, turns, and audio — but NOT destructive admin endpoints (OTA,
+    shell, user management). Use this on state-mutating HA-facing handlers
+    that the HACS integration needs to call.
+    """
+    @wraps(handler)
+    async def wrapper(request: web.Request) -> web.Response:
+        user = await resolve_session(request)
+        if user is None:
+            return _error("not_authenticated", "Authentication required", 401)
+        if user["role"] not in ("admin", "integration"):
+            return _error("forbidden", "Admin or integration access required", 403)
+        request["user"] = user
+        return await handler(request)
+    return wrapper
+
+
 # ─── WebSocket auth ───────────────────────────────────────────────────────────
 
 async def ws_resolve_session(request: web.Request) -> Optional[dict]:
@@ -317,12 +360,12 @@ async def ws_resolve_session(request: web.Request) -> Optional[dict]:
         token = request.rel_url.query.get("token", "").strip()
 
     if not token:
-        return None
+        return await _resolve_api_key(request)
 
     loop = asyncio.get_event_loop()
     session = await loop.run_in_executor(None, db.get_session, token)
     if session is None:
-        return None
+        return await _resolve_api_key(request)
 
     user = await loop.run_in_executor(None, db.get_user_by_id, session["user_id"])
     if user is None:
@@ -476,6 +519,8 @@ def _error(code: str, message: str, status: int) -> web.Response:
 # indistinguishable from a successful bcrypt check on a wrong password.
 # Generated once at module load — never used for actual auth.
 _DUMMY_HASH: str = bcrypt.hashpw(
-    secrets.token_bytes(32),
+    # bcrypt rejects NUL bytes; URL-safe entropy keeps this startup path
+    # deterministic across bcrypt implementations without reducing entropy.
+    secrets.token_urlsafe(32).encode("ascii"),
     bcrypt.gensalt(rounds=BCRYPT_ROUNDS),
 ).decode("utf-8")

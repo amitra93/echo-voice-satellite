@@ -169,13 +169,18 @@ State names used below: `IDLE`, `LISTENING`, `THINKING`, `PLAYING`, `MUTED`,
 
 ### 4.1 Action (dot) button — clickType 138
 
+`[today]` denotes shipped behavior. `[proposed]` remains design work and must
+not be read as firmware behavior. The current controller/HACS turn path uses
+`em_turn_engine.py`; references to the deleted ESPHome backend below are
+historical rationale only.
+
 | # | State | Link | Device action | Ring outcome | Controller | Status |
 |---|---|---|---|---|---|---|
 | A1 | IDLE | LINKED | Send button event | *Nothing until controller replies* — ring lights one RTT later | Starts turn, sends `led_anim` listening | [today] |
 | A2 | IDLE | LINKED | Send button event **+ paint listening ring locally**, arm confirmation deadline | Listening ring **immediately** | Confirms with `led_anim` listening, replacing provisional paint | [proposed] |
 | A3 | IDLE | LINKED, no confirmation before deadline | Withdraw provisional paint, mark link DOWN | **Hard cut** to orange pulse — no fade (§6 Q4) | — | [proposed] |
 | A4 | IDLE | DOWN / SUSPECT | Do not send, do not paint a turn state | Orange pulse continues (unchanged) | — | [proposed] |
-| A5 | LISTENING / THINKING / PLAYING | LINKED | Send button event | Ring clears when controller's cleanup arrives | Cancels turn (`cancel_event` + `speaker_flush`); **local only — HA's pipeline runs to completion, result discarded** (`em_esphome.py:1158`) | [today] |
+| A5 | LISTENING / THINKING / PLAYING | LINKED | Send button event | Ring clears when controller's cleanup arrives | Cancels the turn (`cancel_event` + `speaker_flush`); an active HA pipeline abort remains follow-up work | [today] |
 | A6 | LISTENING / THINKING / PLAYING | LINKED | Send button event **+ clear ring locally** (press during a turn state is unambiguously *cancel*) | Ring clears **immediately** | Cancels as above | [proposed] |
 | A7 | **MUTED** | tap | Sent with `muted: true`; **controller refuses the turn** (`em_button.decide` → `BLOCKED`) | Red ring unchanged — **silent by design** (see §6 Q1) | Nothing. Mic never opens: `mic_start` is rejected device-side while muted | [today] |
 | A8 | **MUTED** | hold | Sent with `muted: true` | Red ring unchanged | **Fires `long` to HA.** A hold is not speech, so the mute has no opinion about it | [today] |
@@ -211,7 +216,7 @@ Mute is the reference implementation of principle 5, and its behaviour is
 |---|---|---|---|---|
 | C1 | `led_anim` listening (`solid`, `listening:true`) | any unsuppressed | Scene listening colour; enables direction overlay | [today] |
 | C2 | `led_anim` `spin`/`rotate` (thinking) | any unsuppressed | Spinner on device ticker, 80ms | [today] |
-| C3 | `led_anim` `meter` (playing) | any unsuppressed | Throbs with live speaker RMS at the ALSA write — the **voice plane only**, measured before the music mix (v2.10.0). The AEC far-end tap deliberately sees the mixed output, since that is what must be cancelled from the mic; the meter must not, or it throbs to a song nobody asked it to visualise | [today] |
+| C3 | `led_anim` `meter` (playing) | any unsuppressed | Throbs with live voice-plane RMS at the production renderer, measured before the music mix so it does not visualise a song rather than the response | [today] |
 | C4 | `led_anim` `off` | any unsuppressed | Ring black | [today] |
 | C5 | Any `led_anim` / `leds` | MUTED or VOL-DISPLAY | **Recorded into `baseLEDs`, not painted** | [today] |
 | C6 | Legacy `leds` frame | any unsuppressed | Atomically replaces any running animation (generation counter) | [today] |

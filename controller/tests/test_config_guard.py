@@ -53,23 +53,21 @@ dropped_keys = _load_dropped_keys()
 
 # The real fleet config as it stood before the incident.
 LIVE_CONFIG = {
-    "adcDigitalGain": 88, "adcMicpga": 40, "micGainDb": 24,
-    "aecEnabled": True, "aecDelayMs": 0, "aecTailMs": 300,
+    "afeMicGainDb": 0,
     "startupVolume": 85, "vadThreshold": 0.001, "vadSpeechMs": 32,
     "vadSilenceMs": 900, "owwThreshold": 0.5, "bargeInEnabled": True,
     "bargeInThreshold": 0.05, "owwModel": "hey_mycroft_v0.1",
-    "owwSpeexNs": False, "nsAsr": True, "bleProxyEnabled": True,
-    "beamformingEnabled": True, "beamAngle": -1,
+    "owwSpeexNs": False, "bleProxyEnabled": True,
     "eqBands": [0, 3, 2, 0, -2, 3, 7, 0], "eqLoudness": True,
     "ledScene": "standard", "ledListenColor": "#00b400",
-    "ledThinkColor": "#00c800", "agcEnabled": True, "nsEnabled": False,
+    "ledThinkColor": "#00c800", "nsEnabled": False,
 }
 
 
 def test_the_exact_body_that_caused_the_incident_is_caught():
     """The literal payload I sent on 2026-07-20."""
     dropped = dropped_keys({"wakeArbitrationMs": 700}, LIVE_CONFIG)
-    assert len(dropped) == 26
+    assert len(dropped) == 17
     # The two that turned into audible symptoms.
     assert "owwModel" in dropped
     assert "owwThreshold" in dropped
@@ -89,8 +87,8 @@ def test_read_modify_write_is_the_safe_pattern():
 
 
 def test_dropping_a_single_key_is_still_caught():
-    body = {k: v for k, v in LIVE_CONFIG.items() if k != "aecEnabled"}
-    assert dropped_keys(body, LIVE_CONFIG) == ["aecEnabled"]
+    body = {k: v for k, v in LIVE_CONFIG.items() if k != "afeMicGainDb"}
+    assert dropped_keys(body, LIVE_CONFIG) == ["afeMicGainDb"]
 
 
 def test_empty_stored_config_permits_anything():
@@ -99,7 +97,7 @@ def test_empty_stored_config_permits_anything():
 
 
 def test_result_is_sorted_for_a_stable_error_message():
-    body = {"micGainDb": 24}
+    body = {"afeMicGainDb": 0}
     out = dropped_keys(body, LIVE_CONFIG)
     assert out == sorted(out)
 
@@ -138,7 +136,7 @@ def test_new_default_key_does_not_block_a_stale_dashboard_save():
     assert dropped_keys(stale_dashboard_body, raw_stored) == []
 
     # ...while the destructive partial write is still refused.
-    assert len(dropped_keys({"wakeArbitrationMs": 700}, raw_stored)) == 26
+    assert len(dropped_keys({"wakeArbitrationMs": 700}, raw_stored)) == 17
 
 
 def test_guard_reads_raw_stored_config_not_the_underlaid_view():

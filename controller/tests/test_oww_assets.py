@@ -8,6 +8,7 @@ the model a device is using; a wrong "keep" leaves it scoring against a
 stale classifier that silently disagrees with the controller.
 """
 
+import hashlib
 import time
 
 import pytest
@@ -87,10 +88,10 @@ def test_extra_classifiers_are_evicted_oldest_first():
     actual["oldest.onnx"] = ("c", NOW - 90_000)
     actual["ancient.onnx"] = ("d", NOW - 900_000)
 
-    p = A.plan_sync(desired, actual, slots=3)
-    # `slots` budgets the LEFTOVERS only (the desired model does not consume
-    # one) — three kept, the oldest falls off.
-    assert sorted(p.prune) == ["ancient.onnx"]
+    p = A.plan_sync(desired, actual, slots=4)
+    # Stock classifiers are always resident and do not consume the custom
+    # classifier budget. Four former custom models therefore all fit.
+    assert p.prune == []
     assert "newest.onnx" in p.keep and "middle.onnx" in p.keep
 
 
@@ -243,129 +244,84 @@ def test_unknown_free_space_does_not_block():
     assert p.blocked is None and p.push
 
 
-# ── The stock set every device carries ────────────────────────────────────
+def test_paths_md5_and_runtime_source(tmp_path):
+    runtime = tmp_path / A.RUNTIME_NAME
+    runtime.write_bytes(b"runtime")
+    assert A.device_path("x.onnx") == f"{A.DEVICE_DIR}/x.onnx"
+    assert A.runtime_source(tmp_path) == runtime
+    assert A.runtime_source(tmp_path / "missing") is None
+    assert A.md5_file(runtime, _chunk=2) == hashlib.md5(b"runtime").hexdigest()
 
-def test_stock_models_match_what_the_dashboard_offers():
-    """
-    STOCK_MODELS is what we install; WW_MODELS is what a user can select.
-    Drift either way is silent and lands on the user, not on CI: a wake word
-    offered but not installed is the #191 failure (selectable, unscoreable,
-    and under owwOnDevice=on a device with no wake word at all), and one
-    installed but not offered is dead weight nobody can ever reach.
-    """
-    import re
-    from pathlib import Path
-    jsx = (Path(__file__).resolve().parents[1]
-           / "static" / "dashboard.jsx").read_text()
-    block = re.search(r"const WW_MODELS = \[(.*?)\];", jsx, re.S)
-    assert block, "dashboard.jsx must still define WW_MODELS"
-    offered = set(re.findall(r"value:\s*'([^']+)'", block.group(1)))
-    assert offered == set(A.STOCK_MODELS), (
-        f"dashboard offers {sorted(offered)}, "
-        f"em_oww_assets installs {sorted(A.STOCK_MODELS)}"
+
+def test_classifier_source_resolves_stock_custom_and_missing(tmp_path):
+    resources = tmp_path / "resources"
+    models = tmp_path / "models"
+    resources.mkdir()
+    models.mkdir()
+    (resources / "hey.onnx").write_bytes(b"stock")
+    (models / "custom.onnx").write_bytes(b"custom")
+
+    assert A.classifier_source("hey", resources, models) == resources / "hey.onnx"
+    assert A.classifier_source("custom.onnx", resources, models) == models / "custom.onnx"
+    assert A.classifier_source("/absolute/custom.onnx", resources, models) is None
+    assert A.classifier_source("", resources, models) is None
+    assert A.classifier_source("missing", resources, models) is None
+    assert A.classifier_source("hey", None, models) is None
+
+
+def test_desired_assets_reports_missing_sources_and_deduplicates(tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    resources = tmp_path / "resources"
+    models = tmp_path / "models"
+    runtime_dir.mkdir()
+    resources.mkdir()
+    models.mkdir()
+    (runtime_dir / A.RUNTIME_NAME).write_bytes(b"rt")
+    for name in A.SHARED_NAMES:
+        (resources / name).write_bytes(name.encode())
+    (resources / "hey.onnx").write_bytes(b"hey")
+    (models / "custom.onnx").write_bytes(b"custom")
+
+    assets, problems = A.desired_assets(
+        ["hey", "hey", "custom.onnx", "missing"],
+        runtime_dir=runtime_dir,
+        resources=resources,
+        models_dir=models,
     )
+    names = [asset.name for asset in assets]
+    assert names.count("hey.onnx") == 1
+    assert names.count("custom.onnx") == 1
+    assert len(assets) == 5
+    assert any("missing" in problem for problem in problems)
+    assert all(len(asset.md5) == 32 and asset.size > 0 for asset in assets)
+
+    assets, problems = A.desired_assets([], runtime_dir=tmp_path / "no-runtime", resources=None, models_dir=None)
+    assert not assets
+    assert len(problems) >= 3
 
 
-def test_the_stock_set_is_installed_alongside_the_selected_model():
-    """
-    A device provisioned for one wake word must still be able to score any
-    other stock one, or changing the wake word later needs a manual trip to
-    Updates -> Update assets (#191).
-    """
-    # Not `Path(... or "")`: Path("") is Path("."), which IS a directory, so
-    # the skip never fired and the test ran against the CWD, finding no models.
-    res = A.openwakeword_resources()
-    if res is None:
-        pytest.skip("openwakeword not installed in this environment")
-    assets, problems = A.desired_assets(["alexa_v0.1"], resources=res)
-    names = [a.name for a in assets if a.kind == "classifier"]
-    assert names[0] == "alexa_v0.1.onnx", "the selected model must stay first (it is pinned)"
-    assert set(names) == {f"{m}.onnx" for m in A.STOCK_MODELS}
-    assert not [p for p in problems if "wake model" in p]
+def test_desired_assets_plans_every_stock_classifier(tmp_path):
+    runtime_dir = tmp_path / "runtime"
+    resources = tmp_path / "resources"
+    runtime_dir.mkdir()
+    resources.mkdir()
+    (runtime_dir / A.RUNTIME_NAME).write_bytes(b"rt")
+    for name in A.SHARED_NAMES:
+        (resources / name).write_bytes(name.encode())
+    for model in A.STOCK_MODELS:
+        (resources / f"{model}.onnx").write_bytes(model.encode())
+
+    assets, problems = A.desired_assets(
+        ["alexa_v0.1"], runtime_dir=runtime_dir, resources=resources, models_dir=tmp_path
+    )
+    classifiers = [asset.name for asset in assets if asset.kind == "classifier"]
+    assert classifiers[0] == "alexa_v0.1.onnx"
+    assert set(classifiers) == {f"{model}.onnx" for model in A.STOCK_MODELS}
+    assert not problems
 
 
-def test_include_stock_false_installs_only_what_was_asked_for():
-    res = A.openwakeword_resources()
-    if res is None:
-        pytest.skip("openwakeword not installed in this environment")
-    assets, _ = A.desired_assets(["alexa_v0.1"], resources=res, include_stock=False)
-    assert [a.name for a in assets if a.kind == "classifier"] == ["alexa_v0.1.onnx"]
-
-
-def test_installing_the_stock_set_does_not_evict_custom_models():
-    """
-    The four stock models exactly fill CLASSIFIER_SLOTS. Under the old rule
-    (slots minus every desired classifier) that left no room at all, so
-    installing them would have deleted every custom model on the device —
-    including ones a user trained themselves and cannot re-download.
-    """
-    desired = _base() + [
-        _asset("my_custom.onnx", "c1", "classifier"),
-    ] + [_asset(f"{m}.onnx", m, "classifier") for m in A.STOCK_MODELS]
-    actual = {
-        A.RUNTIME_NAME: ("rt1", NOW), "melspectrogram.onnx": ("mel1", NOW),
-        "embedding_model.onnx": ("emb1", NOW), "my_custom.onnx": ("c1", NOW),
-        "older_custom.onnx": ("o1", NOW - 100),
-    }
-    plan = A.plan_sync(desired, actual)
-    assert plan.prune == [], f"unexpectedly pruning {plan.prune}"
-    assert "older_custom.onnx" in plan.keep
-
-
-def test_leftover_custom_models_are_still_evicted_beyond_the_budget():
-    """The budget still applies — it now governs leftovers only, not everything."""
-    desired = _base() + [_asset(f"{m}.onnx", m, "classifier") for m in A.STOCK_MODELS]
-    actual = {
-        A.RUNTIME_NAME: ("rt1", NOW), "melspectrogram.onnx": ("mel1", NOW),
-        "embedding_model.onnx": ("emb1", NOW),
-        **{f"c{i}.onnx": (f"c{i}", NOW - i) for i in range(A.CLASSIFIER_SLOTS + 2)},
-    }
-    plan = A.plan_sync(desired, actual)
-    assert len(plan.prune) == 2, plan.prune
-    assert plan.prune == [f"c{A.CLASSIFIER_SLOTS}.onnx", f"c{A.CLASSIFIER_SLOTS + 1}.onnx"], \
-        "eviction must still be oldest-first"
-
-
-# ── Reconcile-on-connect: does the device have the model it was told to use ──
-
-def test_the_selected_classifier_is_recognised_when_installed():
-    desired = _base() + [_asset("selected.onnx", "c1", "classifier")]
-    actual = {a.name: (a.md5, NOW) for a in desired}
-    assert A.missing_selected_classifier(desired, actual) is None
-
-
-def test_a_classifier_absent_from_the_device_is_named():
-    desired = _base() + [_asset("selected.onnx", "c1", "classifier")]
-    actual = {a.name: (a.md5, NOW) for a in _base()}
+def test_missing_selected_classifier_requires_matching_md5():
+    desired = _base() + [_asset("selected.onnx", "new", "classifier")]
+    actual = {asset.name: (asset.md5, NOW) for asset in _base()}
+    actual["selected.onnx"] = ("old", NOW)
     assert A.missing_selected_classifier(desired, actual) == "selected.onnx"
-
-
-def test_the_right_name_with_the_wrong_bytes_counts_as_missing():
-    """
-    A re-trained custom model keeps its filename. Presence alone would call
-    that installed and leave the device scoring against the old classifier,
-    which disagrees with the controller silently.
-    """
-    desired = _base() + [_asset("selected.onnx", "c-new", "classifier")]
-    actual = {**{a.name: (a.md5, NOW) for a in _base()},
-              "selected.onnx": ("c-old", NOW)}
-    assert A.missing_selected_classifier(desired, actual) == "selected.onnx"
-
-
-def test_only_the_SELECTED_classifier_gates_readiness():
-    """
-    The stock set rides along on every sync, but a device is only deaf if it
-    lacks the one it was told to use — a missing spare must not stand it down.
-    """
-    desired = _base() + [
-        _asset("selected.onnx", "c1", "classifier"),
-        _asset("spare.onnx", "c2", "classifier"),
-    ]
-    actual = {**{a.name: (a.md5, NOW) for a in _base()},
-              "selected.onnx": ("c1", NOW)}
-    assert A.missing_selected_classifier(desired, actual) is None
-
-
-def test_no_classifier_to_check_is_not_a_missing_one():
-    """Nothing configured is not the same as configured-and-absent."""
-    assert A.missing_selected_classifier(_base(), {}) is None

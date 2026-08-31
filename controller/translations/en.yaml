@@ -19,20 +19,6 @@ configuration:
       The name advertised on your local network as
       <name>._emcontroller._tcp.local. Use lowercase letters, numbers, and
       hyphens.
-  esphome_project_version:
-    name: ESPHome project version
-    description: >-
-      Version reported to Home Assistant in the device's ESPHome info.
-      Normally leave this at the default.
-  esphome_port_base:
-    name: ESPHome satellite base port
-    description: >-
-      First port used for the per-device Home Assistant satellites; Bluetooth
-      proxies use this plus 1000. The stable and Early Access add-ons default
-      to different bases so that a Home Assistant configuration entry left
-      over from one can never reach a device belonging to the other. Changing
-      this affects only devices added from now on — existing devices keep the
-      port they were given.
   oww_model:
     name: Wake word model
     description: >-
@@ -60,11 +46,14 @@ configuration:
       Log protocol-level detail for devices and the Home Assistant
       connection. Verbose — turn it on to diagnose something, then off
       again.
+  music_assistant_url:
+    name: Music Assistant Sendspin server
+    description: >-
+      Music Assistant host and Sendspin port sent to native Echo devices, for
+      example 192.168.1.10:8927. Leave empty to use device discovery.
   extra_ca_cert:
     name: Private CA certificate
     description: >-
-      Only needed if Home Assistant is served over HTTPS using your own
-      internal certificate authority. Put the CA certificate (PEM format)
-      in Home Assistant's ssl folder and enter /ssl/<filename> here.
-      Without it, fetching the spoken response fails certificate
-      verification and turns end with no audio.
+      Only needed for HTTPS media served with an internal certificate
+      authority. Put the PEM CA certificate in Home Assistant's ssl folder
+      and enter its path as /ssl/<filename>.

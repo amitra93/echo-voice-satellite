@@ -477,16 +477,13 @@ adb shell "su -c 'cat /tmp/server.log'"
 ✅ SELinux permissive — survives reboots
 ✅ Magisk 17.3 — persistent root, survives reboots
 ✅ Alexa voice stack disabled
-✅ echoaudioservice retained (required for audio DSP init)
+✅ Android audio services retained (required AFE/HAL runtime owners)
 ✅ EchoMuse running as init service on boot (exec mode, no crash loop)
-✅ Dummy mixer service for EchoMuse init compatibility
-✅ Audio mixer configured at boot (tinymix in start_server.sh)
-✅ Mic gain equalised across all four ADCs — digital volume 88, MICPGA 40
 ✅ WiFi wake lock — FireOS cannot suspend wireless interface
 ✅ p2p0 (WiFi Direct) disabled — no mDNS interference
 ✅ Full LED ring RGB control (IS31FL3236A, 12 RGB LEDs)
-✅ Microphone streaming (9 channels, S24_3LE, 16kHz, card 0 device 24)
-✅ Speaker audio working (card 0, device 23, 48kHz stereo, period 2048 count 4)
+✅ Amazon AFE microphone streaming (processed mono 16kHz through OpenSL)
+✅ Speaker audio working through OpenSL, AudioFlinger, and Amazon HAL
 ✅ Button events (evdev)
 ✅ WiFi working
 ✅ Stable boot
@@ -496,23 +493,12 @@ adb shell "su -c 'cat /tmp/server.log'"
 ✅ Device approval flow — strict mode (pending) or auto mode
 ✅ Orange LED pulse while disconnected / searching for server
 ✅ Slow white LED pulse while pending controller approval
-✅ On-device energy VAD — VAD end signal (0x04) sent to controller on silence
-✅ Wake word detection on ch6 (centre/omni mic) — equidistant, no directional bias
+✅ Amazon AFE production audio — paired system-UID OpenSL `VOICE_RECOGNITION`
+capture and playback; Amazon's HAL owns microphone processing
 ✅ OpenWakeWord — "Hey Jarvis" detected server-side (threshold 0.3)
-✅ Mic channel mapping confirmed empirically (tone injection, analyse_capture.py)
-✅ Directional mic selection — best perimeter mic locked at voice turn start
-✅ Direction estimation — onset ratio (fast/slow EWMA) robust to background noise (TV etc.)
-✅ LED direction overlay — light green segment on listening ring during voice turn only
 ✅ LED mapping calibrated — LED 0 at 240°, confirmed from volume sweep
-✅ Audio processing pipeline — speexdsp AEC (v2.7.3) + AGC; device RNNoise removed 2026-07-12, NS is controller-side DTLN on the STT stream (`nsAsr` flag)
-✅ AGC applies to lock_mic turns only since v2.7.0 (wake stream is permanently AGC-free)
-✅ Ungated continuous wake stream (v2.7.0) — no VAD gate/AGC/preroll on the always-on stream; OWW scores uninterrupted audio; ~32KB/s per device
-✅ Mic stream leak fixed (v2.7.0) — ownership check in streamMic exit; stop/start pairs can no longer leak a concurrent duplicate stream (historical "wake degrades over days, reboot fixes it" root cause)
+✅ Continuous processed wake stream — OWW scores uninterrupted AFE capture
 ✅ Per-room noise floor tracking (v2.7.0, controller) — measurement-only asymmetric EWMA; drives the SNR-relative 5s no-speech cutoff (wake-then-silence closes quietly again)
-✅ Mid-stream beam lock (v2.7.0) — beam_lock/beam_unlock control messages; wake turns get perimeter mic selection without a stream restart
-✅ Beamformer lock-back selection (v2.7.2) — Lock() scores directions over a ~2s energy-history ring covering the wake word, not the decayed present (see pipeline state table)
-✅ Acoustic echo cancellation (v2.7.3, working since v2.7.7, convergence holds since v2.7.8, default OFF) — speexdsp canceller on the whole mic path; reference tapped at the speaker ALSA write. Keep aecDelayMs at 0 (measured; higher values are non-causal — see v2.7.7). Converges to ~14dB per response and *stays* converged across turns since v2.7.8 (governor trims no longer reset the filter); `[aec] att=` and `[mic] clock/stall` telemetry in the device log show live attenuation and capture health. Enable from the dashboard Microphones advanced section
-✅ 24-bit fixed mic gain (v2.7.1) — `micGainDb` (default +24dB) applied to the full 24-bit sample during S16 extraction; recovers the low byte the old truncation discarded (speech was ~3–20 LSB in 16-bit). Validated: STT empty-transcript rate went from 6/19 turns to 0/5, detection rms 0.0003 → 0.006–0.009, clipped=0
 ✅ PTY dashboard shell (v2.7.1) — device allocates a real pseudo-terminal (mksh prompt, line editing, top/vi, resize); dashboard terminal is xterm.js; programmatic sessions (OTA) keep the raw pipe
 ✅ /tmp/server.log size cap (v2.7.1) — trim loop in start_server.sh, bounded at ~5.5MB; VAD diag slowed to ~10min with prompt clip-count reporting
 ✅ State-aware landing page (v2.7.1) — / shows first-run setup (amber ring) or login (green ring) and redirects authenticated visitors to /dashboard; sessions in localStorage
@@ -522,10 +508,17 @@ adb shell "su -c 'cat /tmp/server.log'"
 ✅ Per-turn structured trace — [TURN] log line with full stage timing at turn end
 ✅ OWW near-miss visibility — scores > 0.05 logged at INFO (rate-limited 1/2s per device), persistent counter on dashboard status tab (v2.6.5)
 ✅ VAD threshold tunable down to 0.0001 (dashboard slider floor corrected)
-✅ Beamformer structural fix — smoothers always run, output by lock state not flag
-✅ AGC release frozen during silence — prevents noise floor amplification past VAD threshold
-✅ Acoustic feedback fix — controller sleeps for audio duration after EOS before mic restart
-✅ Spinner runs for full response duration — duration calculated from PCM length
+### Historical completion log
+
+The entries below are a chronological implementation record, not a current
+architecture checklist. In particular, ESPHome references describe the retired
+backend. Current Home Assistant setup uses the EchoMuse HACS integration; see
+[quickstart.md](quickstart.md). Current voice playback waits for the device's
+`playback_stats` completion report rather than a controller duration estimate,
+and capable firmware renders LED animations locally.
+
+✅ Acoustic feedback fix — historical controller duration wait before mic restart
+✅ Spinner runs for full response duration — historical PCM-duration calculation
 ✅ VAD threshold default 0.001 — matches measured conversational speech range at 1.3m (v2.6.5; was 0.003, which sat above soft speech)
 ✅ Mute button — toggles mic mute, red LED ring, blocks action button
 ✅ Volume buttons — local interception, cyan LED ring feedback
@@ -551,22 +544,17 @@ adb shell "su -c 'cat /tmp/server.log'"
 ✅ WebSocket protocol keepalives — dead connections detected within 30s
 ✅ Controller management dashboard — React SPA, vendored assets, no CDN dependency
 ✅ Safe per-device WiFi change (dashboard WiFi tab) — device-side executor with auto-rollback: full wpa_supplicant.conf replacement written *while WiFi is disabled* + verified `svc wifi` bounce (via sh — the script has no shebang), gated on associate-to-target-SSID ≤45s → IP ≤20s → controller reconnect ≤90s; any failure restores the backed-up config; uncommitted changes roll back on boot (pending-marker recovery, same philosophy as the A/B binary slots); result delivery is at-least-once (re-sent until the controller's wifi_commit ack); last-known-controller-address fast path makes cross-subnet controllers reachable without mDNS. All three paths hardware-validated 2026-07-11: rollback (garbage SSID, 65s round trip), startup recovery, happy path (30s)
-✅ LED ring scenes (controller-rendered) — Standard/Airy/Malevolent/Pride/Custom palettes for the listening ring and thinking spinner (em_scenes.py); mute ring stays red and volume arc stays cyan in every scene; frames carry an explicit `listening` flag so the device's direction overlay works on any colour (falls back to the all-green heuristic for old controllers), and the overlay brightens the scene colour instead of painting green
+✅ LED ring scenes — Standard/Airy/Malevolent/Pride/Custom palettes for the listening ring and thinking spinner (`em_scenes.py`); capable firmware renders `led_anim` locally, with controller-rendered frames as a legacy fallback. Mute stays red and the volume arc cyan in every scene.
 ✅ Dashboard live state — mute/listen/speak/offline via WebSocket events + 5s poll
 ✅ Dashboard shell terminal — browser-based root shell, Ctrl+C support
-✅ ESPHome native API satellite integration (the only voice backend since 2026-07-12)
-✅ Both devices registered in HA as voice satellites (port 16001, 16002)
-✅ ESPHome setup wizard passes on both devices
-✅ TTS announcements via HA Assist pipeline (MP3→PCM via ffmpeg, standalone play)
-✅ MediaPlayerState ANNOUNCING/IDLE transitions for wizard audio test
-✅ ESPHome port lifecycle — ports up/down with physical device connect/disconnect
-✅ mDNS _esphomelib._tcp per device (device_id[-12:] suffix to avoid prefix collision)
-✅ DB migration v2 — esphome_api_port, esphome_noise_psk columns, next_esphome_port
-✅ ~~VOICE_MODE env var~~ — claracore backend removed 2026-07-12; esphome is unconditional
-✅ OWW/button-triggered voice turns in esphome mode — full wake word → STT → intent → TTS → speaker round-trip confirmed working end-to-end against real HA Core 2026.6.4
+✅ ESPHome native API satellite integration — historical backend, retired by the HACS turn-engine cutover
+✅ Per-device ESPHome ports and mDNS — historical backend behavior, no longer used
+✅ HACS turn engine — current backend: REST/event lifecycle plus one authenticated per-turn audio WebSocket
+✅ TTS announcements via HA Assist pipeline, streamed as PCM through the controller
+✅ OWW/button-triggered voice turns through the current HACS integration
 ✅ HA-side announce (setup wizard test, push TTS) plays correctly on device — live callback lookup, not a snapshot taken at connect
 ✅ Local no-speech timeout (5s) — matches Alexa's "wake word, then silence" behaviour; scoped correctly to bounded voice turns only, never the permanent OWW listening stream
-✅ HA VAD-end is the turn endpointing authority — _stream_mic_audio exits on HA's STT_VAD_END/ERROR, device RMS-gate sentinel advisory, 20s hard cap; fixes stuck spinner in noisy rooms (v2.6.5, C1)
+✅ Historical HA VAD-end endpointing — superseded by the turn engine's endpoint and audio-socket rendezvous
 ✅ Conversation continuation actually works — mic restarted before each continuation turn; shipped broken in v2.6.4 (v2.6.5, C2)
 ✅ Preroll discard wake-turns-only — button/continuation turns pass 0, no first-word clipping on those paths (v2.6.5, C3)
 ✅ Mute is device-authoritative — mute stops the running mic stream, unmute restores it; audio stops leaving the device while the ring is red (v2.6.5, C5 partial — full-chip ADC mute pending)
@@ -579,4 +567,6 @@ adb shell "su -c 'cat /tmp/server.log'"
 ✅ ADC mute controls identified for all four chips — tinymix dump in device/tools/ confirms B–D at 123/124, 141/142, 159/160
 ```
 
-**HA MVP reached** — this is the milestone ESPHOME_SPEC.md §1 called "the last functional barrier before a public v1 announcement." EchoMuse devices work as real Home Assistant voice satellites without ClaraCore.
+The current Home Assistant voice backend is documented in
+[docs/design/full-duplex-plan.md](design/full-duplex-plan.md) and
+[docs/voice-pipeline.md](voice-pipeline.md).

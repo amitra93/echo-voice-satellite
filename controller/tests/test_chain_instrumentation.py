@@ -106,7 +106,7 @@ def test_a_live_toggle_is_visible_as_a_settings_change():
     eq = em_eq.StreamingEQ(FS, [0.0] * 8, False,
                            limiter=_limiter(), guard=_guard())
     kw = dict(bands=[0.0] * 8, loudness=False, limiter_enabled=True,
-              limiter_threshold=-1.0, limiter_release=150.0,
+              limiter_release=150.0,
               guard_enabled=True, guard_db=-30.0)
     assert eq.update(**kw) is True          # first call always lands
     assert eq.update(**kw) is False         # steady state is silent

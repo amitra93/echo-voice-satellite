@@ -153,31 +153,26 @@ volume, settings, and a live status.
 
 ## Step 5 — Connect it to Home Assistant
 
-The controller makes each Dot look like an **ESPHome voice satellite** —
-something Home Assistant already knows how to talk to, with no custom
-add-ons:
+Install the EchoMuse custom integration through HACS. It connects once to the
+controller, then discovers approved EchoMuse devices through the controller's
+authenticated event stream.
 
-1. In Home Assistant: **Settings → Devices & Services → Add Integration →
-   ESPHome**, then enter the **controller's IP** and the device's **port**:
-   16001 for the first device, 16002 for the second, and so on (each
-   device's port is shown on its dashboard page). One integration entry per
-   device.
-2. Assign the new device to your Assist pipeline (Settings → Voice
-   assistants).
+1. In the EchoMuse dashboard, open **Settings → Home Assistant Integration**
+   and generate an API key. It is shown once; keep it with your Home Assistant
+   credentials.
+2. In Home Assistant, add this repository in HACS and install **EchoMuse**.
+   Alternatively, copy `hacs/custom_components/echo_voice_satellite` into
+   Home Assistant's `custom_components/` directory.
+3. Add the **EchoMuse** integration in **Settings → Devices & services** and
+   enter the controller URL, for example `http://192.168.1.50:8768`, plus the
+   generated API key.
+4. Assign the satellite entity to an Assist pipeline in **Settings → Voice
+   assistants**.
 
-The device appears in HA as **`<name> Voice Assistant`** (e.g. "Lounge
-Voice Assistant"), with Model "Echo Dot Gen 2 (biscuit)" — the Bluetooth
-proxy, if enabled, shows up separately as `<name> BT Proxy`.
-
-> **Auto-discovery:** if Home Assistant runs on the **same subnet** as the
-> controller, devices should also pop up automatically as discovered
-> "echomuse-…" entries (fixed in v2.7.5 — earlier versions advertised
-> incompletely and HA silently ignored them, so manual entry was the only
-> way). Devices you've already added manually won't re-appear as
-> discoveries — HA knows it has them. If HA lives on a **different subnet
-> or VLAN**, discovery can't cross that boundary (it uses local-only
-> multicast) and manual entry remains the normal path — still a one-time,
-> 30-second job per device.
+Each supported device appears through the integration with an Assist satellite,
+privacy-mute switch, volume controls, firmware/wake-word sensors, action-button
+events, and ambient-light or Bluetooth scanning features when its firmware
+advertises them. Music controls appear for devices with `music_sync` support.
 
 ## Step 6 — Talk to it
 
@@ -211,16 +206,16 @@ The LED ring tells you what's happening:
   (the gear icon) or per device. See [configuration.md](configuration.md).
 - **Terminal**: each device page has a full remote terminal (for the
   curious; you never *need* it).
-- **Volume**: buttons on the Dot, the dashboard slider, or Home Assistant's
-  media player card — they all stay in sync.
+- **Volume and mute**: the Dot's hardware buttons remain authoritative. Home
+  Assistant exposes a privacy-mute switch and, for music-capable devices, a
+  media-player volume control. The dashboard Status tab shows the current
+  device volume; it does not provide a startup-volume slider.
 - **Interrupting**: with barge-in enabled, say the wake word while it's
   talking and it stops and listens. The mute button also cuts it off
   instantly (and mutes).
-- **Bluetooth proxy** (optional): each Dot can double as a Home Assistant
-  Bluetooth proxy — passively picking up BLE advertisements (presence
-  beacons, BLE sensors) and feeding them to HA as a *separate* ESPHome
-  device, independent of the voice assistant. Enable it per device in the
-  Config tab (Bluetooth section); it appears in HA as "<name> BT Proxy". See
+- **Bluetooth proxy** (optional): each Dot can passively scan BLE
+  advertisements for Home Assistant through the EchoMuse integration's remote
+  scanner. Enable it per device in the Config tab's Bluetooth section. See
   [configuration.md](configuration.md).
 
 ## When something doesn't work

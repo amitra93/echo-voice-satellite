@@ -43,9 +43,31 @@ build_module_tool() {
     echo "Output: $BUILD_DIR/$name"
 }
 
+# afe_probe is a module tool because it imports internal/opensl. It is
+# server-tagged because OpenSL's headers are supplied by the Android compiler
+# image and are intentionally absent from host builds.
+build_module_tool_server() {
+    local name=$1
+
+    echo "Building $name..."
+    mkdir -p "$BUILD_DIR"
+    docker run --rm \
+        --entrypoint bash \
+        -e CGO_LDFLAGS="-Wl,--hash-style=both" \
+        -v "$(pwd)":/sdk \
+        -v "$REPO_ROOT/GoTinyAlsa":/GoTinyAlsa \
+        echomuse-compiler \
+        -c "cd /sdk && go build -tags server -o build/$name ./tools/$name"
+
+    echo "Output: $BUILD_DIR/$name"
+}
+
+build_module_tool_server afe_helper
+
 build_tool capture_mics
 build_tool bf_capture
 build_module_tool oww_probe
+build_module_tool_server afe_probe
 
 echo ""
 echo "Deploy:"
@@ -70,3 +92,12 @@ echo "  adb shell \"su -c '/data/local/tmp/oww_probe -classifier /data/local/tmp
 echo ""
 echo "Without adb, push over the controller shell plane instead:"
 echo "  python controller/tools/push_file.py <local> <remote>   (resumable)"
+echo ""
+echo "afe_probe is the Phase-0 OpenSL measurement tool (stop EchoMuse first):"
+echo "  adb push $BUILD_DIR/afe_probe /data/local/tmp/afe_probe"
+echo "  adb shell su -c '/data/local/tmp/afe_probe -seconds 8 -out /sdcard'"
+echo "  adb pull /sdcard/afe_probe_*.wav ."
+echo ""
+echo "afe_helper is the unintegrated system-UID OpenSL IPC boundary:"
+echo "  adb push $BUILD_DIR/afe_helper /data/local/bin/afe_helper"
+echo "  adb shell su -c '/data/local/bin/afe_helper'  # stdin/stdout carry EMAF frames"

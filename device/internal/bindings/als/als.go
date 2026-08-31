@@ -272,10 +272,6 @@ func Lux() *int {
 // change goes IMMEDIATELY because its whole value is the timing, and the
 // steady state rides the existing summary. Nothing per-frame either way.
 const (
-	// PollInterval bounds how fast a change can be noticed. Reading faster
-	// than the chip's 346ms integration time buys nothing but syscalls.
-	PollInterval = time.Second
-
 	// MinRatio is how much the level must change, RELATIVE to the level it
 	// changed from. An absolute threshold cannot work across the range: 50
 	// lux is a transformation in a dark room and invisible in daylight, and
@@ -289,10 +285,27 @@ const (
 	// MinAbsolute stops near-darkness generating infinite ratios — 0 -> 2 lux
 	// is a 2x change and not a room lighting up.
 	MinAbsolute = 10
+)
+
+var (
+	// PollInterval bounds how fast a change can be noticed. Reading faster
+	// than the chip's 346ms integration time buys nothing but syscalls.
+	// var, not const, so tests can shrink it rather than waiting on the
+	// real chip cadence — the same reasoning as mdns.go's `after`.
+	PollInterval = time.Second
 
 	// MinInterval keeps a flickering or dimming light from flooding the
-	// control plane. A real lighting change is a step, not a stream.
+	// control plane. A real lighting change is a step, not a stream. var
+	// for the same testability reason as PollInterval.
 	MinInterval = 2 * time.Second
+
+	// presentFunc/luxFunc indirect the real hardware calls so Watch's
+	// polling loop — baseline seeding, the Significant/MinInterval gates,
+	// onChange dispatch — is testable without an I2C sensor. Present()
+	// returns false on any host with no chip, so without this seam Watch
+	// never gets past its first line under test.
+	presentFunc = Present
+	luxFunc     = Lux
 )
 
 // Significant reports whether `now` differs enough from `baseline` to be worth
@@ -319,7 +332,7 @@ func Significant(baseline, now int) bool {
 // -plane send, and a stalled send must not wedge the watcher into reporting a
 // stale baseline forever.
 func Watch(ctx context.Context, onChange func(lux int)) {
-	if !Present() {
+	if !presentFunc() {
 		return
 	}
 	baseline := -1
@@ -331,7 +344,7 @@ func Watch(ctx context.Context, onChange func(lux int)) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			p := Lux()
+			p := luxFunc()
 			if p == nil {
 				continue
 			}

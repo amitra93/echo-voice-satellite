@@ -20,8 +20,8 @@ code, **[proposed]** is designed or in review and not merged.
 These are settled and the rest follows from them.
 
 - **The device mixes; the controller decides.** Two independent PCM streams
-  reach the device and are summed at the ALSA write
-  (`speaker/pcm_speaker.go:277`). The controller never mixes.
+  reach the device renderer and are summed before paired OpenSL playback. The
+  controller never mixes.
 - **Voice is never attenuated.** Ducking lowers the bed under it, never the
   response itself.
 - **Audio that has left the controller cannot be un-sent.** `LEAD_S` = 4.0s of

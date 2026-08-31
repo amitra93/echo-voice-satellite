@@ -8,6 +8,13 @@ controller/static/dashboard.js
 .claude/
 scratchpad/
 
+# pytest-cov / coverage.py and go test -coverprofile output — local/CI
+# measurement artifacts, not something to commit.
+.coverage
+htmlcov/
+device/cover.out
+oww_forge/.coverage
+
 # DTLN NS models (vendored into the Docker image at build time; bare-metal
 # dev drops them here or points NS_MODEL_DIR elsewhere)
 controller/models/

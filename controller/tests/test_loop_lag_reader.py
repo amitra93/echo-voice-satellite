@@ -66,10 +66,12 @@ def test_both_reader_sites_use_the_helper():
     Neither may remain: both must go through the resolver.
     """
     src = (CONTROLLER / "em_api.py").read_text()
-    assert "import em_controller as _ctrl" not in src, \
-        "importing by name loads a second, uninitialised module copy"
-    assert src.count("_running_controller_module()") >= 2, \
-        "status endpoint AND support bundle must resolve via the helper"
+    status = src[src.index("async def _get_system_status"):src.index("def _running_controller_module")]
+    stats = src[src.index("def _controller_stats"):src.index("@auth.require_admin", src.index("def _controller_stats"))]
+    assert "_running_controller_module()" in status
+    assert "_running_controller_module()" in stats
+    assert "import em_controller as _ctrl" not in status
+    assert "import em_controller as _ctrl" not in stats
 
 
 def test_the_helper_is_not_sandwiched_into_a_decorator():

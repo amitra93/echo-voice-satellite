@@ -6,26 +6,20 @@ import (
 	"log"
 	"math"
 	"os"
-	"os/exec"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
-	"github.com/Binozo/GoTinyAlsa/pkg/pcm"
-	"github.com/Binozo/GoTinyAlsa/pkg/tinyalsa"
+	"github.com/wilbowes/EchoMuse/internal/afeipc"
+	deviceclock "github.com/wilbowes/EchoMuse/internal/clock"
+	"github.com/wilbowes/EchoMuse/internal/sendspin"
 )
 
-// cardNr/deviceNr live in pcmstatus.go so the host test can pin them against
-// the status path — this file is ARM-only (build tag `server`).
-const periodSize  = 2048
+const periodSize = 2048
 const periodBytes = periodSize * 2 * 2 // 2 channels * 2 bytes = 8192
 
-// The wire carries MONO 48kHz — PumpPeriod duplicates L=R before queueing.
-// The stereo ALSA config is an I2S/codec-path constraint, not a wire
-// requirement, and shipping two identical channels to a mono speaker
-// doubled TTS bandwidth (~1.5Mbps → ~770kbps saved) for nothing — which
-// matters on marginal 2.4GHz links (Lounge stutter).
+// The wire carries mono 48kHz. The shared renderer uses stereo internally;
+// the AFE sink converts it back to the OpenSL player's mono stream.
 const monoPeriodBytes = periodSize * 2 // 4096
 
 // audioCh depth — the WS sender delivers at ~2× realtime, so its lead over
@@ -38,23 +32,21 @@ const audioChanDepth = 128
 
 // primePeriods — playback holds on silence until this many periods are
 // queued (or the stream's EOS has arrived, for clips shorter than the
-// prime). Protects the opening seconds of playback, when the sender's
-// lead is still ~zero and a single WiFi stall used to stutter. 24 periods
-// ≈ 1s of audio ≈ ~0.5s added start latency at 2× realtime delivery
-// (accepted trade, 2026-07-14). The controller's post-playback drain
-// sleep allows for the delayed start (SPEAKER_PRIME_SECONDS).
-const primePeriods = 24
+// prime). Six periods provide ~256ms of opening-stall protection while
+// keeping the initial response delay small. The controller's post-playback
+// drain sleep allows for the delayed start (SPEAKER_PRIME_SECONDS).
+const primePeriods = 6
 
 var silencePeriod = make([]byte, periodBytes)
 
 type PcmSpeaker struct {
-	session *tinyalsa.AudioSession
-	stopCh  chan struct{}
+	sink   audioSink
+	stopCh chan struct{}
 	// deadCh is closed by silenceLoop on any exit so a pump call can return
 	// an error rather than block indefinitely waiting for a dead consumer.
 	deadCh chan struct{}
 
-	// Two independent playback planes, mixed at the ALSA write.
+	// Two independent playback planes, mixed before the OpenSL sink.
 	//
 	// voice carries TTS and announcements (0x02/0x03); music carries the
 	// media player (0x04/0x05). They are separate so a voice turn can duck
@@ -70,20 +62,30 @@ type PcmSpeaker struct {
 	// one rather than a simplified copy.
 	voice *audioStream
 	music *audioStream
+	// musicSync is the timestamp-paced music plane. It remains separate from
+	// the legacy arrival-paced music stream for backward compatibility.
+	musicSync *scheduledMusic
+	// musicClock is the scheduled plane's presentation timeline: one rendered
+	// period of playback time per rendered period, at the measured DAC rate.
+	musicClock *scheduledClock
+	// musicSyncLogTick counts periods for the periodic [music] telemetry line;
+	// only ever touched by silenceLoop, so it needs no synchronisation.
+	musicSyncLogTick int
+	musicClockTick   int
+	// musicStereo is the reused L=R period for the scheduled plane, owned by
+	// the ALSA goroutine.
+	musicStereo []byte
+	oc          chainState
 
 	// duckTarget is the gain applied to MUSIC while it plays under a voice
 	// turn, Q15. Written from the control plane (SetDuck) and read by the
-	// ALSA goroutine every period, hence atomic; the ramp toward it lives in
+	// renderer goroutine every period, hence atomic; the ramp toward it lives in
 	// the Mixer, which is single-consumer and needs no synchronisation.
 	duckTarget atomic.Int32
+	// musicMuted is controlled by Music Assistant's Sendspin player mute. It
+	// only suppresses the music plane; privacy mute remains owned by Server.
+	musicMuted atomic.Bool
 	mixer      Mixer
-
-	// echoTap, when non-nil, receives every period pumped to ALSA — real
-	// audio and silence alike — so an AEC reference stream advances in
-	// lockstep with the playback clock. Fixed at construction (silenceLoop
-	// starts inside New, so it can't be set later without a race). Must be
-	// fast and non-blocking: it runs on the ALSA pump goroutine.
-	echoTap func([]byte)
 
 	// levelTap, when non-nil, receives the RMS level (0..1, normalized
 	// int16 full-scale) of every period as it is pumped to ALSA — real
@@ -103,6 +105,15 @@ type PcmSpeaker struct {
 	statsCb func(StreamStats)
 }
 
+type audioSink interface {
+	Pump([]byte) error
+	Close()
+}
+
+type volumeSink interface {
+	SetVolume(level int) error
+}
+
 // OnStreamStats registers a per-stream stats callback, reported once when a
 // stream reaches its EOS. Invoked on its own goroutine so a slow consumer
 // (network send) can never stall the ALSA pump. Safe to call any time
@@ -113,129 +124,36 @@ func (p *PcmSpeaker) OnStreamStats(cb func(StreamStats)) {
 	p.statsMu.Unlock()
 }
 
-func NewPcmSpeaker(echoTap func([]byte), levelTap func(rms float64)) (*PcmSpeaker, error) {
-	s := &PcmSpeaker{
-		stopCh:   make(chan struct{}),
-		deadCh:   make(chan struct{}),
-		echoTap:  echoTap,
-		levelTap: levelTap,
+// SetVolume applies the device volume through Android's STREAM_MUSIC policy.
+func (p *PcmSpeaker) SetVolume(level int) {
+	if sink, ok := p.sink.(volumeSink); ok {
+		if err := sink.SetVolume(level); err != nil {
+			log.Printf("OpenSL player volume set failed: %v", err)
+		}
 	}
+}
+
+// NewAFEPcmSpeaker keeps the existing renderer and swaps only its presentation
+// sink. The paired client has already opened capture and playback together.
+func NewAFEPcmSpeaker(c *afeipc.Client, _ func([]byte), levelTap func(rms float64)) (*PcmSpeaker, error) {
+	s := &PcmSpeaker{stopCh: make(chan struct{}), deadCh: make(chan struct{}), levelTap: levelTap, sink: newAFESink(c)}
 	s.voice = newAudioStream(audioChanDepth, s.deadCh)
 	s.music = newAudioStream(audioChanDepth, s.deadCh)
+	s.musicSync = &scheduledMusic{}
+	s.musicClock = newScheduledClock(deviceclock.NowUs)
 	s.duckTarget.Store(unityGain)
 	s.mixer.SetGainImmediate(unityGain)
-	if err := s.Init(); err != nil {
-		return nil, err
-	}
+	go s.silenceLoop()
 	return s, nil
 }
 
-func (p *PcmSpeaker) Init() error {
-	// Startup order matters for the audible click (2026-07-10): the amp
-	// must come up onto a DAC that is already clocking silence, and the
-	// unmute must come last. The old order (amp on → unmute → open PCM)
-	// unmuted a floating DAC and then hit it with the stream-open
-	// transient — the "click" on every service start.
-	exec.Command("stop", "mixer").Run()
-	// Android's media stack takes the speaker for itself when a headphone
-	// plug is present at boot, and ALSA parks a blocking open behind it with
-	// no timeout — stranding the whole device, since everything else in
-	// main() is initialised after the speaker (issue #80). Same stock-service
-	// takeover as `stop mixer` above and `stop smarthomewifid` in main: on a
-	// device where EchoMuse drives the codec directly, mediaserver has no
-	// work to do and is only ever in the way.
-	exec.Command("stop", "media").Run()
-	waitForFreePcm(cardNr, deviceNr, pcmFreeTimeout)
-	exec.Command("tinymix", "-D", "0", "61", "0", "0").Run() // mute before touching amp or stream
+// Init satisfies the shared Speaker interface. The paired AFE helper has
+// already opened playback before this renderer is constructed.
+func (p *PcmSpeaker) Init() error { return nil }
 
-	device := tinyalsa.NewDevice(cardNr, deviceNr, pcm.Config{
-		Channels:         2,
-		SampleRate:       48000,
-		PeriodSize:       periodSize,
-		PeriodCount:      4,
-		Format:           tinyalsa.PCM_FORMAT_S16_LE,
-		StartThreshold:   periodSize,
-		StopThreshold:    periodSize * 4,
-		SilenceThreshold: periodSize * 4,
-	})
-
-	session, err := device.NewAudioSession()
-	if err != nil {
-		return err
-	}
-	p.session = &session
-
-	go p.silenceLoop()
-
-	time.Sleep(100 * time.Millisecond)                            // silence reaches the DAC (~2 periods)
-	exec.Command("tinymix", "-D", "0", "5", "On").Run()           // enable amp onto a clocked, silent DAC
-	time.Sleep(50 * time.Millisecond)                             // let amp settle
-	exec.Command("tinymix", "-D", "0", "61", "100", "100").Run()  // unmute
-
-	log.Println("PcmSpeaker initialised — silence stream running")
-	return nil
-}
-
-// pcmFreeTimeout bounds the wait for another process to release the speaker.
-//
-// Generous, because the wait is the good outcome: releasing takes Android well
-// under a second once `stop media` lands, and a device that waits ten seconds
-// and then works is enormously better than one that gives up early. It is a
-// backstop against a holder that never lets go, not a tuning parameter.
-const pcmFreeTimeout = 10 * time.Second
-
-// waitForFreePcm blocks until the playback substream is released, or the
-// timeout expires.
-//
-// On timeout it RETURNS ANYWAY and lets the open proceed. That open may then
-// block forever, which is the pre-existing behaviour — this function's job is
-// to make the common case work and to leave a log line naming the holder when
-// it does not. Refusing to open would be a bigger behaviour change than the
-// bug warrants, and the proper fix for a permanently-held device is to stop
-// gating the rest of main() on the speaker at all.
-func waitForFreePcm(card, device int, timeout time.Duration) {
-	path := statusPath(card, device)
-	b, err := os.ReadFile(path)
-	if err != nil || pcmFree(string(b)) {
-		return // free, or no status file to consult — open immediately
-	}
-
-	log.Printf("[speaker] %s held by pid %d — waiting up to %s", path, pcmOwner(string(b)), timeout)
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		time.Sleep(200 * time.Millisecond)
-		b, err := os.ReadFile(path)
-		if err != nil || pcmFree(string(b)) {
-			log.Printf("[speaker] speaker released after %s", time.Since(deadline.Add(-timeout)).Round(time.Millisecond))
-			return
-		}
-	}
-	b, _ = os.ReadFile(path)
-	log.Printf("[speaker] speaker STILL held by pid %d after %s — opening anyway, this may block",
-		pcmOwner(string(b)), timeout)
-}
-
-// EnableSpeakerAmp switches the internal speaker amplifier back on.
-//
-// accdet turns it off when a plug is inserted (correctly — the Dot should not
-// play to the room while headphones are connected) and NOTHING turns it back
-// on when the plug is removed. Init is otherwise the only thing that ever sets
-// it, which is why the speaker stayed silent until the next reboot (#80).
-//
-// Note this is the ONLY control involved: output routing is done in hardware
-// by the jack's switch contacts, so there is no mux or headphone-amp control
-// to drive alongside it.
-func (p *PcmSpeaker) EnableSpeakerAmp() {
-	if out, err := exec.Command("tinymix", "-D", "0", "5", "On").CombinedOutput(); err != nil {
-		log.Printf("[speaker] could not re-enable speaker amp: %v — %s", err, strings.TrimSpace(string(out)))
-		return
-	}
-	log.Println("[speaker] speaker amp re-enabled")
-}
-
-// silenceLoop is the ALSA write path: every period, take what each plane has
+// silenceLoop is the renderer path: every period, take what each plane has
 // to offer, mix them, and pump. When neither has audio it pumps silence,
-// which is what paces this loop — ALSA blocks in Pump at realtime rate, so
+// which is what paces this loop — OpenSL blocks in Pump at realtime rate, so
 // there is no timer anywhere and no busy-waiting.
 //
 // It replaced a blocking select on a single channel. Two planes cannot be
@@ -247,6 +165,7 @@ func (p *PcmSpeaker) EnableSpeakerAmp() {
 // rather than hanging.
 func (p *PcmSpeaker) silenceLoop() {
 	defer close(p.deadCh)
+	var musicRenderMax, outputChainMax, pumpMax time.Duration
 	for {
 		select {
 		case <-p.stopCh:
@@ -255,15 +174,52 @@ func (p *PcmSpeaker) silenceLoop() {
 		}
 
 		var voice, music []byte
+		logMusic := false
+		renderStart := time.Now()
 		if p.voice.ready(primePeriods) {
 			voice = p.voice.take()
 		} else if p.voice.playing {
 			p.report(p.voice.drained(), "voice")
 		}
-		if p.music.ready(primePeriods) {
+		if p.musicSync.hasStream() {
+			p.musicClockTick++
+			if p.musicClockTick >= 24 {
+				p.musicClockTick = 0
+				p.sampleMusicClock()
+			}
+			// Advance is the timeline, so it is called once per rendered
+			// period and its result is what the renderer positions against.
+			// Stride carries the DAC-vs-source rate ratio into the render so
+			// the read phase moves smoothly across the period rather than
+			// being corrected in a step at each boundary.
+			mono := p.musicSync.render(
+				p.musicClock.Advance(periodSize), p.musicClock.Stride(), periodSize)
+			if mono != nil {
+				if !p.musicMuted.Load() {
+					p.musicStereo = toStereoInto(p.musicStereo, mono)
+					music = p.musicStereo
+				}
+			}
+			// Periodic scheduled-music telemetry (~5s at 42.7ms periods). This
+			// plane had none, so a click or drift was invisible: buffer depth
+			// answers starvation, interp/late/drift answer the rendering.
+			p.musicSyncLogTick++
+			if p.musicSyncLogTick >= 117 {
+				p.musicSyncLogTick = 0
+				logMusic = true
+			}
+		} else if p.music.ready(primePeriods) {
+			p.musicSyncLogTick = 0
+			p.musicClockTick = 0
 			music = p.music.take()
 		} else if p.music.playing {
 			p.report(p.music.drained(), "music")
+		} else {
+			p.musicSyncLogTick = 0
+			p.musicClockTick = 0
+		}
+		if elapsed := time.Since(renderStart); elapsed > musicRenderMax {
+			musicRenderMax = elapsed
 		}
 
 		// The ring's level must be measured BEFORE mixing: Mix sums into the
@@ -278,25 +234,37 @@ func (p *PcmSpeaker) silenceLoop() {
 		if out == nil {
 			out = silencePeriod
 		}
-
-		// Taps see the MIXED output, which is what the speaker actually
-		// emits. That matters for AEC: the far-end reference is what needs
-		// cancelling from the mic, and with music playing under a response
-		// the echo is the sum, not the voice alone. It was already correct
-		// by accident when only one stream existed.
-		if p.echoTap != nil {
-			p.echoTap(out)
+		chainStart := time.Now()
+		out = p.applyOutputChain(out)
+		if elapsed := time.Since(chainStart); elapsed > outputChainMax {
+			outputChainMax = elapsed
 		}
-		// VOICE only, deliberately — unlike the echo tap above. The meter
+
+		// VOICE only, deliberately. The meter
 		// ring visualises the RESPONSE; feeding it the mix made the ring
 		// throb along to ducked music before the response had started, which
 		// reads as the device doing something it is not.
 		if p.levelTap != nil {
 			p.levelTap(level)
 		}
-		if err := p.session.Pump(out); err != nil {
+		pumpStart := time.Now()
+		if err := p.sink.Pump(out); err != nil {
 			log.Printf("silenceLoop: pump error: %v", err)
 			return
+		}
+		if elapsed := time.Since(pumpStart); elapsed > pumpMax {
+			pumpMax = elapsed
+		}
+		if logMusic {
+			st := p.musicSync.stats()
+			log.Printf("[music] sched buffered=%dms underruns=%d holds=%d "+
+				"late=%d startErr=%dus drift=%dus(max %dus) rate=%.1f resync=%d "+
+				"renderMax=%s chainMax=%s pumpMax=%s",
+				st.BufferedMs, st.Underruns, st.Holds, st.LateSamples,
+				st.StartErrorUs, st.LastErrorUs, st.MaxDriftUs,
+				p.musicClock.Rate(), p.musicClock.Resyncs(),
+				musicRenderMax.Round(time.Microsecond), outputChainMax.Round(time.Microsecond), pumpMax.Round(time.Microsecond))
+			musicRenderMax, outputChainMax, pumpMax = 0, 0, 0
 		}
 	}
 }
@@ -330,6 +298,23 @@ func (p *PcmSpeaker) report(st *StreamStats, plane string) {
 // device requires. The stereo config is an I2S/codec-path constraint, not a
 // wire one — shipping two identical channels would double bandwidth for
 // nothing on links that are already marginal.
+// toStereoInto duplicates L=R into a caller-owned buffer. The scheduled music
+// path renders every 42.7ms on the ALSA writer, so allocating a period here
+// was 8KB of garbage per period on the one goroutine with a hard deadline.
+func toStereoInto(dst, data []byte) []byte {
+	n := len(data) / 2
+	if cap(dst) < n*4 {
+		dst = make([]byte, n*4)
+	}
+	period := dst[:n*4]
+	for i := 0; i < n; i++ {
+		lo, hi := data[i*2], data[i*2+1]
+		period[i*4+0], period[i*4+1] = lo, hi // L
+		period[i*4+2], period[i*4+3] = lo, hi // R
+	}
+	return period
+}
+
 func toStereo(data []byte) []byte {
 	n := len(data) / 2
 	period := make([]byte, n*4)
@@ -367,6 +352,11 @@ func (p *PcmSpeaker) SetDuck(db float64) {
 	p.duckTarget.Store(DuckGain(db))
 }
 
+// SetMusicMuted changes only the music plane. MA's player mute must never
+// call the privacy-mute path: that would stop the microphone, change LEDs,
+// and persist a privacy state for what was merely a music command.
+func (p *PcmSpeaker) SetMusicMuted(muted bool) { p.musicMuted.Store(muted) }
+
 // IsStreaming reports whether a VOICE stream is currently mid-flight.
 //
 // Added for on-device wake word scoring: while the speaker is playing, the
@@ -395,15 +385,15 @@ func (p *PcmSpeaker) EndStream() { p.voice.endStream() }
 func (p *PcmSpeaker) EndMusicStream() { p.music.endStream() }
 
 // Flush cuts a playing VOICE stream immediately (barge-in). Two parts:
-//   1. Drain the buffer — kills up to ~5.5s already queued on-device.
-//   2. Arm discarding (if a stream is mid-flight) — subsequent periods of
-//      this stream are dropped until its EOS arrives. Necessary because the
-//      controller writes the whole response into the WebSocket ahead of
-//      playback: at barge time the rest of the stream is already in TCP
-//      buffers and would refill the channel right after the drain (the
-//      pre-2026-07-08 version drained only, and playback resumed after a
-//      ~1.3s skip). The controller sends the EOS on the cancel path too, so
-//      the discard always terminates.
+//  1. Drain the buffer — kills up to ~5.5s already queued on-device.
+//  2. Arm discarding (if a stream is mid-flight) — subsequent periods of
+//     this stream are dropped until its EOS arrives. Necessary because the
+//     controller writes the whole response into the WebSocket ahead of
+//     playback: at barge time the rest of the stream is already in TCP
+//     buffers and would refill the channel right after the drain (the
+//     pre-2026-07-08 version drained only, and playback resumed after a
+//     ~1.3s skip). The controller sends the EOS on the cancel path too, so
+//     the discard always terminates.
 //
 // Up to PeriodCount ALSA periods (~170ms) already handed to the hardware
 // still play — cutting those needs a stream restart, which costs more in
@@ -417,19 +407,62 @@ func (p *PcmSpeaker) Flush() { p.voice.flush() }
 // non-seekable stream that audio cannot be recovered.
 func (p *PcmSpeaker) FlushMusic() { p.music.flush() }
 
-// Close shuts the speaker down in the reverse of Init's bring-up: mute,
-// amp off, then tear the stream down. Muting first makes the PCM-close
-// transient inaudible, and leaving the amp off means an idle DAC can't
-// hiss while the server isn't running (OTA gaps, crashes, service stop —
-// the "speaker noise between OTAs"). start_server.sh repeats the mute +
-// amp-off after every server exit as a belt-and-braces for paths where
-// this never runs (SIGKILL, panic).
+// MusicSyncStart begins a timestamp-paced stream and clears any previous
+// scheduled data. It does not touch the legacy music plane.
+func (p *PcmSpeaker) MusicSyncStart(generation uint32) bool {
+	started := p.musicSync.start(generation)
+	if started {
+		// A stream's timestamps are relative to the device clock, so the
+		// timeline is re-anchored to it rather than continuing from wherever
+		// the previous stream's period count had reached.
+		p.musicClock.Reset()
+		p.sampleMusicClock()
+	}
+	return started
+}
+
+func (p *PcmSpeaker) MusicSyncPCM(generation, sequence uint32, targetUs int64, pcm []byte) bool {
+	return p.musicSync.push(generation, sequence, targetUs, pcm)
+}
+
+func (p *PcmSpeaker) MusicSyncClear(generation uint32) bool {
+	return p.musicSync.clear(generation)
+}
+
+func (p *PcmSpeaker) MusicSyncEnd(generation uint32) bool {
+	return p.musicSync.end(generation)
+}
+
+// sampleMusicClock reads ALSA's status snapshot outside the renderer's lock.
+// It only refines the measured DAC rate — the timeline itself is counted, not
+// derived from hw_ptr — so a failed read is ignored: it costs a little rate
+// accuracy, which is a slow drift, never a discontinuity.
+func (p *PcmSpeaker) sampleMusicClock() {
+	b, err := os.ReadFile(statusPath(cardNr, deviceNr))
+	if err != nil {
+		return
+	}
+	status, err := sendspin.ParsePcmStatus(b)
+	if err == nil {
+		p.musicClock.Observe(status)
+	}
+}
+
+// MusicSyncStats returns timestamp-rendering diagnostics without exposing the
+// scheduled queue or allowing callers to mutate its state.
+func (p *PcmSpeaker) MusicSyncStats() (underruns, holds, lateSamples uint64, startErrorUs, lastErrorUs, maxDriftUs, bufferedMs int64) {
+	st := p.musicSync.stats()
+	return st.Underruns, st.Holds, st.LateSamples,
+		st.StartErrorUs, st.LastErrorUs, st.MaxDriftUs, st.BufferedMs
+}
+
+// Close stops the helper-backed renderer and releases its OpenSL player.
 func (p *PcmSpeaker) Close() {
-	exec.Command("tinymix", "-D", "0", "61", "0", "0").Run() // mute
-	exec.Command("tinymix", "-D", "0", "5", "Off").Run()     // amp off
 	close(p.stopCh)
-	p.session.Close()
-	log.Println("PcmSpeaker closed — output muted, amp off")
+	if p.sink != nil {
+		p.sink.Close()
+	}
+	log.Println("PcmSpeaker closed")
 }
 
 // periodRMS computes the RMS level of a stereo S16LE period, normalized to

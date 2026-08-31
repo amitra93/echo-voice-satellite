@@ -1,39 +1,40 @@
 """
-The ESPHome voice protocol serialises pipeline runs at the SATELLITE or not
-at all.
+The ESPHome voice protocol used to serialise pipeline runs at the SATELLITE
+or not at all — `VoiceAssistantEventResponse` carried no run identifier, so a
+client structurally could not attribute an event to a particular run, and
+Home Assistant's `handle_pipeline_start` overwrote `_pipeline_task` without
+cancelling the previous one. Barge-in was the one place two runs could
+overlap, and it did: measured 2026-08-17, five barge-ins, five interrupting
+turns dead in 4-17ms with zero audio captured, because the aborted run's
+RUN_END arrived ~4ms after the new turn started and the "HA ended a run it
+never started" branch read it as terminal.
 
-`VoiceAssistantEventResponse` carries `event_type` and a `data` list of
-name/value pairs — there is no run identifier anywhere in the protocol, so a
-client structurally cannot attribute an event to a particular run. Home
-Assistant does not enforce one-run-at-a-time either: `handle_pipeline_start`
-clears the audio queue and cancels the TTS streaming task, then overwrites
-`_pipeline_task` WITHOUT cancelling the previous one. Starting a second run
-therefore orphans the first, which keeps emitting events onto the same
-connection.
-
-Barge-in is the only place two runs can overlap, and it did. Measured on
-2026-08-17: five barge-ins, five interrupting turns dead in 4-17ms with zero
-audio captured, because the aborted run's RUN_END arrived ~4ms after the new
-turn started and the "HA ended a run it never started" branch read it as
-terminal.
-
-The state machine lives in `em_runbarrier` rather than in `em_esphome` for the
-reason `em_linkauth.decide` does: this suite cannot import `em_esphome` (it
-pulls in zeroconf, aiohttp and the database), so logic that lives there has no
-coverage. Both of this machine's failure modes are silent — swallow too little
-and the interrupting turn dies, swallow too much and the satellite goes deaf —
-which is exactly the shape that should not be sitting untested inside a big
-async method.
-
-The wiring in `em_esphome` is pinned separately, against the source.
+`em_runbarrier.RunBarrier` is the state machine that fixed it, split out of
+`em_esphome` (now deleted, docs/design/full-duplex-plan.md's Phase 4 cutover) for the
+reason `em_linkauth.decide` was: the suite could not import `em_esphome` (it
+pulled in zeroconf, aiohttp and the database), so logic that lived there had
+no coverage. `em_turn_engine.py` — the ESPHome-era satellite's replacement —
+does not manually parse RUN_START/RUN_END at all; it drives HA's pipeline
+through `AssistSatelliteEntity.async_accept_pipeline_from_satellite` (in
+`hacs/`'s `assist_satellite.py`), which owns run-boundary bookkeeping
+internally instead of us doing it by hand over raw protocol events. The
+RunBarrier CLASS's own logic below is still correct and still kept — it is
+exactly the tool the barge-in-abort follow-up in `em_turn_engine.py`'s module
+docstring will need — but nothing currently instantiates it, and the wiring
+tests that used to pin the ESPHome-specific call sites (`self._barrier.
+begin_turn()`, `VoiceAssistantRequest(start=False)`, the RUN_START/RUN_END
+discriminator) were pinning source that no longer exists. Only
+`test_barge_serialises_in_both_phases` survives from that section: it checks
+`em_controller.py`'s `_barge_watcher`, which is unchanged and still calls
+`turn_engine.abort_ha_run`/`cancel_voice_turn(abort_ha=True)` on a barge —
+those calls are today a documented no-op on the HA side (same gap), but the
+controller's own intent to serialise is still real and still worth pinning.
 """
 
-import re
 from pathlib import Path
 
 from em_runbarrier import RunBarrier
 
-ESPHOME_SRC = (Path(__file__).resolve().parents[1] / "em_esphome.py").read_text()
 CONTROLLER_SRC = (Path(__file__).resolve().parents[1] / "em_controller.py").read_text()
 
 
@@ -163,43 +164,6 @@ def test_two_aborts_before_a_turn_still_protect_one_turn():
 # ── The wiring, pinned against the source ────────────────────────────────────
 
 
-def test_the_abort_actually_reaches_ha():
-    """
-    `VoiceAssistantRequest(start=False)` is the one message that reaches into
-    HA's in-flight pipeline: aioesphomeapi maps it to `handle_stop(True)` ->
-    `_abort_pipeline()`, which queues the audio sentinel AND cancels
-    `_pipeline_task`. cancel_turn's old docstring claimed no such mechanism
-    existed, citing an ESPHOME_SPEC.md §7.4 that is not in the tree.
-    """
-    assert "VoiceAssistantRequest(start=False)" in ESPHOME_SRC, (
-        "nothing aborts HA's pipeline — the old run keeps emitting onto the "
-        "connection the interrupting turn is using"
-    )
-
-
-def test_the_satellite_hands_the_arm_over_at_turn_start_and_drops_it_at_end():
-    """
-    Both calls are load-bearing and neither is obviously necessary at the call
-    site, which is how one of them would get tidied away.
-    """
-    assert "self._barrier.begin_turn()" in ESPHOME_SRC
-    assert "self._barrier.end_turn()" in ESPHOME_SRC
-
-
-def test_the_event_handler_consults_the_barrier_before_anything_else():
-    """
-    The gate has to sit above the dispatch, not inside a branch — a stale
-    STT_VAD_END is as fatal to the interrupting turn as a stale RUN_END, and
-    listing event types to guard would go stale the next time one is added.
-    """
-    handler = ESPHOME_SRC[ESPHOME_SRC.index("def _handle_voice_event"):]
-    gate = handler.index("self._barrier")
-    first_dispatch = handler.index("if event_type ==")
-    assert gate < first_dispatch, (
-        "the barrier must gate every event, not selected ones"
-    )
-
-
 def test_barge_serialises_in_both_phases():
     """
     Thinking starts another turn on this connection, so HA's run must be
@@ -215,16 +179,3 @@ def test_barge_serialises_in_both_phases():
     assert "abort_ha_run" in watcher, (
         "barge during playback must serialise against the interrupting turn"
     )
-
-
-def test_the_unarmed_run_end_path_is_still_there():
-    """
-    HA's wake-word interception emits RUN_END having never started a pipeline.
-    That is genuinely terminal, and missing it stalled the voice satellite
-    setup dialog for the life of the feature. The barrier is armed only by an
-    abort, so this path must survive untouched.
-    """
-    assert re.search(r"if not self\._run_started:", ESPHOME_SRC), (
-        "the RUN_END-without-RUN_START discriminator is gone"
-    )
-    assert "self._ha_never_started = True" in ESPHOME_SRC

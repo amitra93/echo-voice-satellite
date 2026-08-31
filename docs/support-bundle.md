@@ -27,7 +27,7 @@ Excluded, with no option to include them:
 | **Anything you said** — transcripts, `stt_text`, saved audio | Speech from inside your home. There is no opt-in flag, because a flag is a thing people tick and this one cannot be untickled once the file is public. |
 | **Device labels** | You wrote them, and they routinely contain names — "Bedroom - Sam" is a real example. Replaced with `device-1`, `device-2`… |
 | **Network identifiers** — WiFi SSID, BSSID, IP addresses | An SSID is geolocatable from public wardriving databases, so publishing one discloses roughly where you live. |
-| **Credentials** — device tokens, ESPHome PSKs, password hashes, login sessions | Obvious, but stated so it is checkable. |
+| **Credentials** — device tokens, Home Assistant integration keys, password hashes, login sessions | Obvious, but stated so it is checkable. |
 | **Dashboard account names** | They appear in log lines like "Shell session opened by …", which nothing else here would have caught. Replaced with the account's role — `<admin>` — which is the part worth knowing. |
 | **File paths** | A data directory is `/home/<your name>/…` on a bare-metal install, so the controller reports sizes only. |
 | **URLs and quoted strings in log lines** | Media URLs carry provider paths and session tokens; quoted strings in turn traces carry transcripts. |

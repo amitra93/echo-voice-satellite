@@ -3,7 +3,7 @@ name: "EchoMuse"
 # derives from the controller-v* tag (controller-v2.18.0 -> 2.18.0). Bump
 # both together: Supervisor pulls `image:version`, so a version with no
 # matching tag on GHCR fails to install.
-version: "2.20.2"
+version: "2.20.1"
 # Pull the published multi-arch image rather than building on the user's
 # machine. Without this Supervisor builds from this directory's Dockerfile,
 # which downloads a few hundred MB on whatever the user runs Home Assistant
@@ -21,16 +21,15 @@ version: "2.20.2"
 # expensive than it is. tools/make_dev_addon.sh packages one.
 image: "ghcr.io/wilbowes/echomuse-controller"
 slug: "controller"
-description: "Local, open-source voice assistant controller for rooted Echo Dot 2nd Gen devices — wake word, fleet dashboard, and Home Assistant integration via ESPHome."
+description: "Local, open-source voice assistant controller for rooted Echo Dot 2nd Gen devices — wake word, fleet dashboard, and a native Home Assistant (HACS) voice-satellite integration."
 url: "https://github.com/wilbowes/EchoMuse"
 init: false
 arch:
   - aarch64
   - amd64
-# Required for mDNS controller discovery and the per-device ESPHome native
-# API listeners (one TCP port per device, 16001+) — same reason the
-# docker-compose deployment sets network_mode: host. Without it, devices on
-# the LAN cannot find or connect to the controller.
+# Required for mDNS controller discovery — same reason the docker-compose
+# deployment sets network_mode: host. Without it, devices on the LAN cannot
+# find or connect to the controller.
 host_network: true
 ingress: true
 ingress_port: 8768
@@ -50,21 +49,14 @@ environment:
   # Supervisor — fixed rather than a user option so the database can't be
   # pointed somewhere that doesn't survive a restart.
   DB_PATH: "/data/echomuse.db"
-# Read-only access to Home Assistant's /ssl folder, so a private CA
-# certificate can be pointed at with extra_ca_cert. Read-only by default,
-# which is all this needs — we copy the file, never write it.
+# Read-only access to Home Assistant's /ssl folder so a private CA can be
+# installed in the container trust store at startup.
 map:
   - type: ssl
-
 options:
   server_host: "0.0.0.0"
   server_ip: ""
   mdns_name: "echomuse"
-  esphome_project_version: "2.0.0"
-  # Base for the per-device ESPHome satellite ports. Differs per release
-  # channel so the two add-ons hand out disjoint ranges — see em_db's
-  # ESPHOME_PORT_BASE and sync_channels.py, which rewrites this line.
-  esphome_port_base: 16001
   oww_model: "hey_jarvis"
   # Keep in step with em_db.DEFAULT_DEVICE_CONFIG["owwThreshold"] — a fresh
   # add-on install is precisely the case that default exists for, and
@@ -73,19 +65,16 @@ options:
   require_device_tls: false
   device_approval: "strict"
   debug: false
-  # Path to a PEM CA certificate to trust, for a Home Assistant served
-  # over HTTPS with a private CA. Put the file in Home Assistant's /ssl
-  # folder and give the path as /ssl/<filename>.
+  music_assistant_url: ""
   extra_ca_cert: ""
 schema:
   server_host: "str"
   server_ip: "str"
   mdns_name: "match(^[a-z0-9][a-z0-9-]{0,62}$)"
-  esphome_project_version: "str"
-  esphome_port_base: "int(1024,60000)"
   oww_model: "str"
   oww_threshold: "float(0,1)"
   require_device_tls: "bool"
   device_approval: "list(strict|auto)"
   debug: "bool"
+  music_assistant_url: "str"
   extra_ca_cert: "str?"

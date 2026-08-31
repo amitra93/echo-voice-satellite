@@ -24,14 +24,17 @@ import (
 // Credentials are re-read on every dial attempt, so a push takes effect
 // on the next reconnect without a process restart.
 const (
-	credCAPath    = "/data/local/etc/echomuse/ca.pem"
-	credTokenPath = "/data/local/etc/echomuse/token"
+	defaultCredCAPath    = "/data/local/etc/echomuse/ca.pem"
+	defaultCredTokenPath = "/data/local/etc/echomuse/token"
 
 	// Must match the DNS SAN in the controller's server cert
 	// (controller/em_pki.py TLS_SERVER_NAME). It is an identity label,
 	// not a resolvable name — mDNS supplies the actual address.
 	tlsServerName = "echomuse-controller"
 )
+
+var credCAPath = defaultCredCAPath
+var credTokenPath = defaultCredTokenPath
 
 // BuildUnix is the firmware build timestamp (seconds since epoch), set at
 // build time via ldflags — see device/compile.sh. It floors the TLS

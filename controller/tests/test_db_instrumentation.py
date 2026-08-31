@@ -166,7 +166,7 @@ def test_stats_relay_allowlist_covers_every_device_stat():
     ctrl = (root / "em_controller.py").read_text()
     dbsrc = (root / "em_db.py").read_text()
 
-    body = re.search(r'msg_type == "stats":(.*?)\n\s*if msg\.get\("ble"\)',
+    body = re.search(r'msg_type == "stats":(.*?)\n\s*# Ambient light straight through',
                      ctrl, re.S)
     assert body, "could not locate the stats handler allowlist"
     allowlist = set(re.findall(r'"(\w+)":\s*msg\.get', body.group(1)))

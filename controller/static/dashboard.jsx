@@ -1,31 +1,8 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
-
-// ─── Ingress ──────────────────────────────────────────────────────────────────
-
-// Under Home Assistant Ingress the dashboard is mounted below a generated
-// path (e.g. /api/hassio_ingress/<token>/), not at the site root — the
-// server injects a matching <base href> (see em_api.py's
-// _with_ingress_base). Every absolute "/api/..." path in this file has to
-// become relative through this so it resolves under that base instead of
-// bypassing it straight to the root. A no-op outside ingress, where the
-// page's own URL already is the root.
-function ingressPath(path) {
-  return path.startsWith('/') ? `.${path}` : path;
-}
-
-// True when the page is being served through Home Assistant's ingress
-// gateway. Read off the injected <base href> rather than /api/system/status's
-// ha_ingress, so it is available synchronously and to code with no API token
-// — the WebUSB check runs before any of that.
-function isIngress() {
-  return document.baseURI.includes('/hassio_ingress/');
-}
-
-function ingressWebSocketUrl(path) {
-  const url = new URL(ingressPath(path), document.baseURI);
-  url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
-  return url.toString();
-}
+const DashboardLogic = window.EchoMuseDashboardLogic;
+const { ingressPath, isIngress, ingressWebSocketUrl, wwModelLabel, uptime,
+  relTime, deviceState, eventAccent, wifiBand, turnSegments, percentile,
+  onDeviceMode } = DashboardLogic;
 
 // ─── API ──────────────────────────────────────────────────────────────────────
 
@@ -105,29 +82,6 @@ const API = {
 
 // owwModel display label: stock names ("hey_jarvis_v0.1") and custom model
 // file paths ("/app/data/oww_models/hey_clara.onnx") both prettify.
-function wwModelLabel(v) {
-  if (!v) return '—';
-  if (v.endsWith('.onnx')) v = v.split('/').pop().replace(/\.onnx$/, '');
-  return v.replace(/_v[\d.]+$/, '').replace(/_/g, ' ');
-}
-
-function uptime(s) {
-  if (!s) return '—';
-  const d = Math.floor(s / 86400), h = Math.floor((s % 86400) / 3600), m = Math.floor((s % 3600) / 60);
-  if (d > 0) return `${d}d ${h}h`;
-  if (h > 0) return `${h}h ${m}m`;
-  return `${m}m`;
-}
-
-function relTime(ts) {
-  if (!ts) return '—';
-  const d = Date.now() - ts * 1000;
-  if (d < 60000) return `${Math.floor(d / 1000)}s ago`;
-  if (d < 3600000) return `${Math.floor(d / 60000)}m ago`;
-  if (d < 86400000) return `${Math.floor(d / 3600000)}h ago`;
-  return `${Math.floor(d / 86400000)}d ago`;
-}
-
 // Controller-generated device log lines (`device_log` on the shared events
 // socket) are the only progress channel a long shell-plane operation has —
 // the POST that starts it does not return until it is finished. Components
@@ -137,20 +91,6 @@ const _logSubs = new Set();
 function subscribeDeviceLog(fn) { _logSubs.add(fn); return () => _logSubs.delete(fn); }
 function _emitDeviceLog(deviceId, entry) {
   _logSubs.forEach(fn => { try { fn(deviceId, entry); } catch (e) { console.error(e); } });
-}
-
-function deviceState(d) {
-  if (!d.approved)  return { key: 'pending',   label: 'Pending',   color: 'var(--accent-hi)', dot: '#8ab0d0' };
-  if (!d.connected) return { key: 'offline',   label: 'Offline',   color: 'var(--warn)', dot: '#d4703a' };
-  if (d.muted)      return { key: 'muted',     label: 'Muted',     color: 'var(--error)', dot: '#c04040' };
-  if (d.speaking)   return { key: 'speaking',  label: 'Speaking',  color: 'var(--accent)', dot: '#4080d0' };
-  if (d.thinking)   return { key: 'thinking',  label: 'Thinking',  color: 'var(--warn)', dot: '#a08020' };
-  if (d.listening)  return { key: 'listening', label: 'Listening', color: 'var(--ok)', dot: '#40906a' };
-  return               { key: 'idle',      label: 'Idle',      color: 'var(--muted)', dot: '#aaaaaa' };
-}
-
-function eventAccent(level) {
-  return { info: 'var(--ok)', warn: 'var(--warn)', error: 'var(--error)' }[level] || 'var(--muted)';
 }
 
 // ─── Components ───────────────────────────────────────────────────────────────
@@ -487,11 +427,6 @@ function EqCurve({ bands, fs = 22050 }) {
 // Null rather than a guess: "2.4GHz" shown for a device we cannot actually
 // see the band of is worse than showing nothing, since the whole point is
 // spotting a device that has quietly landed on the slower radio.
-function wifiBand(freqMhz) {
-  if (!freqMhz) return null;
-  return freqMhz >= 4900 ? '5GHz' : '2.4GHz';
-}
-
 function SignalBars({ rssi }) {
   // 0 bars = no signal / null, 4 bars = excellent
   const level = rssi == null ? 0
@@ -774,31 +709,30 @@ function Shell({ deviceId, token, height = 320 }) {
 // contrast ≥3:1, chroma ≥0.1. Identity is never color-alone: legend + the
 // tooltip name each stage.
 const TURN_STAGES = [
-  { key: 'listen',     label: 'Listening',  color: '#4468a8' },
-  { key: 'transcribe', label: 'Transcribe', color: '#1f8a55' },
-  { key: 'respond',    label: 'Respond',    color: '#96660a' },
+  { key: 'stt', label: 'STT', color: '#4468a8' },
+  { key: 'ha',  label: 'HA response', color: '#1f8a55' },
+  { key: 'tts', label: 'TTS + playback', color: '#96660a' },
 ];
 
-function turnSegments(t) {
-  // Stage durations from the trace timestamps; -1 = never reached.
-  const vad = t.vad_end_ms >= 0 ? t.vad_end_ms : -1;
-  const stt = t.stt_ms     >= 0 ? t.stt_ms     : -1;
-  const tts = t.tts_url_ms >= 0 ? t.tts_url_ms : -1;
-  const listen     = vad >= 0 ? vad : Math.max(t.total_ms || 0, 0);
-  const transcribe = (stt >= 0 && vad >= 0) ? Math.max(stt - vad, 0) : 0;
-  const respond    = (tts >= 0 && stt >= 0) ? Math.max(tts - stt, 0) : 0;
-  return { listen, transcribe, respond, shown: listen + transcribe + respond };
-}
+const HISTORY_PAGE_SIZE = 20;
 
-function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMisses, stateLabel, stateColor, isAdmin }) {
-  const [hover, setHover] = useState(null); // index into `recent`
+function TurnObservability({ turns, devices, isAdmin }) {
+  const [expanded, setExpanded] = useState(() => new Set());
+  const [deviceFilter, setDeviceFilter] = useState('all');
+  const [outcomeFilter, setOutcomeFilter] = useState('all');
+  const [periodFilter, setPeriodFilter] = useState('all');
+  const [page, setPage] = useState(0);
   const mono = "'DM Mono',monospace";
+  const devicesById = new Map(devices.map(device => [device.device_id, device]));
 
   // Saved utterances — play in place or download the WAV. Both go through
   // one fetched object URL per turn (API.blob; see the auth note there), so
   // playing then downloading costs one transfer, not two.
   const [playing, setPlaying] = useState(null);   // turn_id currently sounding
   const [gone, setGone]       = useState(() => new Set()); // 404 = pruned
+  const [removedAudio, setRemovedAudio] = useState(() => new Set());
+  const [pruningAudio, setPruningAudio] = useState(false);
+  const [pruneMessage, setPruneMessage] = useState(null);
   const audioRef = useRef(null);
   const urlsRef  = useRef({});    // turn_id -> object URL
 
@@ -810,40 +744,68 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
   // Retention is a small per-device file count, far shorter than the turn
   // history, so a row naming a recording that no longer exists is ordinary.
   // Mark it gone and drop its controls rather than surfacing an error.
-  const audioUrl = async t => {
-    if (urlsRef.current[t.turn_id]) return urlsRef.current[t.turn_id];
+  const audioUrl = async (t, kind) => {
+    const key = `${t.device_id}:${t.turn_id}:${kind}`;
+    if (urlsRef.current[key]) return urlsRef.current[key];
     try {
       const url = URL.createObjectURL(await API.blob(
-        `/api/devices/${deviceId}/turns/${t.turn_id}/audio`));
-      urlsRef.current[t.turn_id] = url;
+        `/api/devices/${t.device_id}/turns/${t.turn_id}/audio/${kind}`));
+      urlsRef.current[key] = url;
       return url;
     } catch {
-      setGone(g => new Set(g).add(t.turn_id));
+      setGone(g => new Set(g).add(key));
       return null;
     }
   };
 
-  const toggleAudio = async t => {
-    const wasPlaying = playing === t.turn_id;
+  const toggleAudio = async (t, kind) => {
+    const key = `${t.device_id}:${t.turn_id}:${kind}`;
+    const wasPlaying = playing === key;
     stopAudio();
     if (wasPlaying) return;
-    const url = await audioUrl(t);
+    const url = await audioUrl(t, kind);
     if (!url) return;
     const el = new Audio(url);
-    el.onended = el.onerror = () => setPlaying(p => (p === t.turn_id ? null : p));
+    el.onended = el.onerror = () => setPlaying(p => (p === key ? null : p));
     audioRef.current = el;
-    setPlaying(t.turn_id);
-    el.play().catch(() => setPlaying(p => (p === t.turn_id ? null : p)));
+    setPlaying(key);
+    el.play().catch(() => setPlaying(p => (p === key ? null : p)));
   };
 
-  const downloadAudio = async t => {
-    const url = await audioUrl(t);
+  const downloadAudio = async (t, kind) => {
+    const url = await audioUrl(t, kind);
     if (!url) return;
     const when = new Date(t.ts * 1000).toISOString().slice(0, 19).replace(/[:T]/g, '');
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${(deviceLabel || deviceId).replace(/[^A-Za-z0-9]+/g, '-').toLowerCase()}-${when}.wav`;
+    const device = devicesById.get(t.device_id);
+    a.download = `${(device?.label || t.device_id).replace(/[^A-Za-z0-9]+/g, '-').toLowerCase()}-${when}-${kind}.wav`;
     a.click();
+  };
+
+  const pruneAudio = async () => {
+    if (!window.confirm('Delete all but the 20 newest STT/TTS audio files?')) return;
+    setPruningAudio(true); setPruneMessage(null);
+    try {
+      const result = await API.post('/api/recordings/prune', {});
+      const removed = new Set(result.removed || []);
+      setRemovedAudio(current => new Set([...current, ...removed]));
+      // The endpoint clears these references server-side; hide the same files
+      // immediately in the current history without waiting for a reload.
+      setGone(current => {
+        const next = new Set(current);
+        turns.forEach(t => {
+          if (removed.has(t.audio_file)) next.add(`${t.device_id}:${t.turn_id}:stt`);
+          if (removed.has(t.tts_audio_file)) next.add(`${t.device_id}:${t.turn_id}:tts`);
+        });
+        return next;
+      });
+      setPruneMessage(`Deleted ${result.files} file${result.files === 1 ? '' : 's'} · ${result.remaining} remain`);
+    } catch (e) {
+      setPruneMessage(e.error || 'Audio cleanup failed');
+    } finally {
+      setPruningAudio(false);
+    }
   };
 
   useEffect(() => () => {
@@ -857,33 +819,66 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
   // Recordings and transcripts are admin-only — the server enforces it
   // (require_admin on the audio route, stt_text stripped from /turns);
   // this just avoids offering controls that would 404.
-  const anyAudio = isAdmin && turns.some(t => t.audio_file);
-
-  const ok = turns.filter(t => t.outcome === 'ok');
-  const successPct = turns.length ? Math.round(ok.length / turns.length * 100) : null;
-  const replies = ok.map(t => t.tts_url_ms).filter(v => v >= 0).sort((a, b) => a - b);
-  const medianReply = replies.length ? replies[Math.floor(replies.length / 2)] : null;
+  const anyAudio = isAdmin && turns.some(t => t.audio_file || t.tts_audio_file);
+  const cutoff = periodFilter === 'all' ? 0 : Date.now() / 1000 - Number(periodFilter) * 86400;
+  const filtered = turns.filter(t =>
+    (deviceFilter === 'all' || t.device_id === deviceFilter) &&
+    (outcomeFilter === 'all' || t.outcome === outcomeFilter) &&
+    t.ts >= cutoff
+  );
+  const recent = filtered.slice().sort((a, b) => b.ts - a.ts);
+  const pages = Math.max(1, Math.ceil(recent.length / HISTORY_PAGE_SIZE));
+  const currentPage = Math.min(page, pages - 1);
+  const displayed = recent.slice(currentPage * HISTORY_PAGE_SIZE, (currentPage + 1) * HISTORY_PAGE_SIZE);
+  const ok = filtered.filter(t => t.outcome === 'ok');
+  const successPct = filtered.length ? Math.round(ok.length / filtered.length * 100) : null;
+  const haResponse = ok.map(t => t.ha_latency_ms).filter(v => Number.isFinite(v) && v >= 0);
+  const haResponseP50 = percentile(haResponse, 0.50);
+  const haResponseP90 = percentile(haResponse, 0.90);
+  const haResponseP99 = percentile(haResponse, 0.99);
   const fmtS = ms => (ms / 1000).toFixed(1) + 's';
-
-  // All buffered turns (up to 50), newest first — rendered inside their own
-  // scrollable box so a long history never scrolls the stat tiles (or the
-  // rest of the tab) out of view.
-  const recent = turns.slice().reverse();
   const scale = Math.max(3000, ...recent.map(t => turnSegments(t).shown));
+  const filterStyle = { fontFamily:mono, fontSize:10, color:'var(--text2)', background:'var(--sunken)', border:'1px solid var(--border)', borderRadius:5, padding:'6px 8px' };
+
+  useEffect(() => {
+    setPage(0);
+  }, [deviceFilter, outcomeFilter, periodFilter]);
+
+  useEffect(() => {
+    if (deviceFilter !== 'all' && !devicesById.has(deviceFilter)) setDeviceFilter('all');
+  }, [devices, deviceFilter]);
 
   return (
     <div>
       {/* Stat tiles */}
       <div style={{ display: 'flex', gap: 12, alignItems: 'flex-end', flexWrap: 'wrap', marginBottom: 16 }}>
-        <Lcd label="State" value={stateLabel} color={stateColor} size={16}/>
-        <Lcd label="Turns (last 50)" value={turns.length} color="var(--lcd-green)" size={16}/>
+        <Lcd label="Queries" value={filtered.length} color="var(--lcd-green)" size={16}/>
         <Lcd label="Success" value={successPct != null ? successPct + '%' : '—'}
              color={successPct == null ? 'var(--lcd-dim)' : successPct >= 80 ? 'var(--lcd-green)' : 'var(--lcd-amber)'} size={16}/>
-        <Lcd label="Median reply" value={medianReply != null ? fmtS(medianReply) : '—'} color="var(--lcd-dim)" size={16}/>
-        <Lcd label="Near-misses" value={nearMisses != null ? nearMisses : '—'}
-             color={nearMisses > 0 ? 'var(--lcd-amber)' : 'var(--lcd-dim)'} size={16}/>
-        <Lcd label="Underruns" value={turns.reduce((s, t) => s + (t.underruns || 0), 0)}
-             color={turns.some(t => t.underruns > 0) ? 'var(--lcd-amber)' : 'var(--lcd-dim)'} size={16}/>
+        <Lcd label="HA response median" value={haResponseP50 != null ? fmtS(haResponseP50) : '—'} color="var(--lcd-dim)" size={16}/>
+        <Lcd label="HA response P90" value={haResponseP90 != null ? fmtS(haResponseP90) : '—'} color="var(--lcd-dim)" size={16}/>
+        <Lcd label="HA response P99" value={haResponseP99 != null ? fmtS(haResponseP99) : '—'} color="var(--lcd-dim)" size={16}/>
+        <Lcd label="Underruns" value={filtered.reduce((s, t) => s + (t.underruns || 0), 0)}
+             color={filtered.some(t => t.underruns > 0) ? 'var(--lcd-amber)' : 'var(--lcd-dim)'} size={16}/>
+      </div>
+
+      <div style={{ display:'flex', gap:10, flexWrap:'wrap', alignItems:'center', marginBottom:16 }}>
+        <select aria-label="Filter by device" value={deviceFilter} onChange={e => setDeviceFilter(e.target.value)} style={filterStyle}>
+          <option value="all">All devices</option>
+          {devices.map(device => <option key={device.device_id} value={device.device_id}>{device.label || device.device_id}</option>)}
+        </select>
+        <select aria-label="Filter by result" value={outcomeFilter} onChange={e => setOutcomeFilter(e.target.value)} style={filterStyle}>
+          <option value="all">All results</option>
+          {[...new Set(turns.map(t => t.outcome).filter(Boolean))].sort().map(outcome => (
+            <option key={outcome} value={outcome}>{outcome.replace(/_/g, ' ')}</option>
+          ))}
+        </select>
+        <select aria-label="Filter by date" value={periodFilter} onChange={e => setPeriodFilter(e.target.value)} style={filterStyle}>
+          <option value="all">All dates</option>
+          <option value="1">Last 24 hours</option>
+          <option value="7">Last 7 days</option>
+          <option value="30">Last 30 days</option>
+        </select>
       </div>
 
       {recent.length === 0 ? (
@@ -900,24 +895,35 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
                 {s.label}
               </span>
             ))}
-            {(recordingsOn || anyAudio) && (
+            {anyAudio && (
               <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.08em', marginLeft: 'auto' }}>
                 ▶ hear the mic{anyAudio ? '' : ' — next turn'}
               </span>
             )}
           </div>
 
-          {/* One stacked bar per turn, newest first — own scroll container */}
-          <div style={{ maxHeight: 230, overflowY: 'auto', paddingRight: 4 }}>
-          {recent.map((t, i) => {
+          {displayed.map(t => {
             const seg = turnSegments(t);
-            const time = new Date(t.ts * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const when = new Date(t.ts * 1000);
+            const date = when.toLocaleDateString([], { month:'short', day:'numeric', year:'numeric' });
+            const time = when.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+            const key = `${t.device_id}:${t.turn_id}`;
+            const device = devicesById.get(t.device_id);
             const failed = t.outcome !== 'ok';
+            const isExpanded = expanded.has(key);
             return (
-              <div key={i}
-                onMouseEnter={() => setHover(i)} onMouseLeave={() => setHover(null)}
-                style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '3px 0', cursor: 'default', background: hover === i ? 'var(--hairline)' : 'transparent', borderRadius: 4 }}>
-                <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)', width: 38, flexShrink: 0, textAlign: 'right' }}>{time}</span>
+              <React.Fragment key={key}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '5px 0', borderRadius: 4 }}>
+                <button onClick={() => setExpanded(current => {
+                    const next = new Set(current); next.has(key) ? next.delete(key) : next.add(key); return next;
+                  })}
+                  aria-expanded={isExpanded}
+                  style={{ background:'none', border:0, color:'var(--accent)', cursor:'pointer', fontFamily:mono, fontSize:9, width:72, textAlign:'left', flexShrink:0 }}>
+                  {isExpanded ? '▾ Hide' : '▸ Details'}
+                </button>
+                <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--accent)', width: 48, flexShrink: 0 }}>Q#{t.turn_id}</span>
+                <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--text2)', width: 105, flexShrink: 0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{device?.label || t.device_id}</span>
+                <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)', width: 115, flexShrink: 0 }}>{date} {time}</span>
                 <div style={{ flex: 1, display: 'flex', height: 14, alignItems: 'stretch' }}>
                   {TURN_STAGES.map(s => seg[s.key] > 0 && (
                     <div key={s.key} style={{
@@ -933,35 +939,45 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
                 {/* Saved utterance: listen in place, or download the WAV.
                     The slot is reserved even when a turn has no recording so
                     the columns stay aligned as the retention window rolls. */}
-                <span style={{ width: 34, flexShrink: 0, display: 'flex', gap: 4, justifyContent: 'flex-end' }}>
-                  {isAdmin && t.audio_file && !gone.has(t.turn_id) && (<>
-                    <button onClick={() => toggleAudio(t)}
-                      title={playing === t.turn_id ? 'Stop' : 'Play the mic audio for this turn'}
-                      style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontSize: 10, lineHeight: 1, color: playing === t.turn_id ? 'var(--warn)' : 'var(--text2)' }}>
-                      {playing === t.turn_id ? '▮' : '▶'}
-                    </button>
-                    <button onClick={() => downloadAudio(t)} title="Download the WAV"
-                      style={{ background: 'none', border: 'none', padding: 0, cursor: 'pointer', fontSize: 10, lineHeight: 1, color: 'var(--muted)' }}>⤓</button>
-                  </>)}
-                </span>
               </div>
+              {isExpanded && (
+                <div className="em-inset" style={{ margin:'2px 0 8px', padding:'10px 12px', fontFamily:mono, fontSize:10, color:'var(--text2)', lineHeight:1.7 }}>
+                  <div>{t.trigger || 'unknown trigger'} · total {fmtS(Math.max(t.total_ms || seg.shown, 0))}</div>
+                  <div>STT {fmtS(seg.stt)} · HA response {fmtS(seg.ha)} · TTS + playback {fmtS(seg.tts)}</div>
+                   {t.stt_text && <div style={{ marginTop:4 }}>STT: “{t.stt_text}”</div>}
+                   {t.tts_text && <div style={{ marginTop:4 }}>TTS: “{t.tts_text}”</div>}
+                  {t.wake_model && <div>wake {t.wake_model.replace(/\.[a-z]+$/, '').split('/').pop()} · score {t.wake_score?.toFixed(3)} · threshold {t.wake_threshold?.toFixed(2)}</div>}
+                  {isAdmin && (t.audio_file || t.tts_audio_file) && (
+                    <div style={{ display:'flex', gap:8, flexWrap:'wrap', marginTop:8 }}>
+                      {['stt', 'tts'].map(kind => {
+                        const exists = kind === 'stt' ? t.audio_file : t.tts_audio_file;
+                        const audioKey = `${key}:${kind}`;
+                         if (!exists || gone.has(audioKey) || removedAudio.has(exists)) return null;
+                        return <React.Fragment key={kind}>
+                          <Pill small onClick={() => toggleAudio(t, kind)}>{playing === audioKey ? `Stop ${kind.toUpperCase()}` : `Play ${kind.toUpperCase()}`}</Pill>
+                          <Pill small onClick={() => downloadAudio(t, kind)}>Download {kind.toUpperCase()}</Pill>
+                        </React.Fragment>;
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+              </React.Fragment>
             );
           })}
-          </div>
-
-          {/* Hover detail */}
-          {hover != null && recent[hover] && (() => {
-            const t = recent[hover]; const seg = turnSegments(t);
-            return (
-              <div style={{ marginTop: 10, background: 'var(--hairline)', border: '1px solid var(--track)', borderRadius: 6, padding: '8px 12px', fontFamily: mono, fontSize: 10, color: 'var(--text2)', lineHeight: 1.7 }}>
-                <span style={{ color: 'var(--muted)' }}>{t.trigger}</span>
-                {' · '}listening {fmtS(seg.listen)} · transcribe {fmtS(seg.transcribe)} · respond {fmtS(seg.respond)} · total {fmtS(Math.max(t.total_ms, 0))}
-                {t.wake_model ? <><br/>wake {t.wake_model.replace(/\.[a-z]+$/, '').split('/').pop()} score {t.wake_score?.toFixed(3)} (thr {t.wake_threshold?.toFixed(2)}) · noise floor {t.noise_floor?.toFixed(4)}</> : null}
-                {t.underruns != null ? <>{t.wake_model ? ' · ' : <br/>}underruns <span style={{ color: t.underruns > 0 ? 'var(--warn)' : 'inherit' }}>{t.underruns}</span></> : null}
-                {t.stt_text ? <><br/>“{t.stt_text.length > 90 ? t.stt_text.slice(0, 90) + '…' : t.stt_text}”</> : null}
-              </div>
-            );
-          })()}
+          {(pages > 1 || isAdmin) && (
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'flex-end', gap:8, marginTop:14 }}>
+              <span style={{ fontFamily:mono, fontSize:10, color:'var(--muted)', marginRight:'auto' }}>
+                 {currentPage * HISTORY_PAGE_SIZE + 1}–{Math.min((currentPage + 1) * HISTORY_PAGE_SIZE, recent.length)} of {recent.length}
+              </span>
+              {isAdmin && <Pill small disabled={pruningAudio} onClick={pruneAudio}>
+                {pruningAudio ? 'Cleaning audio…' : 'Delete all but 20 old STT/TTS audio files'}
+              </Pill>}
+              <Pill small disabled={currentPage === 0} onClick={() => setPage(p => Math.max(0, p - 1))}>Previous</Pill>
+              <Pill small disabled={currentPage >= pages - 1} onClick={() => setPage(p => Math.min(pages - 1, p + 1))}>Next</Pill>
+            </div>
+          )}
+          {isAdmin && pruneMessage && <div style={{ marginTop:8, fontFamily:mono, fontSize:10, color:'var(--muted)', textAlign:'right' }}>{pruneMessage}</div>}
         </div>
       )}
     </div>
@@ -1134,6 +1150,83 @@ function ConnectivityTab({ device, row }) {
 
 // ─── Device detail modal ──────────────────────────────────────────────────────
 
+class DetailTabErrorBoundary extends React.Component {
+  constructor(props) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error) {
+    return { error };
+  }
+
+  componentDidCatch(error) {
+    console.error(`Device ${this.props.label} tab failed to render`, error);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <Panel label={`${this.props.label} unavailable`}>
+          <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--error)', lineHeight: 1.6 }}>
+            This tab failed to render. Choose another tab or retry.
+          </div>
+          <div style={{ marginTop: 14 }}>
+            <Pill onClick={() => this.setState({ error: null })}>Retry</Pill>
+          </div>
+        </Panel>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+function TestAudioTab({ device, inputRef, file, running, result, onFileChange, onRun }) {
+  const mono = "'DM Mono',monospace";
+  const capable = (device.capabilities || []).includes('test_audio');
+  return (
+    <div style={{ maxWidth:620 }}>
+      <Panel label="Audio query test">
+        <div style={{ fontFamily:mono, fontSize:10, color:'var(--muted)', lineHeight:1.7, marginBottom:18 }}>
+          Upload spoken audio for this Echo to process as if it heard a real query.
+          The controller converts it to 16 kHz mono WAV, writes it temporarily to
+          the device, and the device streams it through the normal microphone path.
+          The spoken response plays out loud here. The temporary file is deleted
+          after the response finishes playing.
+        </div>
+        <input ref={inputRef} type="file" accept="audio/*,.wav,.mp3,.flac,.m4a,.ogg"
+          style={{ display:'none' }} onChange={onFileChange}/>
+        <div style={{ display:'flex', alignItems:'center', gap:10, flexWrap:'wrap' }}>
+          <Pill onClick={() => inputRef.current?.click()} disabled={running}>
+            {file ? 'Change audio' : 'Choose audio'}
+          </Pill>
+          {file && (
+            <span style={{ fontFamily:mono, fontSize:10, color:'var(--text2)', flex:1, minWidth:140, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>
+              {file.name} · {(file.size/1024).toFixed(0)} KB
+            </span>
+          )}
+          <Pill accent onClick={onRun}
+            disabled={!file || running || !device.connected || !capable || device.muted}>
+            {running ? 'Preparing…' : 'Run query'}
+          </Pill>
+        </div>
+        {!device.connected && <div style={{ fontFamily:mono, fontSize:10, color:'var(--warn)', marginTop:12 }}>Device offline.</div>}
+        {device.muted && <div style={{ fontFamily:mono, fontSize:10, color:'var(--warn)', marginTop:12 }}>Unmute the device before running a query.</div>}
+        {device.connected && !capable && (
+          <div style={{ fontFamily:mono, fontSize:10, color:'var(--warn)', marginTop:12 }}>
+            This firmware does not support device-side test audio. Update it first.
+          </div>
+        )}
+        {result && (
+          <div style={{ fontFamily:mono, fontSize:10, color:result.ok ? 'var(--ok)' : 'var(--error)', marginTop:14, lineHeight:1.6 }}>
+            {result.text}
+          </div>
+        )}
+      </Panel>
+    </div>
+  );
+}
+
 function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDeviceConfigChange }) {
   const [tab, setTab] = useState('status');
   // Seed from the EFFECTIVE config, not the raw stored one — see
@@ -1151,10 +1244,6 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const [pushing, setPushing] = useState(false);
   const [release, setRelease] = useState(null);
   const [checkingRelease, setCheckingRelease] = useState(false);
-  // Whether the background release poll runs (#159). Defaults TRUE so a
-  // failed status fetch shows nothing rather than claiming checks are off —
-  // a wrong "disabled" notice sends someone to change a setting that is
-  // already correct.
   const [autoChecks, setAutoChecks] = useState(true);
   const [approveLabel, setApproveLabel] = useState(device.label || '');
   const [approving, setApproving] = useState(false);
@@ -1177,12 +1266,15 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const [assetLog, setAssetLog]       = useState([]);
   const [assetResult, setAssetResult] = useState(null);
   const fileInputRef = useRef(null);
-  const [turns, setTurns] = useState([]);
+  const [testAudioFile, setTestAudioFile] = useState(null);
+  const [testAudioRunning, setTestAudioRunning] = useState(false);
+  const [testAudioResult, setTestAudioResult] = useState(null);
+  const testAudioInputRef = useRef(null);
   const state = deviceState(device);
   const needsUpdate = device.firmware_ver && release?.version && device.firmware_ver !== release.version;
 
   const TABS = device.approved
-    ? (isAdmin ? ['status', 'activity', 'config', 'console', 'updates', 'logs'] : ['status', 'activity', 'config', 'logs'])
+    ? (isAdmin ? ['status', 'test', 'config', 'console', 'updates', 'logs'] : ['status', 'config', 'logs'])
     : ['approve'];
 
   useEffect(() => {
@@ -1194,8 +1286,6 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     }
     if (tab === 'updates') {
       API.get('/api/releases/latest').then(setRelease).catch(() => {});
-      // Same tab-entry pattern as the asset state below: this changes only
-      // when someone edits system config, so polling it would be waste.
       API.get('/api/system/status')
         .then(s => setAutoChecks(s.update_checks_enabled !== false))
         .catch(() => {});
@@ -1226,19 +1316,6 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     return () => { live = false; clearInterval(iv); };
   }, [tab, device.device_id]);
 
-  // Turn observability — fetch on Activity tab entry, refresh every 10s while
-  // the tab is open (turn history is in-memory on the controller).
-  useEffect(() => {
-    if (tab !== 'activity') return;
-    let live = true;
-    const load = () => API.get(`/api/devices/${device.device_id}/turns`)
-      .then(t => { if (live) setTurns(Array.isArray(t) ? t : []); })
-      .catch(() => {});
-    load();
-    const iv = setInterval(load, 10000);
-    return () => { live = false; clearInterval(iv); };
-  }, [tab, device.device_id]);
-
   function setConf(k, v) { setConfig(c => ({ ...c, [k]: v })); setDirty(true); }
 
   async function doCheckRelease() {
@@ -1255,6 +1332,26 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
       alert(e.error || 'Release check failed');
     }
     setCheckingRelease(false);
+  }
+
+  async function runTestAudio() {
+    if (!testAudioFile) return;
+    setTestAudioRunning(true);
+    setTestAudioResult({ ok:true, text:'Converting and transferring audio…' });
+    try {
+      await API.upload(
+        `/api/devices/${device.device_id}/test_audio`, testAudioFile, 'audio'
+      );
+      await API.post(`/api/devices/${device.device_id}/test_turn`, {});
+      setTestAudioResult({
+        ok:true,
+        text:'Query started. The response will play through this Echo; the turn appears in Activity.',
+      });
+    } catch (e) {
+      setTestAudioResult({ ok:false, text:e.error || e.message || 'Audio query failed.' });
+    } finally {
+      setTestAudioRunning(false);
+    }
   }
 
   async function pushConfig() {
@@ -1395,22 +1492,6 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
     }
   }
 
-  // priorVersion is what the device was running BEFORE this push, and it is
-  // what makes "rolled back" a claim rather than a guess. The old code
-  // inferred a rollback from `firmware_ver !== targetVersion` alone, which is
-  // only sound when the target is known to be exactly what the device will
-  // report — true for a release, false for a local build.
-  //
-  // It was false in the way that matters: _extract_binary_version knew only
-  // the old date-based scheme, so a clean-tree local build got a synthetic
-  // `local-<timestamp>` label that the device could never report back. Every
-  // such deploy therefore succeeded and announced "auto-rolled back", which
-  // is worse than announcing nothing — the natural response to being told a
-  // deploy reverted is to stop using the feature.
-  //
-  // With the prior version in hand the three outcomes are distinguishable:
-  // back on the target is success, back on what it had before is a genuine
-  // rollback, anything else is unexpected and says so rather than guessing.
   function _pollReconnect(targetVersion, priorVersion) {
     let attempts = 0;
     let wasDisconnected = false;
@@ -1434,23 +1515,12 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
           setPushLog(l => [...l, `✗ ${d.update_error}`]);
           clearInterval(poll); setPushing(false);
         } else if (wasDisconnected && d?.connected && d?.firmware_ver && d.firmware_ver !== targetVersion) {
-          // Back on what it was running before = the supervisor flipped the
-          // symlink after three fast exits. That is the only case that
-          // earns the word "rolled back".
           const rolledBack = priorVersion && d.firmware_ver === priorVersion;
           setPushLog(l => [...l, rolledBack
             ? `⚠ Device reconnected on ${d.firmware_ver} — auto-rolled back`
-            // Not the target and not the old one either. Most often the
-            // deploy WORKED and the label was wrong: a binary whose version
-            // the controller could not read is labelled local-<timestamp>,
-            // which the device will never report. Say what was seen and what
-            // was expected, and let the reader judge — asserting a rollback
-            // here is what made a successful deploy look like a failure.
             : `Device reconnected on ${d.firmware_ver} (expected ${targetVersion})`
               + (String(targetVersion).startsWith('local-')
-                  ? ' — the label was generated because the binary carried no'
-                    + ' readable version; if the version above is the build you'
-                    + ' pushed, this succeeded'
+                  ? ' — the binary carried no readable version label; if this is the build you pushed, it succeeded'
                   : '')]);
           clearInterval(poll); setPushing(false);
         } else if (attempts > 40) {
@@ -1674,7 +1744,6 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     })())}
                     {row('Firmware', device.firmware_ver || '—')}
                     {row('WiFi network', s?.wifiSsid || '—')}
-                    {row('ESPHome port', device.esphome_port != null ? String(device.esphome_port) : '—')}
                     {/* One row, not two. "Connected: Yes" plus "Last seen"
                         was redundant in both directions — while connected the
                         last-seen time says nothing, and while offline the
@@ -1684,7 +1753,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                          device.connected ? 'Online' : `Offline · last seen ${relTime(device.last_seen)}`,
                          device.connected ? 'var(--ok)' : 'var(--warn)')}
                     {row('Volume', device.volume != null
-                         ? `${Math.round(device.volume * 100)}%`
+                         ? `Level ${device.volumeLevel ?? '—'} / 10`
                          : (s?.volumePct != null ? `${s.volumePct}%` : '—'))}
                     {row('Link', device.connected ? (device.linkTls ? 'wss (TLS)' : 'plain ws') : '—',
                          device.connected ? (device.linkTls ? 'var(--ok)' : 'var(--warn)') : undefined)}
@@ -1756,12 +1825,14 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     {!s && <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', marginTop:8 }}>waiting for device stats…</div>}
                   </Panel>
                 </div>
-                {device.bleProxy && (() => {
-                  const b  = s?.ble || null;          // device-side scanner stats
-                  const bp = device.bleProxy;         // controller-side proxy state
-                  const haState = bp.haSubscribed ? 'Streaming to HA'
-                    : bp.haConnected ? 'HA connected (not subscribed)'
-                    : bp.listening ? 'Waiting for HA' : 'Port down (device offline)';
+                {device.bleProxy?.enabled && (() => {
+                  // Device-side scanner stats only — there is no per-device
+                  // ESPHome listener/HA-subscription state to report anymore.
+                  // Adverts route to HA through the HACS integration's own
+                  // Bluetooth remote scanner, which the controller has no
+                  // visibility into (no reverse channel for "is HA
+                  // listening").
+                  const b = s?.ble || null;
                   return (
                     <Panel label="Bluetooth proxy">
                       <div className="em-grid2" style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:'0 24px' }}>
@@ -1769,12 +1840,9 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                           {row('Scanner', b ? (b.scanning ? 'Scanning' : 'Stopped') : '—', b?.scanning ? 'var(--ok)' : undefined)}
                           {row('Adverts seen', b ? String(b.advertsSeen ?? 0) : '—')}
                           {row('Nearby devices (5 min)', b ? String(b.uniqueAddrs ?? 0) : '—')}
-                          {row('BT address', b?.bdAddr || '—')}
                         </div>
                         <div>
-                          {row('Home Assistant', haState, bp.haSubscribed ? 'var(--ok)' : undefined)}
-                          {row('Forwarded to HA', String(bp.advertsForwarded ?? 0))}
-                          {row('ESPHome port', String(bp.port))}
+                          {row('BT address', b?.bdAddr || '—')}
                           {row('HCI errors / restarts', b ? `${b.hciErrors ?? 0} / ${b.restarts ?? 0}` : '—')}
                         </div>
                       </div>
@@ -1785,28 +1853,26 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
             );
           })()}
 
-          {/* ACTIVITY — voice-turn observability; its own tab (genuinely
-              useful, was cramped at the bottom of Status). */}
-          {tab === 'activity' && (() => {
-            const cfgEff = effectiveConfig(globalConfig, device);
-            const wwLabel = wwModelLabel(cfgEff.owwModel);
-            return (
-              <div style={{ minHeight:'100%', display:'flex', flexDirection:'column' }}>
-                <Panel label={`Voice activity — ${wwLabel} @ ${cfgEff.owwThreshold != null ? cfgEff.owwThreshold.toFixed(2) : '—'}`} style={{ flex:1 }}>
-                  <TurnObservability
-                    turns={turns}
-                    deviceId={device.device_id}
-                    deviceLabel={device.label}
-                    recordingsOn={cfgEff.saveUtterances}
-                    nearMisses={device.owwNearMisses}
-                    stateLabel={state.label.toUpperCase()}
-                    stateColor={state.dot}
-                    isAdmin={isAdmin}
-                  />
-                </Panel>
-              </div>
-            );
-          })()}
+          {/* TEST — admin-only E2E query injection. The file is normalized on
+              the controller, transferred temporarily to this Echo, then sent
+              back over the ordinary mic data plane. Everything after that —
+              HA pipeline, TTS, EQ and speaker playback — is production code. */}
+          {tab === 'test' && (
+            <DetailTabErrorBoundary key="test" label="Audio query test">
+              <TestAudioTab
+                device={device}
+                inputRef={testAudioInputRef}
+                file={testAudioFile}
+                running={testAudioRunning}
+                result={testAudioResult}
+                onFileChange={e => {
+                  setTestAudioFile(e.target.files[0] || null);
+                  setTestAudioResult(null);
+                }}
+                onRun={runTestAudio}
+              />
+            </DetailTabErrorBoundary>
+          )}
 
           {/* CONFIG */}
           {tab === 'config' && (
@@ -1905,20 +1971,9 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                     <span style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color: needsUpdate ? 'var(--warn)' : 'var(--ok)' }}>
                       {release?.version ? (needsUpdate ? `Update ${release.version} available` : 'Up to date') : 'No release info'}
                     </span>
-                    {/* #159: with the background poll off, "No release info"
-                        and a GitHub outage look identical from here — and
-                        this tab is where someone comes to find out, so the
-                        blank has to name its own cause or it reads as a
-                        fault. Shown whatever the release state, because the
-                        stale-by-design case ("Up to date", last checked in
-                        March) is the one that misleads hardest. Inline
-                        rather than a site-wide banner: it is a setting
-                        somebody chose on purpose, and a persistent warning
-                        for a deliberate choice trains people to ignore
-                        warnings. */}
                     {!autoChecks && (
                       <span style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color:'var(--lcd-dim)' }}
-                            title="update_check_interval is 0 — the controller makes no background connection to GitHub. Check now still works.">
+                            title="update_check_interval is 0: the controller makes no background GitHub requests. Check now still works.">
                         Auto-checks off
                       </span>
                     )}
@@ -2513,12 +2568,7 @@ const _STEP_MODE = {
 
 // TWRP is checked first: its banner is "omni_biscuit", which also contains
 // "biscuit", so an Android-first test would call every TWRP device Android.
-function _bannerMode(banner) {
-  const b = (banner || '').toLowerCase();
-  if (b.includes('omni') || b.includes('twrp') || b.includes('recovery')) return 'twrp';
-  if (b.includes('csm') || b.includes('biscuit')) return 'android';
-  return 'unknown';
-}
+const _bannerMode = DashboardLogic.bannerMode;
 
 const _MODE_NAME = { twrp: 'TWRP recovery', android: 'Android' };
 
@@ -4198,11 +4248,37 @@ function ProvisionWizard({ token, onClose, knownDevices }) {
     const resp2 = await fetch(ingressPath('/api/provision/start_script'), { headers: { Authorization: `Bearer ${token}` } });
     if (!resp2.ok) throw new Error(`Controller returned ${resp2.status}`);
     const script = await resp2.text();
+    const scriptBytes = new TextEncoder().encode(script);
+    // Defence in depth against the exact failure this whole block exists
+    // to catch: an empty fetch would otherwise sail through the byte-count
+    // check below (0 installed === 0 expected).
+    if (scriptBytes.length === 0) {
+      throw new Error('Controller returned an empty startup script — refusing to install it. Check device_payloads/start_server.sh on the controller.');
+    }
     // Same "Text file busy" risk as wificfg.sh — push + immediate chmod/exec
     // can race with the cat process. start_server.sh isn't executed
     // immediately here (only copied), so push() is safe for this one.
-    await c.push('/sdcard/start_server.sh', new TextEncoder().encode(script));
-    await c.shell("su -c 'cp /sdcard/start_server.sh /data/local/bin/start_server.sh && chmod 755 /data/local/bin/start_server.sh'");
+    await c.push('/sdcard/start_server.sh', scriptBytes);
+    // Each step checked individually rather than && chained, and the
+    // result VERIFIED — the same lesson the binary install above already
+    // encodes, learned the hard way here too: a silent cp/chmod failure
+    // (observed on hardware: chmod on a just-created file returning
+    // "Permission denied" despite landing the correct mode) used to leave
+    // /data/local/bin/start_server.sh at 0 bytes with nothing logging an
+    // error. An empty script under Android's `late_start` service exits
+    // instantly, so init just respawns it forever — the device never gets
+    // past the native boot LED animation and never registers, and nothing
+    // in the wizard's own log said why (found 2026-08-18, on a device that
+    // had gone through exactly this step).
+    const cpScriptOut = (await c.shell("su -c 'cp /sdcard/start_server.sh /data/local/bin/start_server.sh' 2>&1")).trim();
+    if (cpScriptOut) addLog(`  → cp: ${cpScriptOut}`);
+    const chmodScriptOut = (await c.shell("su -c 'chmod 755 /data/local/bin/start_server.sh' 2>&1")).trim();
+    if (chmodScriptOut) addLog(`  → chmod: ${chmodScriptOut}`);
+    const installedScript = await c.pull('/data/local/bin/start_server.sh');
+    if (installedScript.length !== scriptBytes.length) {
+      throw new Error(`Startup script verification failed: /data/local/bin/start_server.sh is ${installedScript.length.toLocaleString()} bytes on device, expected ${scriptBytes.length.toLocaleString()}. A device left with an empty or truncated start_server.sh boots into Android's native LED animation forever and never registers with the controller — check free space on /data with "su -c df" and retry this step before rebooting.`);
+    }
+    addLog(`Verified: start_server.sh (${installedScript.length.toLocaleString()} bytes, matches fetched script).`, 'ok');
     addLog('EchoMuse installed.', 'ok');
 
     // Device-link TLS credentials — pushed pre-first-contact so the very
@@ -4878,11 +4954,11 @@ const STAGE_MONO = "'DM Mono',monospace";
 // control sitting under a toggle that does not govern it would look fine and
 // be silently wrong.
 const CONFIG_SECTIONS = {
-  "playback": ["eqBands", "eqLoudness", "duckDb", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb"],
-  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice"],
-  "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "nsAsr", "saveUtterances"],
+  "playback": ["eqBands", "eqLoudness", "ttsGainDb", "duckDb", "limiterEnabled", "limiterRelease", "bassGuardEnabled", "bassGuardDb"],
+  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "saveWakeCaptures", "wakeCaptureSec", "wakeNearMissFloor"],
+  "microphones": ["afeMicGainDb", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
-  "advanced": ["agcEnabled", "vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs"],
+  "advanced": ["vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs"],
   "bluetooth": ["bleProxyEnabled"]
 };
 
@@ -4907,14 +4983,7 @@ const STATE_KEYS = ['startupVolume'];
 // every stage claims to be following the fleet (observed on Office, which
 // displayed hey_rhasspy/standard while actually running hey_mycroft/malevolent).
 function effectiveConfig(globalConfig, device) {
-  const secs = device.config_sections ?? [];
-  const own  = device.config || {};
-  const out  = { ...(globalConfig || {}) };
-  Object.keys(own).forEach(k => {
-    const sec = KEY_SECTION[k];
-    if ((sec && secs.includes(sec)) || STATE_KEYS.includes(k)) out[k] = own[k];
-  });
-  return out;
+  return DashboardLogic.effectiveConfig(globalConfig, device, KEY_SECTION, STATE_KEYS);
 }
 
 // ScopeToggle — per-stage Fleet/Device switch. Shown only on a device's
@@ -4998,11 +5067,6 @@ function StageAdvanced({ open, onToggle, disabledStyle, children }) {
 // Mirrors em_shadow.normalise_mode: an unrecognised stored value renders as
 // "Controller" rather than leaving every segment unselected, which would look
 // like a control that had lost its value.
-function onDeviceMode(config) {
-  const v = String(config.owwOnDevice ?? 'off').toLowerCase();
-  return ['off', 'shadow', 'on'].includes(v) ? v : 'off';
-}
-
 function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                             shadowCapable = true, mixCapable = true,
                             holdCapable = true, triggerCapable = true }) {
@@ -5034,27 +5098,6 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
   const secStyle = id => (disabled || !isLocal(id))
     ? { opacity: 0.45, pointerEvents: 'none' }
     : {};
-
-  // Derive current mic preset from beamAngle
-  const angle = config.beamAngle ?? -1;
-  const currentPreset = angle === -1 ? 'omni' : (angle === 90 ? 'front' : angle === 270 ? 'rear' : 'omni');
-
-  const PRESETS = {
-    // omni = centre mic (ch6) for everything, beamforming genuinely off.
-    // beamformingEnabled:true with beamAngle -1 is AUTO mode (onset-ratio
-    // perimeter mic selection at turn start), which is not what this
-    // preset's label or polar plot promise.
-    omni:  { beamAngle: -1,  beamformingEnabled: false, activeMics: ['mk1','mk2','mk3','mk4','mk5','mk6'], patternType: 'omni'  },
-    front: { beamAngle: 90,  beamformingEnabled: true,  activeMics: ['mk3','mk4','mk5','mk6'],             patternType: 'front' },
-    rear:  { beamAngle: 270, beamformingEnabled: true,  activeMics: ['mk1','mk2','mk3','mk6'],             patternType: 'rear'  },
-  };
-
-  function selectPreset(key) {
-    if (disabled) return;
-    const p = PRESETS[key];
-    onChange('beamAngle', p.beamAngle);
-    onChange('beamformingEnabled', p.beamformingEnabled);
-  }
 
   const WW_MODELS = [
     { value: 'hey_jarvis_v0.1',   label: 'Hey Jarvis'   },
@@ -5098,10 +5141,9 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
     ? { name: wwModelLabel(config.owwModel), file: config.owwModel.split('/').pop(), path: config.owwModel, missing: true }
     : null;
 
-  // Sensitivity: map owwThreshold (0.1–0.9) to 1–9 int, inverted (low threshold = eager)
-  const sensitivityToThreshold = v => Number((1.0 - (v - 1) / 8 * 0.8).toFixed(2));
-  const thresholdToSensitivity = t => Math.round((1.0 - t) / 0.8 * 8) + 1;
-  const sensitivity = thresholdToSensitivity(config.owwThreshold ?? 0.5);
+  const threshold = Number(Number(config.owwThreshold ?? 0.5).toFixed(2));
+  const nearMissFloor = Number(Number(config.wakeNearMissFloor ?? 0.05).toFixed(2));
+  const floorConflict = nearMissFloor >= threshold;
 
   const bands = config.eqBands ?? [0,0,0,0,0,0,0,0];
   const RING_SCENES = [
@@ -5155,27 +5197,30 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
           </div>
           <div>
             <div style={inputStyle}>
-              <Toggle label="Speech boost" sub="presence boost for voice" value={config.eqLoudness ?? false} onChange={v => set('eqLoudness', v)}/>
+              <Slider label="Speech boost" sub="additional gain applied to TTS before the speaker limiter"
+                value={config.ttsGainDb ?? 0} min={0} max={12} step={0.5} unit="dB"
+                disabled={disabled} onChange={v => set('ttsGainDb', v)}/>
             </div>
-            {/* Speaker protection: ONE toggle for the bass guard, and the
-                limiter is not offered at all.
+            {/* Speaker protection: ONE toggle for the bass guard here, plus
+                the limiter CEILING in the advanced panel below. The limiter's
+                enable and release stay API-only.
 
-                These were four controls until 2026-08-20, and none of them
-                can be judged by ear. The guard and the limiter cancel each
-                other's most obvious cue — guard on/off is 7.7dB of overall
-                level at a flat EQ and 0.2dB with the bands boosted, because
-                the limiter gives back exactly what the guard takes. The depth
-                moves the overall level 0.14dB across its ENTIRE range. And
-                the guard mostly removes content this driver cannot radiate,
-                so what remains is a second-order cleanliness gain.
+                These were four controls until 2026-08-20, and most cannot be
+                judged by ear. The guard and the limiter cancel each other's
+                most obvious cue — guard on/off is 7.7dB of overall level at a
+                flat EQ and 0.2dB with the bands boosted, because the limiter
+                gives back exactly what the guard takes. The depth moves the
+                overall level 0.14dB across its ENTIRE range. And the guard
+                mostly removes content this driver cannot radiate, so what
+                remains is a second-order cleanliness gain.
 
-                Four controls whose individual effects range from "large" to
-                "nothing" depending on where the other three sit is not a
-                tuning surface; it is a way to conclude the feature is broken,
-                which is what happened. The limiter in particular must stay on
-                — it is what stops the EQ hard-clipping what it boosts (#231),
-                and that is not a preference. Every key still exists and is
-                settable through the API. */}
+                The limiter THRESHOLD is the exception and is exposed below: it
+                sets the peak ceiling, so a low value audibly squashes an EQ or
+                bass boost (a fleet left at -10dBFS is exactly that) and is a
+                genuine taste call. The limiter enable in particular must stay
+                on — it is what stops the EQ hard-clipping what it boosts
+                (#231), and that is not a preference. Every key still exists
+                and is settable through the API. */}
             <div style={inputStyle}>
               <Slider label="Duck depth" disabled={!mixCapable}
                 sub={mixCapable
@@ -5210,6 +5255,12 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             Removing them is what keeps the midrange clean. The change is
             subtle by design and there is no reason to turn it off.
           </div>
+          {/* The limiter's on/off and release stay API-only (see the note in
+              the main Playback pane): the limiter must stay ON. The CEILING is
+              exposed because it is the one limiter parameter that is a taste
+              call — it sets how loud the output is allowed to get before peaks
+              are held, so a low ceiling squashes an EQ/bass boost and a high
+              one lets it through at the cost of headroom. Judged by ear. */}
         </StageAdvanced>
       </Stage>
 
@@ -5269,19 +5320,42 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
           </div>
           <div>
             <div style={inputStyle}>
-              <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--text2)', marginBottom: 6 }}>Sensitivity</div>
-              <input type="range" min={1} max={9} step={1} value={sensitivity}
-                style={{ width: '100%' }}
-                onChange={e => set('owwThreshold', sensitivityToThreshold(Number(e.target.value)))}/>
-              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 4 }}>
-                <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)' }}>Precise</span>
-                <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)' }}>Eager</span>
+              <Slider
+                label="Sensitivity"
+                sub="confidence score required to activate (0.00 = eager, 1.00 = precise)"
+                value={threshold}
+                min={0.01}
+                max={1.00}
+                step={0.01}
+                formatValue={v => v.toFixed(2)}
+                onChange={v => set('owwThreshold', Number(v.toFixed(2)))}
+              />
+              <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: -14, marginBottom: 16 }}>
+                <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)' }}>0.00 (Eager)</span>
+                <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)' }}>1.00 (Precise)</span>
               </div>
             </div>
-            <div style={{ marginTop: 16, ...inputStyle }}>
+            <div style={{ marginTop: 8, ...inputStyle }}>
               <Toggle label="Speex denoise" sub="cleans audio before scoring — try in noisy rooms" value={config.owwSpeexNs ?? false} onChange={v => set('owwSpeexNs', v)}/>
-              <Toggle label="Barge-in" sub="wake word interrupts playback — enable AEC first" value={config.bargeInEnabled ?? false} onChange={v => set('bargeInEnabled', v)}/>
-              <Slider label="Barge threshold" sub="wake confidence needed during playback — raise it if a response cuts itself short" value={config.bargeInThreshold ?? 0.25} min={0.05} max={0.9} step={0.05} onChange={v => set('bargeInThreshold', v)}/>
+              <Toggle label="Barge-in" sub="wake word interrupts playback — Amazon AFE supplies the echo-cancelled capture path" value={config.bargeInEnabled ?? false} onChange={v => set('bargeInEnabled', v)}/>
+              <Slider label="Barge threshold" sub="wake confidence needed during playback — raise it if a response cuts itself short" value={config.bargeInThreshold ?? 0.05} min={0.05} max={0.9} step={0.05} formatValue={v => v.toFixed(2)} onChange={v => set('bargeInThreshold', v)}/>
+              <Slider label="Near-miss floor" sub="minimum score to count as a near-miss and log/capture — raise if picking up too much background speech" value={nearMissFloor} min={0.01} max={0.95} step={0.01} formatValue={v => v.toFixed(2)} onChange={v => set('wakeNearMissFloor', Number(v.toFixed(2)))}/>
+              {floorConflict && (
+                <div style={{
+                  fontFamily: mono,
+                  fontSize: 10,
+                  color: 'var(--error)',
+                  marginTop: -10,
+                  marginBottom: 16,
+                  padding: '6px 10px',
+                  borderRadius: 6,
+                  background: 'rgba(210, 45, 0, 0.12)',
+                  border: '1px solid var(--error)',
+                  lineHeight: 1.5,
+                }}>
+                  ⚠️ Near-miss floor ({nearMissFloor.toFixed(2)}) is ≥ activation sensitivity ({threshold.toFixed(2)}). Near-misses will never trigger or record. Lower the near-miss floor or raise the sensitivity threshold.
+                </div>
+              )}
               <Slider label="Arbitration window" sub="ms that the first Echo to hear you silences the others — no added delay; 0 disables" value={config.wakeArbitrationMs ?? 700} min={0} max={2000} step={50} unit="ms" onChange={v => set('wakeArbitrationMs', v)}/>
               {/* Three modes, so a select rather than a toggle. Each option is
                   offered only when the device says it can do it — capability,
@@ -5314,6 +5388,10 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                   Needs the wake word runtime installed on this Echo (Updates tab) — costs ~0.4 of a core while it runs.
                 </div>
               )}
+              <Toggle label="Save wake captures" sub="keeps short clips of activations and near-misses to label and retrain — writes speech to disk; review under Settings → Training" value={config.saveWakeCaptures ?? false} onChange={v => set('saveWakeCaptures', v)}/>
+              {(config.saveWakeCaptures ?? false) && (
+                <Slider label="Capture length" sub="seconds of audio before each detection to keep" value={config.wakeCaptureSec ?? 2.0} min={0.5} max={5.0} step={0.5} unit="s" onChange={v => set('wakeCaptureSec', v)}/>
+              )}
             </div>
           </div>
         </div>
@@ -5322,44 +5400,11 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
       {/* 03 MICROPHONES */}
       <Stage n="03" title="Microphones"
         chips={<ScopeChip tone="device">Device</ScopeChip>}
-        desc="Capture from the 7-mic array. Presets steer which perimeter mic is used during voice turns — wake-word listening always uses the centre mic. Gain here is the only gain in the wake path: it sets the level everything downstream hears."
+        desc="Amazon AFE provides the processed microphone stream. AFE mic gain is applied after AFE processing and before VAD, wake-word scoring, recordings, and controller transmission."
         scope={scopeEl('microphones')} dim={secStyle('microphones')}>
-        <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: 20, alignItems: 'center' }}>
-          <DeviceDiagram
-            activeMics={PRESETS[currentPreset].activeMics}
-            patternType={PRESETS[currentPreset].patternType}
-          />
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6, ...inputStyle }}>
-            {Object.entries(PRESETS).map(([key, p]) => (
-              <div key={key} onClick={() => selectPreset(key)} style={{
-                background: currentPreset === key
-                  ? 'linear-gradient(160deg,var(--accent-tint),var(--accent-line))'
-                  : 'linear-gradient(160deg,var(--raised),var(--surface))',
-                border: `1px solid ${currentPreset === key ? 'var(--accent)' : 'var(--border-soft)'}`,
-                borderRadius: 10, padding: '9px 6px 8px',
-                cursor: disabled ? 'default' : 'pointer',
-                display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6,
-                transition: 'border-color 0.15s, background 0.15s',
-              }}>
-                <DeviceDiagramMini activeMics={p.activeMics} patternType={p.patternType}/>
-                <div style={{ fontFamily: mono, fontSize: 10, color: 'var(--text2)' }}>
-                  {key.charAt(0).toUpperCase() + key.slice(1)}
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
         <StageAdvanced open={advMics} onToggle={() => setAdvMics(o => !o)} disabledStyle={inputStyle}>
           <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '4px 24px' }}>
-            <Slider label="MICPGA" sub="analog gain, before the ADC" value={config.adcMicpga ?? 40} min={0} max={59} onChange={v => set('adcMicpga', v)}/>
-            <Slider label="Digital gain" sub="ADC digital gain — affects wake + turns" value={config.adcDigitalGain ?? 88} min={0} max={100} onChange={v => set('adcDigitalGain', v)}/>
-            <Slider label="Mic gain" sub="fixed gain on the 24-bit capture, pre-16-bit stream" value={config.micGainDb ?? 24} min={0} max={42} unit="dB" onChange={v => set('micGainDb', v)}/>
-            <Slider label="Beam angle" sub="-1 = auto (onset-ratio selection)" value={config.beamAngle ?? -1} min={-1} max={359} step={1} onChange={v => set('beamAngle', v)}/>
-            <Toggle label="Beamforming" sub="perimeter mic lock during turns" value={config.beamformingEnabled ?? false} onChange={v => set('beamformingEnabled', v)}/>
-            <Toggle label="Echo cancel (AEC)" sub="subtracts the device's own playback — wake + turns" value={config.aecEnabled ?? false} onChange={v => set('aecEnabled', v)}/>
-            <Toggle label="Noise suppression" sub="DTLN denoise on speech-to-text audio only — helps fans/hum, not TV speech" value={config.nsAsr ?? false} onChange={v => set('nsAsr', v)}/>
-            <Slider label="AEC delay" sub="playback write-to-ear latency compensation" value={config.aecDelayMs ?? 250} min={0} max={1000} step={10} unit="ms" onChange={v => set('aecDelayMs', v)}/>
-            <Slider label="AEC tail" sub="filter length — residual delay error + room reverb" value={config.aecTailMs ?? 300} min={50} max={500} step={10} unit="ms" onChange={v => set('aecTailMs', v)}/>
+            <Slider label="AFE mic gain" sub="post-AFE digital gain before VAD, wake-word scoring, recordings, and controller transmission; clipping is counted in device diagnostics" value={config.afeMicGainDb ?? 0} min={0} max={24} unit="dB" onChange={v => set('afeMicGainDb', v)}/>
             <Toggle label="Save utterances" sub="keeps the last 10 turns' mic audio on the server — play or download from Activity" value={config.saveUtterances ?? false} onChange={v => set('saveUtterances', v)}/>
           </div>
         </StageAdvanced>
@@ -5467,10 +5512,6 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             onChange={v => set('buttonSingleTapEvent', v)}/>
           <Slider label="Multi-tap window" sub="0 = off. Coalesces quick taps into double/triple, at the cost of delaying every tap by this much. Needs 'Tap sends an event'" value={config.buttonMultiTapMs ?? 0} min={0} max={600} step={50} unit="ms" disabled={!(holdCapable && (config.buttonSingleTapEvent ?? false))} onChange={v => set('buttonMultiTapMs', v)}/>
         </div>
-        {subHeader('Turn processing')}
-        <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
-          <Toggle label="Auto gain (AGC)" sub="levels button-turn speech; never the wake stream" value={config.agcEnabled ?? true} onChange={v => set('agcEnabled', v)}/>
-        </div>
         {subHeader('Speech gate')}
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '4px 20px', ...inputStyle }}>
           <Slider label="Threshold" sub="RMS above this = speech (pre-gain units)" value={config.vadThreshold ?? 0.001} min={0.0001} max={0.02} step={0.0001} onChange={v => set('vadThreshold', v)}/>
@@ -5482,7 +5523,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
       {/* 06 BLUETOOTH */}
       <Stage n="06" title="Bluetooth"
         chips={<><ScopeChip tone="device">Device</ScopeChip><ScopeChip tone="controller">Controller</ScopeChip></>}
-        desc="Turns the device into a Home Assistant Bluetooth proxy: it passively listens for BLE advertisements (presence beacons, temperature sensors) and forwards them to HA as a separate ESPHome device — independent of the voice assistant. Enabling permanently switches the Dot's Bluetooth chip away from Android's stack (Bluetooth speaker pairing, never used by EchoMuse, stops being possible)."
+        desc="Turns the device into a Home Assistant Bluetooth proxy: it passively listens for BLE advertisements (presence beacons, temperature sensors) and forwards them to HA through the EchoMuse integration's own scanner — independent of the voice assistant. Enabling permanently switches the Dot's Bluetooth chip away from Android's stack (Bluetooth speaker pairing, never used by EchoMuse, stops being possible)."
         scope={scopeEl('bluetooth')} dim={secStyle('bluetooth')}>
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
           <Toggle label="Bluetooth proxy" sub="passive BLE scan → HA (Bermuda, BLE sensors)" value={config.bleProxyEnabled ?? false} onChange={v => set('bleProxyEnabled', v)}/>
@@ -5628,6 +5669,346 @@ function DeployAllModal({ release, devices, deployState, onStarted, onDismiss, o
 // ─── SettingsPanel ─────────────────────────────────────────────────────────────
 // Gear icon → modal with two tabs: Fleet Config and Account.
 
+// WakeTrainingTab — admin triage of captured wake activations / near-misses.
+//
+// Captures are grouped by wake-word model stem. The admin works the untriaged
+// queue one clip at a time: play it, then mark "Should have activated"
+// (positive) or "Should have ignored" (negative) — the label, not what
+// triggered the capture, decides which training bucket it lands in. A finished
+// dataset is downloaded as a ZIP and imported into oww_forge for retraining.
+//
+// The audio is recognisable speech, so every request is admin-only server-side;
+// clips are fetched via API.blob (Bearer-only, no cookie) as object URLs.
+function TrainingTrimEditor({ blob, audioRef, disabled, onTrim }) {
+  const canvasRef = useRef(null);
+  const [duration, setDuration] = useState(0);
+  const [range, setRange] = useState([0, 1000]);
+  const [playingSelection, setPlayingSelection] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    setDuration(0); setRange([0, 1000]); setPlayingSelection(false);
+    if (!blob) return;
+    const AudioCtx = window.AudioContext || window.webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    let closed = false;
+    const close = () => { if (!closed) { closed = true; ctx.close().catch(() => {}); } };
+    blob.arrayBuffer().then(data => ctx.decodeAudioData(data)).then(buffer => {
+      if (cancelled) return;
+      setDuration(buffer.duration);
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const scale = window.devicePixelRatio || 1;
+      const width = canvas.clientWidth || 560;
+      const height = 76;
+      canvas.width = width * scale; canvas.height = height * scale;
+      const g = canvas.getContext('2d');
+      g.scale(scale, scale);
+      g.clearRect(0, 0, width, height);
+      g.fillStyle = 'var(--sunken)'; g.fillRect(0, 0, width, height);
+      const samples = buffer.getChannelData(0);
+      const step = Math.max(1, Math.floor(samples.length / width));
+      g.strokeStyle = 'var(--accent)'; g.lineWidth = 1;
+      g.beginPath();
+      for (let x = 0; x < width; x++) {
+        let lo = 1, hi = -1;
+        for (let i = x * step; i < Math.min(samples.length, (x + 1) * step); i++) {
+          lo = Math.min(lo, samples[i]); hi = Math.max(hi, samples[i]);
+        }
+        g.moveTo(x, (1 + lo) * height / 2); g.lineTo(x, (1 + hi) * height / 2);
+      }
+      g.stroke();
+    }).catch(() => {}).finally(close);
+    return () => { cancelled = true; close(); };
+  }, [blob]);
+
+  useEffect(() => {
+    if (!duration || !onTrim) return;
+    onTrim({ start_ms: range[0] * duration / 1000, end_ms: range[1] * duration / 1000 });
+  }, [duration, range, onTrim]);
+
+  useEffect(() => {
+    const el = audioRef.current;
+    if (!el) return undefined;
+    const stop = () => {
+      if (playingSelection && el.currentTime >= range[1] * duration / 1000) {
+        el.pause(); setPlayingSelection(false);
+      }
+    };
+    el.addEventListener('timeupdate', stop);
+    return () => el.removeEventListener('timeupdate', stop);
+  }, [audioRef, duration, range, playingSelection]);
+
+  function setStart(value) {
+    setRange(([_, end]) => [Math.min(Number(value), end - 1), end]);
+  }
+  function setEnd(value) {
+    setRange(([start, _]) => [start, Math.max(Number(value), start + 1)]);
+  }
+  function playSelection() {
+    const el = audioRef.current;
+    if (!el || !duration) return;
+    el.currentTime = range[0] * duration / 1000;
+    setPlayingSelection(true);
+    el.play().catch(() => setPlayingSelection(false));
+  }
+
+  const start = duration ? range[0] * duration / 1000 : 0;
+  const end = duration ? range[1] * duration / 1000 : 0;
+  return (
+    <div style={{ marginTop: 14 }}>
+      <canvas ref={canvasRef} aria-label="Audio waveform"
+        style={{ width: '100%', height: 76, display: 'block', borderRadius: 4 }} />
+      <div style={{ marginTop: 8, display: 'grid', gap: 4 }}>
+        <label style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>
+          Start
+          <input type="range" min="0" max="999" value={range[0]} disabled={disabled}
+            aria-label="Trim start" onChange={e => setStart(e.target.value)}
+            style={{ width: '100%', display: 'block', accentColor: 'var(--accent)' }} />
+        </label>
+        <label style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)' }}>
+          End
+          <input type="range" min="1" max="1000" value={range[1]} disabled={disabled}
+            aria-label="Trim end" onChange={e => setEnd(e.target.value)}
+            style={{ width: '100%', display: 'block', accentColor: 'var(--accent)' }} />
+        </label>
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)' }}>
+        <span>Keep {start.toFixed(2)}s – {end.toFixed(2)}s ({Math.max(0, end - start).toFixed(2)}s)</span>
+        <button onClick={playSelection} disabled={disabled || !duration}
+          style={{ background: 'transparent', border: 0, color: 'var(--accent)', cursor: 'pointer', fontFamily: 'inherit', fontSize: 10 }}>
+          Play selection
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function WakeTrainingTab({ onBacklog }) {
+  const [models, setModels]   = useState(null);   // [{model, counts}]
+  const [model, setModel]     = useState(null);   // selected stem
+  const [queue, setQueue]     = useState([]);     // untriaged captures, newest first
+  const [idx, setIdx]         = useState(0);
+  const [audioUrl, setAudioUrl] = useState(null);
+  const [busy, setBusy]       = useState(false);
+  const [msg, setMsg]         = useState(null);
+  const [exporting, setExporting] = useState(false);
+  const [lastAction, setLastAction] = useState(null); // {name, label} — undo target
+  const [trim, setTrim] = useState(null);
+  const [audioBlob, setAudioBlob] = useState(null);
+  const urlRef = useRef(null);
+  const audioRef = useRef(null);
+
+  const refreshModels = useCallback(async (keep) => {
+    try {
+      const r = await API.get('/api/training_captures');
+      const list = r.models || [];
+      setModels(list);
+      // Surface the total untriaged backlog to the parent (tab badge), so the
+      // work-to-do is visible without opening this pane.
+      if (onBacklog) onBacklog(list.reduce((n, m) => n + (m.counts.untriaged || 0), 0));
+      const pick = keep && list.some(m => m.model === keep)
+        ? keep
+        : (list.find(m => m.counts.untriaged > 0)?.model || list[0]?.model || null);
+      setModel(pick);
+      return pick;
+    } catch (e) { setMsg({ ok: false, text: e.error || 'Failed to load captures' }); return null; }
+  }, [onBacklog]);
+
+  const loadQueue = useCallback(async (m) => {
+    if (!m) { setQueue([]); return; }
+    try {
+      const r = await API.get(`/api/training_captures/${encodeURIComponent(m)}/captures?bucket=untriaged`);
+      setQueue(r.captures || []);
+      setIdx(0);
+    } catch (e) { setMsg({ ok: false, text: e.error || 'Failed to load queue' }); }
+  }, []);
+
+  useEffect(() => { refreshModels(); }, [refreshModels]);
+  useEffect(() => { setLastAction(null); loadQueue(model); }, [model, loadQueue]);
+  // Keep idx in range as the queue shrinks under it.
+  useEffect(() => { setIdx(i => Math.min(i, Math.max(0, queue.length - 1))); }, [queue.length]);
+
+  // Fetch the current clip's audio as an object URL whenever it changes; revoke
+  // the previous one so blobs don't pile up in memory.
+  const current = queue[idx] || null;
+  useEffect(() => {
+    let cancelled = false;
+    if (urlRef.current) { URL.revokeObjectURL(urlRef.current); urlRef.current = null; }
+    setAudioUrl(null);
+    setAudioBlob(null); setTrim(null);
+    if (!model || !current) return;
+    API.blob(`/api/training_captures/${encodeURIComponent(model)}/audio/${encodeURIComponent(current.name)}`)
+       .then(b => { if (cancelled) return; const u = URL.createObjectURL(b); urlRef.current = u; setAudioBlob(b); setAudioUrl(u); })
+      .catch(() => {});
+    return () => { cancelled = true; };
+  }, [model, current]);
+  useEffect(() => () => { if (urlRef.current) URL.revokeObjectURL(urlRef.current); }, []);
+
+  async function act(label) {
+    if (!model || !current || busy) return;
+    const clip = current;
+    setBusy(true); setMsg(null);
+    try {
+      if (label === 'discard') {
+        await API.del(`/api/training_captures/${encodeURIComponent(model)}/${encodeURIComponent(clip.name)}`);
+        setLastAction(null); // a discarded clip is gone — not undoable
+      } else {
+         await API.post(`/api/training_captures/${encodeURIComponent(model)}/${encodeURIComponent(clip.name)}/label`, { label, ...(trim || {}) });
+        setLastAction({ name: clip.name, label });
+      }
+      // Drop it from the queue in place so the next clip slides into view
+      // without a full reload.
+      setQueue(q => q.filter(c => c.name !== clip.name));
+      refreshModels(model);
+    } catch (e) { setMsg({ ok: false, text: e.error || 'Action failed' }); }
+    setBusy(false);
+  }
+
+  // Undo the most recent label by sending that clip back to the queue. Only
+  // labels are undoable — a discard deleted the file. The generalised
+  // move-anywhere endpoint (label → untriaged) is what makes this possible.
+  async function undo() {
+    if (!lastAction || busy) return;
+    setBusy(true); setMsg(null);
+    try {
+      await API.post(`/api/training_captures/${encodeURIComponent(model)}/${encodeURIComponent(lastAction.name)}/label`, { label: 'untriaged' });
+      setLastAction(null);
+      await loadQueue(model);
+      refreshModels(model);
+    } catch (e) { setMsg({ ok: false, text: e.error || 'Undo failed' }); }
+    setBusy(false);
+  }
+
+  function replay() {
+    const el = audioRef.current;
+    if (el) { el.currentTime = 0; el.play().catch(() => {}); }
+  }
+
+  // Keyboard triage: A = should-have-activated, I = should-have-ignored,
+  // D = discard, U = undo, Space = replay. Ignored while typing in a field so
+  // the wake-word picker still works normally.
+  useEffect(() => {
+    function onKey(e) {
+      const tag = (e.target.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'select' || tag === 'textarea') return;
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const k = e.key.toLowerCase();
+      if (k === ' ') { e.preventDefault(); replay(); return; }
+      if (k === 'u') { e.preventDefault(); undo(); return; }
+      if (!current || busy) return;
+      if (k === 'a') { e.preventDefault(); act('positive'); }
+      else if (k === 'i') { e.preventDefault(); act('negative'); }
+      else if (k === 'd') { e.preventDefault(); act('discard'); }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [current, busy, model, lastAction]);
+
+  async function exportDataset() {
+    if (!model) return;
+    setExporting(true); setMsg(null);
+    try {
+      const b = await API.blob(`/api/training_captures/${encodeURIComponent(model)}/export`);
+      const u = URL.createObjectURL(b);
+      const a = document.createElement('a');
+      a.href = u; a.download = `${model}-dataset.zip`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(u), 4000);
+    } catch (e) { setMsg({ ok: false, text: e.error || 'Export failed' }); }
+    setExporting(false);
+  }
+
+  const mono = "'DM Mono',monospace";
+  const sel = models?.find(m => m.model === model);
+
+  if (models === null) {
+    return <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--muted)' }}>Loading…</div>;
+  }
+  if (models.length === 0) {
+    return (
+      <div style={{ maxWidth: 520 }}>
+        <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--text2)', lineHeight: 1.7 }}>
+          No wake captures yet. Turn on <b>Save wake captures</b> under a device's
+          Config → Wake word (or fleet config), and clips of activations and
+          near-misses will collect here to label.
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ maxWidth: 620 }}>
+      <div style={{ fontFamily: mono, fontSize: 10, color: 'var(--muted)', marginBottom: 16, lineHeight: 1.6 }}>
+        Play each clip and mark whether the wake word <b>should</b> have fired.
+        Download the dataset when done and import it into oww_forge to retrain.
+        <br/>Keys: <b>A</b> activated · <b>I</b> ignored · <b>D</b> discard · <b>U</b> undo · <b>Space</b> replay.
+      </div>
+
+      {/* Wake-word picker */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 18 }}>
+        <span className="em-label">Wake word</span>
+        <select value={model || ''} onChange={e => setModel(e.target.value)}
+          style={{ fontFamily: mono, fontSize: 12, padding: '6px 10px' }}>
+          {models.map(m => (
+            <option key={m.model} value={m.model}>
+              {m.model} — {m.counts.untriaged} to label
+            </option>
+          ))}
+        </select>
+      </div>
+
+      {sel && (
+        <div style={{ display: 'flex', gap: 8, marginBottom: 18, fontFamily: mono, fontSize: 10, color: 'var(--muted)' }}>
+          <span>untriaged {sel.counts.untriaged}</span>·
+          <span style={{ color: 'var(--ok)' }}>positive {sel.counts.positive}</span>·
+          <span style={{ color: 'var(--error)' }}>negative {sel.counts.negative}</span>
+        </div>
+      )}
+
+      {current ? (
+        <div className="em-panel" style={{ padding: '18px 20px', marginBottom: 16 }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, fontFamily: mono, fontSize: 10, color: 'var(--text2)' }}>
+            <span>{current.kind === 'act' ? 'Activation' : 'Near-miss'} · score {current.score.toFixed(3)}</span>
+            <span style={{ color: 'var(--muted)' }}>{current.device_id} · {new Date(current.ts_ms).toLocaleString()}</span>
+          </div>
+           {audioUrl
+             ? <>
+                 <audio ref={audioRef} src={audioUrl} controls autoPlay style={{ width: '100%' }} />
+                 <TrainingTrimEditor blob={audioBlob} audioRef={audioRef} disabled={busy} onTrim={setTrim} />
+               </>
+            : <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--muted)' }}>Loading audio…</div>}
+          <div style={{ display: 'flex', gap: 10, marginTop: 16, flexWrap: 'wrap' }}>
+            <Pill accent disabled={busy} onClick={() => act('positive')}>Should have activated</Pill>
+            <Pill disabled={busy} onClick={() => act('negative')}>Should have ignored</Pill>
+            <Pill danger disabled={busy} onClick={() => act('discard')}>Discard</Pill>
+          </div>
+        </div>
+      ) : (
+        <div className="em-panel" style={{ padding: '18px 20px', marginBottom: 16, fontFamily: mono, fontSize: 11, color: 'var(--muted)' }}>
+          Nothing left to label for this wake word.
+        </div>
+      )}
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 12, minHeight: 20 }}>
+        {lastAction && (
+          <button onClick={undo} disabled={busy}
+            style={{ background: 'transparent', border: 0, color: 'var(--muted)', cursor: 'pointer', fontFamily: mono, fontSize: 11, textDecoration: 'underline', padding: 0 }}>
+            Undo last ({lastAction.label})
+          </button>
+        )}
+        {msg && <span style={{ fontFamily: mono, fontSize: 11, color: msg.ok ? 'var(--ok)' : 'var(--error)' }}>{msg.text}</span>}
+      </div>
+
+      <Pill disabled={exporting || !sel || (sel.counts.positive + sel.counts.negative === 0)} onClick={exportDataset}>
+        {exporting ? 'Preparing…' : 'Download dataset (.zip)'}
+      </Pill>
+    </div>
+  );
+}
+
+
 function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, isAdmin }) {
   const [tab, setTab]             = useState('fleet');
   const [config, setConfig]       = useState({ ...globalConfig });
@@ -5643,17 +6024,33 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
   const [bundling, setBundling]   = useState(false);
   const [bundle, setBundle]       = useState(null);  // {url, name, bytes}
   const [bundleErr, setBundleErr] = useState(null);
-
-  // #197: accounts and roles. The endpoints exist and are admin-only;
-  // what was missing was any screen calling them, which left "the wrong
-  // person opened the sidebar first" without an in-household recovery.
   const [users, setUsers]         = useState(null);
   const [usersMsg, setUsersMsg]   = useState(null);
 
+  const [apiKey, setApiKey] = useState(null);
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [apiKeyConfigured, setApiKeyConfigured] = useState(false);
+  const [apiKeyBusy, setApiKeyBusy] = useState(false);
+  const [apiKeyMsg, setApiKeyMsg] = useState(null);
+  const [musicAssistantUrl, setMusicAssistantUrl] = useState('');
+  const [musicAssistantBusy, setMusicAssistantBusy] = useState(false);
+  const [musicAssistantMsg, setMusicAssistantMsg] = useState(null);
+  // Total untriaged wake captures across all wake words — drives the badge on
+  // the Training tab so the labelling backlog is visible without opening it.
+  const [trainingBacklog, setTrainingBacklog] = useState(null);
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    API.get('/api/training_captures')
+      .then(r => setTrainingBacklog((r.models || []).reduce((n, m) => n + (m.counts.untriaged || 0), 0)))
+      .catch(() => {});
+  }, [isAdmin]);
+
   function loadUsers() {
     API.get('/api/users').then(setUsers)
-       .catch(e => setUsersMsg({ ok: false, text: e.error || 'Failed to load users' }));
+      .catch(e => setUsersMsg({ ok: false, text: e.error || 'Failed to load users' }));
   }
+
   useEffect(() => { if (tab === 'users') loadUsers(); }, [tab]);
 
   async function setUserRole(id, role) {
@@ -5663,8 +6060,6 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
       setUsers(prev => prev.map(u => u.id === id ? { ...u, role } : u));
       setUsersMsg({ ok: true, text: 'Role updated.' });
     } catch (e) {
-      // The server refuses the last-admin demotion and explains ha_linked
-      // refusals; pass its reason through rather than a generic failure.
       setUsersMsg({ ok: false, text: e.error || 'Refused.' });
     }
   }
@@ -5672,6 +6067,13 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
   // Object URLs pin their blob in memory until revoked; the panel closing is
   // the last moment we can still reach this one.
   useEffect(() => () => { if (bundle) URL.revokeObjectURL(bundle.url); }, [bundle]);
+
+  useEffect(() => {
+    API.get('/api/system/config').then(cfg => {
+      setApiKeyConfigured(Boolean(cfg.ha_api_key_configured));
+      setMusicAssistantUrl(cfg.music_assistant_url || '');
+    }).catch(() => {});
+  }, []);
 
   async function collectBundle() {
     setBundling(true); setBundleErr(null);
@@ -5729,10 +6131,41 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
     setPwSaving(false);
   }
 
+  async function changeApiKey(action) {
+    setApiKeyBusy(true); setApiKeyMsg(null);
+    try {
+      const path = action === 'revoke' ? '/api/system/api_key' : `/api/system/api_key/${action}`;
+      const result = action === 'revoke' ? await API.del(path) : await API.post(path, {});
+      setApiKey(result.api_key || null);
+      setShowApiKey(Boolean(result.api_key));
+      setApiKeyConfigured(Boolean(result.api_key));
+      setApiKeyMsg({ ok: true, text: action === 'revoke' ? 'API key revoked' : 'API key generated' });
+    } catch (e) {
+      setApiKeyMsg({ ok: false, text: e.error || 'Failed to update API key' });
+    }
+    setApiKeyBusy(false);
+  }
+
+  async function saveMusicAssistant() {
+    setMusicAssistantBusy(true); setMusicAssistantMsg(null);
+    try {
+      const result = await API.patch('/api/system/config', {
+        music_assistant_url: musicAssistantUrl,
+      });
+      setMusicAssistantUrl(result.music_assistant_url || '');
+      setMusicAssistantMsg({ ok: true, text: result.music_assistant_url
+        ? `Saved ${result.music_assistant_url}`
+        : 'Saved — native devices will use their configured discovery fallback' });
+    } catch (e) {
+      setMusicAssistantMsg({ ok: false, text: e.error || 'Failed to save Music Assistant server' });
+    }
+    setMusicAssistantBusy(false);
+  }
+
   // Support is admin-only because the endpoint is: the bundle spans the whole
   // fleet, so a tab a non-admin can only be refused by is worse than no tab.
-  const TABS = isAdmin ? ['fleet', 'users', 'account', 'support'] : ['fleet', 'account'];
-  const TAB_LABELS = { fleet: 'Config', users: 'Users', account: 'Account', support: 'Support' };
+  const TABS = isAdmin ? ['fleet', 'users', 'account', 'integration', 'music', 'training', 'support'] : ['fleet', 'account'];
+  const TAB_LABELS = { fleet: 'Config', users: 'Users', account: 'Account', integration: 'HA Integration', music: 'Music', training: 'Training', support: 'Support' };
 
   return (
     <div style={{ position:'fixed', inset:0, background:'rgba(180,176,168,0.5)', display:'flex', alignItems:'center', justifyContent:'center', zIndex:200, backdropFilter:'blur(8px)' }}
@@ -5751,7 +6184,12 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
               one tab style across the dashboard. */}
           <div className="em-tabs" style={{ display:'flex', gap:2 }}>
             {TABS.map(t => (
-              <button key={t} onClick={() => setTab(t)} style={{ background: tab === t ? 'linear-gradient(180deg,var(--raised),var(--surface))' : 'transparent', border: tab === t ? '1px solid var(--border-hard)' : '1px solid transparent', borderBottom: tab === t ? '1px solid var(--surface)' : '1px solid transparent', borderRadius: '6px 6px 0 0', fontFamily: "'DM Mono',monospace", fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.1em', padding: '7px 14px', cursor: 'pointer', color: tab === t ? 'var(--text)' : 'var(--muted)', marginBottom: -1, transition: 'color 0.15s' }}>{TAB_LABELS[t]}</button>
+              <button key={t} onClick={() => setTab(t)} style={{ background: tab === t ? 'linear-gradient(180deg,var(--raised),var(--surface))' : 'transparent', border: tab === t ? '1px solid var(--border-hard)' : '1px solid transparent', borderBottom: tab === t ? '1px solid var(--surface)' : '1px solid transparent', borderRadius: '6px 6px 0 0', fontFamily: "'DM Mono',monospace", fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.1em', padding: '7px 14px', cursor: 'pointer', color: tab === t ? 'var(--text)' : 'var(--muted)', marginBottom: -1, transition: 'color 0.15s' }}>
+                {TAB_LABELS[t]}
+                {t === 'training' && trainingBacklog > 0 && (
+                  <span style={{ marginLeft: 6, padding: '1px 6px', borderRadius: 8, background: 'var(--accent)', color: 'var(--accent-tint)', fontSize: 9 }}>{trainingBacklog}</span>
+                )}
+              </button>
             ))}
           </div>
         </div>
@@ -5780,17 +6218,15 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
             </>
           )}
 
-          {tab === 'users' && (
+          {tab === 'users' && isAdmin && (
             <div style={{ maxWidth: 640 }}>
               <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', marginBottom:20, lineHeight:1.6 }}>
-                Admins approve devices, change config and can open a root shell to any device.
-                Read-only accounts see status only. An account with an HA badge gets its sign-in
-                from Home Assistant; its ROLE is still set here and never overwritten by a login.
-                The last admin cannot be demoted.
+                Admins approve devices, change config, and can open a root shell to any device.
+                Read-only accounts see status only. HA-linked accounts sign in through Home Assistant,
+                but their role is managed here. The last admin cannot be demoted.
               </div>
               {(users || []).map(u => (
-                <div key={u.id} style={{ display:'flex', alignItems:'center', gap:12,
-                     padding:'10px 0', borderBottom:'1px solid var(--border)' }}>
+                <div key={u.id} style={{ display:'flex', alignItems:'center', gap:12, padding:'10px 0', borderBottom:'1px solid var(--border)' }}>
                   <div style={{ flex:1 }}>
                     <div style={{ fontFamily:"'DM Sans',sans-serif", fontSize:14 }}>{u.username}</div>
                     <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)' }}>
@@ -5804,8 +6240,7 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
               ))}
               {!users && !usersMsg && <div className="help">Loading…</div>}
               {usersMsg && (
-                <div style={{ marginTop: 14, fontFamily: "'DM Mono',monospace", fontSize: 11,
-                  color: usersMsg.ok ? 'var(--ok)' : 'var(--error)' }}>
+                <div style={{ marginTop:14, fontFamily:"'DM Mono',monospace", fontSize:11, color:usersMsg.ok ? 'var(--ok)' : 'var(--error)' }}>
                   {usersMsg.ok ? '✓ ' : ''}{usersMsg.text}
                 </div>
               )}
@@ -5835,6 +6270,53 @@ function SettingsPanel({ globalConfig, onGlobalConfigChange, onClose, username, 
                 {pwSaving ? 'Updating…' : 'Update password'}
               </Pill>
             </div>
+          )}
+
+          {tab === 'integration' && isAdmin && (
+            <div style={{ maxWidth: 560 }}>
+              <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', textTransform:'uppercase', letterSpacing:'0.15em', marginBottom:12 }}>Home Assistant Integration</div>
+              <div style={{ fontFamily:"'DM Sans',sans-serif", color:'var(--text2)', lineHeight:1.6, marginBottom:18 }}>
+                Generate a long-lived API key for the EchoMuse HACS integration. The key is shown only after generation or rotation.
+              </div>
+              {apiKey && (
+                <div style={{ marginBottom:14 }}>
+                  <div className="em-inset" style={{ padding:14, fontFamily:"'DM Mono',monospace", wordBreak:'break-all', color:'var(--text)' }}>{showApiKey ? apiKey : `${apiKey.slice(0, 3)}${'*'.repeat(Math.max(0, apiKey.length - 3))}`}</div>
+                  <button onClick={() => setShowApiKey(v => !v)} style={{ marginTop:8, background:'transparent', border:0, color:'var(--muted)', cursor:'pointer', fontFamily:"'DM Mono',monospace", fontSize:10 }}>{showApiKey ? 'Hide key' : 'Show key'}</button>
+                </div>
+              )}
+              {apiKeyMsg && <div style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color: apiKeyMsg.ok ? 'var(--ok)' : 'var(--error)', marginBottom:12 }}>{apiKeyMsg.text}</div>}
+              <div style={{ display:'flex', gap:10 }}>
+                <Pill accent disabled={apiKeyBusy || apiKeyConfigured} onClick={() => changeApiKey('generate')}>{apiKeyConfigured ? 'Key configured' : 'Generate key'}</Pill>
+                <Pill disabled={apiKeyBusy || !apiKeyConfigured} onClick={() => changeApiKey('rotate')}>Rotate key</Pill>
+                <Pill danger disabled={apiKeyBusy || !apiKeyConfigured} onClick={() => changeApiKey('revoke')}>Revoke key</Pill>
+              </div>
+            </div>
+          )}
+
+          {tab === 'music' && isAdmin && (
+            <div style={{ maxWidth: 560 }}>
+              <div className="em-label" style={{ marginBottom:12 }}>Music Assistant</div>
+              <div style={{ fontFamily:"'DM Sans',sans-serif", color:'var(--text2)', lineHeight:1.6, marginBottom:18 }}>
+                Address of Music Assistant's Sendspin server, sent directly to native Echo devices. Music Assistant provides their media players and music controls.
+              </div>
+              <div style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color:'var(--text2)', marginBottom:6 }}>Server URL</div>
+              <input value={musicAssistantUrl}
+                onChange={e => { setMusicAssistantUrl(e.target.value); setMusicAssistantMsg(null); }}
+                placeholder="192.168.1.10:8927"
+                spellCheck={false}
+                style={{ width:'100%', boxSizing:'border-box', marginBottom:12 }}/>
+              <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)', lineHeight:1.6, marginBottom:16 }}>
+                Also accepts <code>ws://host:8927/sendspin</code> or <code>wss://host:8927/sendspin</code>.
+              </div>
+              {musicAssistantMsg && <div style={{ fontFamily:"'DM Mono',monospace", fontSize:11, color: musicAssistantMsg.ok ? 'var(--ok)' : 'var(--error)', marginBottom:12 }}>{musicAssistantMsg.text}</div>}
+              <Pill accent disabled={musicAssistantBusy} onClick={saveMusicAssistant}>
+                {musicAssistantBusy ? 'Saving…' : 'Save server'}
+              </Pill>
+            </div>
+          )}
+
+          {tab === 'training' && isAdmin && (
+            <WakeTrainingTab onBacklog={setTrainingBacklog}/>
           )}
 
           {tab === 'support' && (
@@ -5913,6 +6395,7 @@ function App() {
   const [deployState, setDeployState] = useState(null);
   const [showSettings, setShowSettings] = useState(false);
   const [globalConfig, setGlobalConfig] = useState(null);
+  const [activityTurns, setActivityTurns] = useState([]);
   const wsRef = useRef(null);
 
   const isAdmin = role === 'admin';
@@ -5930,27 +6413,12 @@ function App() {
   // Restore token on mount
   useEffect(() => { if (token) API.token = token; }, []);
 
-  // Reconcile the cached role against the server's.
-  //
-  // `role` seeds from localStorage, written once at sign-in, and nothing used
-  // to re-read it — so a role that changed server-side never reached the UI.
-  // That is not an edge case: it is what every PATCH /api/users/{id}
-  // promotion looks like to the promoted person, who stays read-only until
-  // they happen to sign out. Under ingress there is deliberately no Sign out
-  // at all, so the stale value had nothing to clear it and correcting the
-  // database by hand still left the panel read-only (#235).
-  //
-  // The symptom is precise and confusing: the SERVER accepts the writes, so
-  // saving config works, while the UI hides every admin-only control. It
-  // reads as half-broken rather than as stale state.
-  //
-  // /api/auth/me is the authority and it is already there. A failure is
-  // deliberately ignored — the periodic loads below surface a dead session,
-  // and a transient blip must not silently demote a working dashboard.
+  // A role can change server-side while an ingress session remains active;
+  // refresh the cached localStorage value so newly promoted users see controls.
   useEffect(() => {
     if (!token) return;
     API.get('/api/auth/me').then(me => {
-      if (!me || !me.role || me.role === role) return;
+      if (!me?.role || me.role === role) return;
       setRole(me.role);
       localStorage.setItem('em_role', me.role);
     }).catch(() => {});
@@ -6009,7 +6477,7 @@ function App() {
           console.log('[ws] device_disconnected:', msg.device_id);
           setDevices(prev => prev.map(d =>
             d.device_id === msg.device_id
-              ? { ...d, connected: false, speaking: false, listening: false, thinking: false }
+               ? { ...d, connected: false, speaking: false, listening: false, thinking: false, timer_firing: false }
               : d
           ));
           break;
@@ -6053,18 +6521,43 @@ function App() {
 
   }, [token]);
 
-  // No session (direct visit, expired token, logged out) — the landing
-  // page owns auth: it validates any stored token and shows the right
-  // form (login vs first-run setup).
-  if (!token) { location.replace('.'); return null; }
-
   const online   = devices.filter(d => d.connected).length;
   const approved = devices.filter(d => d.approved);
   const pending  = devices.filter(d => !d.approved);
   const updates  = approved.filter(d => d.firmware_ver && release?.version && d.firmware_ver !== release.version).length;
   const active   = approved.filter(d => d.speaking || d.listening || d.thinking).length;
+  const activityDeviceSignature = approved.map(d => `${d.device_id}:${d.label || ''}`).join('|');
 
   const selectedDevice = selected ? devices.find(d => d.device_id === selected) : null;
+
+  // The API deliberately exposes turns per device so recording URLs can be
+  // ownership-checked. Merge those bounded histories here for the fleet feed.
+  useEffect(() => {
+    if (approved.length === 0) {
+      setActivityTurns([]);
+      return;
+    }
+    let live = true;
+    const load = () => Promise.all(approved.map(async device => {
+      const turns = await API.get(`/api/devices/${device.device_id}/turns?limit=200`);
+      return (Array.isArray(turns) ? turns : []).map(turn => ({
+        ...turn, device_id: device.device_id,
+      }));
+    }))
+      .then(groups => {
+        if (live) setActivityTurns(groups.flat().sort((a, b) => b.ts - a.ts));
+      })
+      .catch(() => { if (live) setActivityTurns([]); });
+    load();
+    const interval = setInterval(load, 10000);
+    return () => { live = false; clearInterval(interval); };
+  }, [activityDeviceSignature]);
+
+  // No session (direct visit, expired token, logged out) — the landing
+  // page owns auth: it validates any stored token and shows the right
+  // form (login vs first-run setup). Kept after all hooks so a stored token
+  // being cleared cannot change App's hook order.
+  if (!token) { location.replace('.'); return null; }
 
   return (
     <div className="em-page" style={{ minHeight: '100vh', padding: '32px 36px 60px' }}>
@@ -6276,6 +6769,19 @@ function App() {
             {isAdmin && <AddDeviceTile onClick={() => setShowWizard(true)}/>}
           </div>
         </>
+      )}
+
+      {/* QUERY HISTORY — fleet-level, with filters and page controls rather
+          than a modal-bound device selector. */}
+      {approved.length > 0 && (
+        <div style={{ marginBottom: 48 }}>
+          <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 9, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.15em', marginBottom: 14 }}>
+            Query history
+          </div>
+          <Panel label="Recent queries across all devices">
+            <TurnObservability turns={activityTurns} devices={approved} isAdmin={isAdmin}/>
+          </Panel>
+        </div>
       )}
 
       {devices.length === 0 && !loadError && !isAdmin && (

@@ -19,7 +19,19 @@ Band centre frequencies and types:
   7: 8000 Hz  — high shelf
 
 All filter design uses the Audio EQ Cookbook by Robert Bristow-Johnson.
-High-pass uses scipy.signal.butter (already a dependency via openwakeword).
+High-pass uses the same cookbook expression (scipy.signal.butter is not
+needed for a single biquad).
+
+This module only shapes FREQUENCY. It used to also decide loudness by
+ending in `np.clip` — a hard clipper with no headroom management in front
+of it. Any band combination that pushed the boosted signal past full scale
+was square-waved sample by sample, silently (#231: 4.74% of samples clipped
+on a speech-like signal with a modest bass boost, 17.95% at UI-max). That is
+why `apply`/`StreamingEQ` also accept a `limiter` (em_limiter) and a `guard`
+(em_mbc): the EQ shapes tone, the guard keeps the driver from being asked
+for excursion it cannot deliver, and the limiter is what actually keeps the
+peaks in bounds. See em_limiter's and em_mbc's own docstrings for why each
+exists; this module only wires them into the same chain the EQ runs in.
 
 Usage:
     import em_eq
@@ -40,6 +52,12 @@ EQ_FREQUENCIES = [125, 250, 500, 1000, 2000, 3500, 5500, 8000]
 NUM_BANDS       = len(EQ_FREQUENCIES)
 DEFAULT_BANDS   = [0.0] * NUM_BANDS
 _PEAK_Q         = 1.4   # ~1 octave bandwidth for middle bands
+
+# Band 0 is a fixed low shelf matching the device's speaker response.
+DEFAULT_BASS_SHELF_HZ = 125.0
+
+# The fixed highpass protects the driver from excursion it cannot turn into sound.
+DEFAULT_SUBSONIC_HZ = 85.0
 
 
 # ─── Biquad primitives ────────────────────────────────────────────────────────
@@ -87,14 +105,27 @@ def _hishelf_sos(fc: float, gain_db: float, fs: float) -> np.ndarray:
     return np.array([[b0/a0, b1/a0, b2/a0, 1.0, a1/a0, a2/a0]])
 
 
+def _highpass_sos(fc: float, fs: float, Q: float = 0.7071) -> np.ndarray:
+    """Highpass biquad (Audio EQ Cookbook) to attenuate sub-bass below driver cutoff."""
+    w0    = 2 * math.pi * fc / fs
+    cw    = math.cos(w0)
+    alpha = math.sin(w0) / (2 * Q)
+    b0 = (1 + cw) / 2.0;  b1 = -(1 + cw);  b2 = (1 + cw) / 2.0
+    a0 =  1 + alpha;      a1 = -2 * cw;     a2 =  1 - alpha
+    return np.array([[b0/a0, b1/a0, b2/a0, 1.0, a1/a0, a2/a0]])
+
+
 def _loudness_sos(fs: float) -> np.ndarray:
-    """Speech-range presence boost for lower listening volumes."""
-    return _peak_sos(2500, 5.0, 0.8, fs)
+    """Speech and acoustic presence boost for small enclosure at listening volumes."""
+    presence = _peak_sos(2500, 4.0, 0.8, fs)
+    warmth = _loshelf_sos(180, 2.5, fs)
+    return np.vstack([presence, warmth])
 
 
 # ─── Public API ───────────────────────────────────────────────────────────────
 
-def build_sos(bands: list, sample_rate: int, loudness: bool = False) -> np.ndarray:
+def build_sos(bands: list, sample_rate: int, loudness: bool = False,
+              subsonic: bool = True) -> np.ndarray:
     """
     Build a stacked SOS matrix for the given band gains and sample rate.
 
@@ -102,9 +133,11 @@ def build_sos(bands: list, sample_rate: int, loudness: bool = False) -> np.ndarr
     changed between calls.
     """
     sections = []
+    if subsonic:
+        sections.append(_highpass_sos(DEFAULT_SUBSONIC_HZ, sample_rate))
     for i, (fc, gain_db) in enumerate(zip(EQ_FREQUENCIES, bands)):
         if i == 0:
-            sections.append(_loshelf_sos(fc, gain_db, sample_rate))
+            sections.append(_loshelf_sos(DEFAULT_BASS_SHELF_HZ, gain_db, sample_rate))
         elif i == NUM_BANDS - 1:
             sections.append(_hishelf_sos(fc, gain_db, sample_rate))
         else:
@@ -119,6 +152,8 @@ def apply(
     sample_rate: int,
     bands: list | None = None,
     loudness: bool = False,
+    subsonic: bool = True,
+    gain_db: float = 0.0,
     limiter: "em_limiter.Limiter | None" = None,
     guard: "em_mbc.BassGuard | None" = None,
 ) -> bytes:
@@ -130,11 +165,14 @@ def apply(
         sample_rate: Sample rate of pcm (SPEAKER_RATE = 48000 in the
                      playback pipeline since the 48k decode change).
         bands:       List of NUM_BANDS (8) gain values in dB. None = flat.
-        loudness:    Add a +5dB speech-range presence boost if True.
-        limiter:     Optional peak limiter applied AFTER the EQ, in float, so
-                     nothing is quantised twice. Without one this function
-                     hard-clips whatever the EQ boosted past full scale, which
-                     is #231.
+        loudness:    Add presence and warmth boost if True.
+        subsonic:    Add 85Hz highpass protection filter if True.
+        limiter:     Optional peak limiter applied AFTER the EQ and guard, in
+                     float, so nothing is quantised twice. Without one this
+                     function hard-clips whatever the EQ boosted past full
+                     scale, which is #231.
+        guard:       Optional dynamic bass guard applied AFTER the EQ and
+                      BEFORE the limiter — see the ordering note below.
 
     Returns:
         EQ-processed mono S16_LE PCM bytes, same length as input.
@@ -149,19 +187,22 @@ def apply(
         log.warning(f"[eq] Expected {NUM_BANDS} bands, got {len(bands)} — padding with zeros")
         bands = list(bands) + [0.0] * (NUM_BANDS - len(bands))
 
-    flat = not loudness and all(b == 0.0 for b in bands)
+    gain_db = float(gain_db)
+    flat = not loudness and not subsonic and gain_db == 0.0 and all(b == 0.0 for b in bands)
     if flat and limiter is None and guard is None:
         return pcm
 
     samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float64)
     if not flat:
-        samples = sosfilt(build_sos(bands, sample_rate, loudness), samples)
+        samples = sosfilt(build_sos(bands, sample_rate, loudness=loudness, subsonic=subsonic), samples)
     # Order matters: the guard removes excursion the driver cannot deliver,
     # THEN the limiter catches what is left. Limiting first would spend gain
     # reduction on bass that is about to be thrown away, pulling down the
     # midrange for no reason.
     if guard is not None:
         samples = guard.process(samples)
+    if gain_db:
+        samples *= 10.0 ** (gain_db / 20.0)
     if limiter is not None:
         samples = np.concatenate([limiter.process(samples), limiter.flush()])
     # Backstop only. With a limiter attached this must never engage; without
@@ -172,19 +213,23 @@ def apply(
 
 class StreamingEQ:
     """
-    Chunk-by-chunk EQ with filter state carried across calls — for audio
-    that can't be processed as one buffer (music streams). apply() on
-    independent chunks would reset the biquad states at every boundary
-    and click; this is bit-identical to apply() over the concatenation.
+    Chunk-by-chunk EQ (+ optional bass guard + limiter) with all state
+    carried across calls — for audio that can't be processed as one buffer
+    (music streams, streamed TTS). apply() on independent chunks would reset
+    the biquad states at every boundary and click; this is bit-identical to
+    apply() over the concatenation, given a matching limiter/guard pair.
     """
 
     def __init__(self, sample_rate: int, bands: list | None = None,
-                 loudness: bool = False,
+                 loudness: bool = False, subsonic: bool = True,
+                 gain_db: float = 0.0,
                  limiter: "em_limiter.Limiter | None" = None,
                  guard: "em_mbc.BassGuard | None" = None):
         self._limiter = limiter
         self._guard = guard
         self._sample_rate = int(sample_rate)   # set_bands rebuilds against it
+        self._subsonic = bool(subsonic)
+        self._gain_db = float(gain_db)
         # Last values update() applied; None until it is first called, so the
         # first call always lands rather than matching a coincidental default.
         self._applied = None
@@ -192,10 +237,10 @@ class StreamingEQ:
             bands = DEFAULT_BANDS
         if len(bands) != NUM_BANDS:
             bands = list(bands) + [0.0] * (NUM_BANDS - len(bands))
-        if not loudness and all(b == 0.0 for b in bands):
+        if not loudness and not subsonic and all(b == 0.0 for b in bands):
             self._sos = None  # flat — pure passthrough
         else:
-            self._sos = build_sos(bands, sample_rate, loudness)
+            self._sos = build_sos(bands, sample_rate, loudness=loudness, subsonic=subsonic)
             self._zi  = np.zeros((self._sos.shape[0], 2), dtype=np.float64)
 
     @property
@@ -240,7 +285,9 @@ class StreamingEQ:
         prev = self._applied
         self._applied = wanted
 
-        # EQ only when the curve itself moved — the expensive branch.
+        # EQ only when the curve, the shelf frequency, or the subsonic cutoff
+        # moved — the expensive branch.  A frequency change rebuilds the
+        # coefficients (the section count is unchanged, so state survives).
         if prev is None or (prev[0], prev[1]) != (wanted[0], wanted[1]):
             self.set_bands(bands, loudness)
 
@@ -258,11 +305,11 @@ class StreamingEQ:
         Change the EQ curve mid-stream, keeping the filter state.
 
         The biquad state is carried across the coefficient change rather than
-        zeroed: the section count is fixed by NUM_BANDS, so the state array
-        still fits, and holding it means the filter continues from where the
-        audio actually is. Zeroing would produce a transient at the moment of
-        the change — precisely when someone is listening for the difference
-        the change made.
+        zeroed: the section count is fixed by NUM_BANDS (plus the constant
+        subsonic section), so the state array still fits, and holding it
+        means the filter continues from where the audio actually is. Zeroing
+        would produce a transient at the moment of the change — precisely
+        when someone is listening for the difference the change made.
 
         Going from flat to shaped allocates fresh (zero) state, which is
         correct: there was no filter running to carry.
@@ -272,24 +319,26 @@ class StreamingEQ:
         if len(bands) != NUM_BANDS:
             bands = list(bands) + [0.0] * (NUM_BANDS - len(bands))
 
-        if not loudness and all(b == 0.0 for b in bands):
+        if not loudness and not self._subsonic and all(b == 0.0 for b in bands):
             self._sos = None
             return
 
-        sos = build_sos(bands, self._sample_rate, loudness)
+        sos = build_sos(bands, self._sample_rate, loudness=loudness, subsonic=self._subsonic)
         if self._sos is None or self._zi.shape[0] != sos.shape[0]:
             self._zi = np.zeros((sos.shape[0], 2), dtype=np.float64)
         self._sos = sos
 
     def process(self, pcm: bytes) -> bytes:
         if len(pcm) < 2 or (self._sos is None and self._limiter is None
-                            and self._guard is None):
+                            and self._guard is None and self._gain_db == 0):
             return pcm
         samples = np.frombuffer(pcm, dtype=np.int16).astype(np.float64)
         if self._sos is not None:
             samples, self._zi = sosfilt(self._sos, samples, zi=self._zi)
         if self._guard is not None:
             samples = self._guard.process(samples)
+        if self._gain_db:
+            samples *= 10.0 ** (self._gain_db / 20.0)
         if self._limiter is not None:
             samples = self._limiter.process(samples)
         return np.clip(samples, -32768, 32767).astype(np.int16).tobytes()
@@ -308,6 +357,12 @@ class StreamingEQ:
         if not tail.size:
             return b""
         return np.clip(tail, -32768, 32767).astype(np.int16).tobytes()
+
+    def reset(self) -> None:
+        if self._sos is not None:
+            self._zi = np.zeros((self._sos.shape[0], 2), dtype=np.float64)
+
+    apply = process
 
 
 # ─── Chain instrumentation ────────────────────────────────────────────────

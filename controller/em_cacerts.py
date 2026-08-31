@@ -1,36 +1,19 @@
 """
 em_cacerts.py — trusting a private certificate authority.
 
-Home Assistant hands us an absolute URL for a turn's TTS audio. When Home
-Assistant is served over HTTPS with a certificate from the user's own internal
-CA, that fetch fails certificate verification and the turn dies as
-`tts_error` with zero bytes — a controller that starts cleanly, wakes, and
-then answers nothing.
+The media player fetches absolute HTTPS URLs through ffmpeg. A stream served
+with a certificate from the user's own internal CA must add that CA to the
+container trust store before ffmpeg starts.
 
 WHY THE SYSTEM TRUST STORE, AND NOT SSL_CERT_FILE
 -------------------------------------------------
 Measured in the built image rather than assumed, because the first version of
 this reasoning was wrong.
 
-The failure is Python's. aiohttp uses `ssl.create_default_context()`, which
-reads the system bundle, so a private CA is not trusted and the fetch raises
-SSLCertVerificationError. Verified end to end against a locally-signed HTTPS
-server in the image: aiohttp fails before installing the CA and returns 200
-after.
-
-ffmpeg, which fetches MEDIA urls directly (`-i <url>` in em_player), is NOT
-currently affected — this image's build defaults `-tls_verify` to **0**, so it
-does not check peer certificates at all. That is worth knowing for two
-reasons: it means media playback was never broken by a private CA, and it
-means media is fetched over HTTPS without verification (filed separately).
-
-The system store is still the right place, for a reason that survives both
-facts: it is what BOTH stacks read. Python reads it today, and ffmpeg is
-built --enable-gnutls, which **ignores SSL_CERT_FILE entirely** and reads only
-the system bundle — confirmed by installing a CA here and watching GnuTLS
-accept a server it had just rejected. So if `-tls_verify 1` is ever turned on,
-this keeps working with no second mechanism; SSL_CERT_FILE would quietly
-not.
+ffmpeg is built with GnuTLS, which ignores SSL_CERT_FILE and reads the system
+bundle. `em_player` explicitly enables `-tls_verify 1` for HTTPS media, so the
+system store is the one trust mechanism that applies to every verified decoder
+input.
 
 WHY NOT ROUTE THROUGH THE SUPERVISOR PROXY
 ------------------------------------------
@@ -92,8 +75,8 @@ def install(src: str, anchor_dir: Path = ANCHOR_DIR, runner=subprocess.run) -> s
 
     Returns a one-line description of what happened. Raises CATrustError with
     a usable message on anything that would leave the store unchanged —
-    startup should fail loudly here rather than run on and produce voice turns
-    that die with a TLS error nobody connects to this setting.
+    startup should fail loudly here rather than run with HTTPS media playback
+    that dies with a TLS error nobody connects to this setting.
     """
     path = Path(src)
     if not path.is_file():

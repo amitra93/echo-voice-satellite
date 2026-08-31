@@ -9,8 +9,9 @@
 ## GPU: the image builds with CUDA 12.8 torch (Blackwell/RTX 50xx supported)
 ## and falls back to CPU at runtime if no GPU is visible. The `forge` and
 ## `forge-ui` services reserve the GPU via the nvidia container runtime; on a
-## host WITHOUT that runtime use `forge-cpu` (same image, no reservation) or
-## build with GPU:"0" for a much smaller CPU-only image.
+## host WITHOUT that runtime use `forge-cpu` for CLI work or
+## `docker compose --profile cpu up -d forge-ui-cpu` for the web UI. Build
+## with GPU:"0" for a much smaller CPU-only image.
 ##
 ## Deliberately separate from the EchoMuse controller: training is a heavy,
 ## occasional batch job, not a service.
@@ -32,6 +33,9 @@ x-forge-base: &forge-base
     # Only needed for Google TTS positives — put a service-account JSON at
     # ./data/google-credentials.json (gitignored) or drop this mapping.
     - GOOGLE_APPLICATION_CREDENTIALS=/data/google-credentials.json
+    # Required only for the official full Common Voice 26 download. Create an
+    # MDC key after accepting the corpus terms, then export it before compose.
+    - MDC_API_KEY=${MDC_API_KEY:-}
 
 x-gpu: &gpu
   deploy:
@@ -50,6 +54,16 @@ services:
     command: ["ui"]
     ports:
       - "8769:8769"
+    restart: unless-stopped
+
+  # Web UI fallback for hosts without the NVIDIA container runtime.
+  forge-ui-cpu:
+    <<: *forge-base
+    container_name: oww-forge-ui-cpu
+    command: ["ui"]
+    ports:
+      - "8769:8769"
+    profiles: ["cpu"]
     restart: unless-stopped
 
   # one-shot CLI with GPU

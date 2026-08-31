@@ -21,15 +21,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/wilbowes/EchoMuse/internal/aec"
+	"github.com/wilbowes/EchoMuse/internal/afeipc"
 	"github.com/wilbowes/EchoMuse/internal/bindings/als"
-	"github.com/wilbowes/EchoMuse/internal/bindings/jack"
 	internalbuttons "github.com/wilbowes/EchoMuse/internal/bindings/buttons"
 	"github.com/wilbowes/EchoMuse/internal/bindings/mic"
 	"github.com/wilbowes/EchoMuse/internal/bindings/speaker"
 	"github.com/wilbowes/EchoMuse/internal/bluetooth"
 	"github.com/wilbowes/EchoMuse/internal/client"
 	"github.com/wilbowes/EchoMuse/internal/config"
+	"github.com/wilbowes/EchoMuse/internal/outchain"
+	"github.com/wilbowes/EchoMuse/internal/sendspin"
 	"github.com/wilbowes/EchoMuse/internal/server"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
 	"github.com/wilbowes/EchoMuse/internal/wifi"
@@ -38,12 +39,18 @@ import (
 )
 
 func main() {
+	if afeipc.IsHelperMode(os.Args[1:]) {
+		log.SetOutput(os.Stderr)
+		if err := afeipc.RunHelper(""); err != nil {
+			log.Print(err)
+		}
+		return
+	}
 	log.SetOutput(os.Stdout)
 	log.Printf("EchoMuse %s starting", client.Version)
 
 	deviceID := client.GetSerialNo()
 	log.Printf("Device ID: %s", deviceID)
-
 	// A WiFi change that never got committed (crash/power cycle mid-switch)
 	// is rolled back before anything tries to use the network — same
 	// self-healing philosophy as the A/B binary slots.
@@ -68,21 +75,27 @@ func main() {
 		log.Fatalf("Failed to initialize Button controller: %v", err)
 	}
 
-	microphone, err := mic.NewMicrophone()
+	afeClient, err := afeipc.Start(os.Getenv("EM_AFE_HELPER"))
 	if err != nil {
-		log.Fatalf("Failed to initialize Microphone: %v", err)
+		log.Fatalf("Failed to start Amazon AFE helper: %v", err)
 	}
-
-	// AEC canceller — far end fed by the speaker's echo tap, near end run
-	// by the data client on the mono mic stream. Starts disabled; armed by
-	// applyAecConfig from env defaults below and on every config push.
-	canceller := aec.New()
+	if err := afeClient.Open(afeipc.OpenOptions{Helper: os.Getenv("EM_AFE_HELPER"), Preset: 1,
+		RecorderRate: 16000, RecorderPeriodFrames: 1280, RecorderBuffers: 8,
+		PlayerRate: 48000, PlayerBufferBytes: 4096, PlayerBuffers: 4}); err != nil {
+		_ = afeClient.Close()
+		log.Fatalf("Failed to open Amazon AFE audio pair: %v", err)
+	}
+	microphone := mic.NewAFEMicrophone(afeClient)
+	if err := microphone.Init(); err != nil {
+		_ = afeClient.Close()
+		log.Fatalf("Failed to start Amazon AFE microphone: %v", err)
+	}
 
 	// The level tap drives the energy-reactive LED ring ("meter" pattern).
 	// The Server doesn't exist yet when the speaker starts its pump loop,
 	// so the tap goes through an atomic pointer armed just below.
 	var srvPtr atomic.Pointer[server.Server]
-	pcmSpeaker, err := speaker.NewPcmSpeaker(canceller.WriteFar, func(rms float64) {
+	pcmSpeaker, err := speaker.NewAFEPcmSpeaker(afeClient, nil, func(rms float64) {
 		if srv := srvPtr.Load(); srv != nil {
 			srv.SetAudioLevel(rms)
 		}
@@ -92,7 +105,17 @@ func main() {
 	}
 
 	s := server.NewServer(buttonController, microphone, pcmSpeaker)
+	s.UseAndroidVolume()
 	srvPtr.Store(s)
+	// Native Sendspin owns only Music Assistant playback. Its volume is a
+	// player scale, while the device is capped at the codec's unity-gain index.
+	sendspinClient := sendspin.NewClient(deviceID, deviceID, pcmSpeaker)
+	sendspinClient.SetPlayerState(sendspin.DeviceVolumeToMA(s.VolumeLevel()), false)
+	sendspinClient.OnVolume = func(volume int) {
+		s.SetVolume(sendspin.MAVolumeToDevice(volume))
+	}
+	sendspinClient.OnMute = pcmSpeaker.SetMusicMuted
+	sendspinManager := sendspin.NewManager(sendspinClient)
 
 	buttonController.SetVolumeCallback(func(direction string) {
 		if direction == "up" {
@@ -107,13 +130,7 @@ func main() {
 
 	ctx := context.Background()
 
-	dataClient := client.NewDataClient(deviceID, microphone, pcmSpeaker, canceller)
-	applyAecConfig(canceller) // arm from env defaults before any config push
-
-	// Direction callback — update LED ring to show estimated source angle
-	dataClient.OnDirectionChanged(func(angle float64) {
-		s.SetDirectionLEDs(angle)
-	})
+	dataClient := client.NewDataClient(deviceID, microphone, pcmSpeaker)
 	controlClient := client.NewControlClient(
 		deviceID,
 		func(leds []led.Led, listening *bool) {
@@ -144,6 +161,16 @@ func main() {
 			return
 		}
 		s.StartAnim(spec)
+	})
+	controlClient.OnTestAudio(func() {
+		if err := dataClient.StreamTestAudio(); err != nil {
+			log.Printf("[cmd] test audio failed: %v", err)
+		}
+	})
+	controlClient.OnTestAudioCleanup(func() {
+		if err := dataClient.CleanupTestAudio(); err != nil {
+			log.Printf("[cmd] test audio cleanup failed: %v", err)
+		}
 	})
 
 	// BLE proxy scanner — passive scan over /dev/stpbt, batches forwarded
@@ -195,18 +222,6 @@ func main() {
 	// (mic/speaker are ARM-only). Only compile.sh compiles this file.
 	go als.Watch(ctx, func(lux int) {
 		controlClient.SendAmbientLight(lux)
-	})
-
-	// Headphone jack — accdet mutes the internal speaker amp on insert and
-	// never restores it on removal, so without this the speaker stays dead
-	// until the next reboot (issue #80, reproduced and fixed on hardware
-	// 2026-08-09). Insert needs nothing from us: accdet already handles the
-	// mute, and the output routing itself is done by the jack's own switch
-	// contacts, not by any mixer control.
-	go jack.Watch(ctx, func(inserted bool) {
-		if !inserted {
-			pcmSpeaker.EnableSpeakerAmp()
-		}
 	})
 
 	controlClient.OnDisconnected(func() {
@@ -276,11 +291,9 @@ func main() {
 		}
 	})
 
-	// Config applied — apply hardware changes via tinymix, AEC params to
-	// the canceller. AEC/BLE read the merged post-Apply snapshot rather than
+	// Config applied — BLE reads the merged post-Apply snapshot rather than
 	// the (partial) message so unmentioned fields keep their values.
 	controlClient.OnConfigApplied(func(msg config.ConfigMessage) {
-		applyHardwareConfig(msg)
 		// startupVolume is the controller's persisted record of this
 		// device's volume (updated on every volume_state report) — restore
 		// it through the Server, not a raw tinymix write: SeedVolume keeps
@@ -289,9 +302,12 @@ func main() {
 		if msg.StartupVolume > 0 {
 			s.SeedVolume(msg.StartupVolume)
 		}
-		applyAecConfig(canceller)
 		applyBleConfig(bleScanner)
+		applyOutputChainConfig(pcmSpeaker)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
+		if msg.SendspinServer != "" {
+			sendspinManager.Configure(msg.SendspinServer)
+		}
 	})
 
 	// Speaker flush — barge-in: cut buffered TTS the moment the controller
@@ -358,17 +374,6 @@ func main() {
 		}()
 	})
 
-	// Beam lock/unlock — controller locks the beamformer onto the speaker's
-	// perimeter mic at wake detection (mid-stream, no restart) and releases
-	// it at turn end. Requests are consumed by the mic streaming goroutine.
-	controlClient.OnBeamLock(func(lock bool) {
-		if lock {
-			dataClient.RequestBeamLock()
-		} else {
-			dataClient.RequestBeamUnlock()
-		}
-	})
-
 	// Mute state change — notify controller so dashboard can reflect it,
 	// and stop/restart the mic stream device-side so mute is authoritative
 	// regardless of controller state (C5 fix, 2026-07-05 review). Previously
@@ -399,14 +404,26 @@ func main() {
 	// Volume change — notify controller so HA entity and dashboard reflect it.
 	// Fires on every Set() call: physical button press or future volume_set command.
 	s.SetVolumeChangeCallback(func(level int) {
+		pcmSpeaker.SetVolume(level)
 		controlClient.SendVolumeState(level)
+		sendspinClient.SetLocalVolume(sendspin.DeviceVolumeToMA(level))
 	})
+	// The controller callback only fires on a change. Apply the level restored
+	// from tinymix at boot too, so AFE begins at the same user-selected level.
+	pcmSpeaker.SetVolume(s.VolumeLevel())
 
 	// Volume set from controller (HA MediaPlayerCommandRequest forwarded down).
 	// Calls Set() which applies tinymix, updates LEDs, and fires the change
 	// callback above — so SendVolumeState fires automatically, closing the loop.
 	controlClient.OnVolumeSet(func(level int) {
 		s.SetVolume(level)
+	})
+
+	// Mute toggle from controller (HA button entity) — calls the exact same
+	// path the hardware mute button uses, so remote and physical presses are
+	// indistinguishable in their effect (ADC mute, LED ring, persistence).
+	controlClient.OnMuteToggle(func() {
+		s.MuteToggle()
 	})
 
 	// Heap-profile dump on SIGUSR1 — the ~1MB/h leak hunt (2026-07-17).
@@ -496,7 +513,10 @@ func main() {
 	sig := <-sigCh
 	log.Printf("Received %v — shutting down (muting output, amp off)", sig)
 	bleScanner.SetEnabled(false) // scan off + /dev/stpbt closed so the chip idles
+	sendspinManager.Close()
 	pcmSpeaker.Close()
+	microphone.Close()
+	_ = afeClient.Close()
 	os.Exit(0)
 }
 
@@ -822,37 +842,21 @@ func wifiRSSI() *int {
 	return nil
 }
 
-// ─── Hardware config ──────────────────────────────────────────────────────────
-
-// applyHardwareConfig runs tinymix commands for fields that map to hardware.
-// Called whenever the controller pushes a config message.
-func applyHardwareConfig(msg config.ConfigMessage) {
-	if msg.AdcDigitalGain > 0 {
-		tinymix("89", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
-		tinymix("107", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
-		tinymix("125", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
-		tinymix("143", strconv.Itoa(msg.AdcDigitalGain), strconv.Itoa(msg.AdcDigitalGain))
-	}
-	if msg.AdcMicpga > 0 {
-		tinymix("92", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
-		tinymix("110", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
-		tinymix("128", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
-		tinymix("146", strconv.Itoa(msg.AdcMicpga), strconv.Itoa(msg.AdcMicpga))
-	}
-}
-
-// applyAecConfig pushes the current effective AEC config into the canceller.
-// SetParams no-ops when nothing changed, so calling it on every config push
-// is free; when delay/tail change it rebuilds the echo state (adaptive
-// filter state is meaningless across a timing change anyway).
-func applyAecConfig(canceller *aec.Canceller) {
+// applyOutputChainConfig configures the speaker from the merged snapshot, not
+// the partial message, so omitted values retain the controller-aligned defaults.
+func applyOutputChainConfig(spk *speaker.PcmSpeaker) {
 	snap := config.Get().Snapshot()
-	enabled := snap.AecEnabled != nil && *snap.AecEnabled
-	delayMs := 250
-	if snap.AecDelayMs != nil {
-		delayMs = *snap.AecDelayMs
-	}
-	canceller.SetParams(enabled, delayMs, snap.AecTailMs)
+	spk.SetOutputChain(outchain.Params{
+		Bands:              snap.EqBands,
+		Loudness:           snap.EqLoudness != nil && *snap.EqLoudness,
+		BassShelfHz:        *snap.BassShelfHz,
+		SubsonicHz:         *snap.SubsonicHz,
+		GuardEnabled:       snap.BassGuardEnabled != nil && *snap.BassGuardEnabled,
+		GuardDB:            *snap.BassGuardDb,
+		LimiterEnabled:     snap.LimiterEnabled != nil && *snap.LimiterEnabled,
+		LimiterThresholdDB: *snap.LimiterThreshold,
+		LimiterReleaseMS:   *snap.LimiterRelease,
+	})
 }
 
 // applyBleConfig starts/stops the BLE proxy scanner from the current
@@ -912,8 +916,8 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 	// between "shadow" and "on" costs nothing: the scorer is identical in
 	// both and rebuilding it would reload a 12MB runtime and open a fresh
 	// ~1.28s not-ready window every time someone changed their mind.
-	sc, err := shadow.Open(model, threshold, func(score, crossed float32, at time.Time) {
-		onWakeCrossing(cc, srv, score, crossed, at)
+	sc, err := shadow.Open(model, threshold, func(score, crossed float32, at time.Time, sequence uint16) {
+		onWakeCrossing(cc, srv, score, crossed, at, sequence)
 	})
 	if err != nil {
 		if msg := err.Error(); msg != shadowState.lastErr {
@@ -962,7 +966,7 @@ func actsOnCrossings(mode string) string {
 // the nominal threshold instead is what once made every barge-in look like a
 // wake that had fired below its own bar.
 func onWakeCrossing(cc *client.ControlClient, srv *server.Server,
-	score, crossed float32, at time.Time) {
+	score, crossed float32, at time.Time, activationSeq uint16) {
 	ageMs := time.Since(at).Milliseconds()
 	if config.Get().Snapshot().OwwOnDevice != config.OnDeviceOn {
 		cc.SendOwwShadowCross(score, ageMs)
@@ -995,7 +999,7 @@ func onWakeCrossing(cc *client.ControlClient, srv *server.Server,
 			}
 		}
 	}
-	cc.SendOwwWake(score, crossed, ageMs)
+	cc.SendOwwWake(score, crossed, ageMs, activationSeq)
 }
 
 func applyBleConfig(scanner *bluetooth.Scanner) {

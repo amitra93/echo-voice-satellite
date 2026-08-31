@@ -150,9 +150,13 @@ func NewServer(buttonController buttons.Controller, microphone mic.Microphone, s
 // VolumeStepUp increases volume one step — called by button handler.
 // A button press makes the device's level authoritative (see volumeSeeded):
 // its change report updates the controller's stored value, and a config
-// push arriving later this run must not override it.
+// push arriving later this run must not override it. If currently muted,
+// pressing Volume+ also un-mutes the device.
 func (s *Server) VolumeStepUp() {
 	s.volumeSeeded.Store(true)
+	if s.mute != nil && s.mute.IsMuted() {
+		s.mute.Toggle()
+	}
 	s.volume.StepUp()
 }
 
@@ -162,12 +166,14 @@ func (s *Server) VolumeStepDown() {
 	s.volume.StepDown()
 }
 
-// SetVolume sets volume to an explicit level (0–volumeMax) — called by controller
-// command. Remote changes don't paint the volume arc: nobody is at the
-// device, and the ring lighting up unprompted reads as a glitch.
+// SetVolume sets volume to an explicit level (0–volumeMax) — called by
+// controller command (HA's number entity). Always paints the volume arc:
+// unlike SeedVolume below (a boot-time restore nobody asked for), this is
+// always a deliberate remote action — someone moved the slider — so it gets
+// the same visual confirmation a physical button press does.
 func (s *Server) SetVolume(level int) {
 	s.volumeSeeded.Store(true)
-	s.volume.Set(level, false)
+	s.volume.Set(remoteVolumeLevel(level), true)
 }
 
 // SeedVolume restores the controller's stored startupVolume — the source of
@@ -194,6 +200,12 @@ func (s *Server) VolumeSeeded() bool {
 // VolumeLevel returns the current volume level (0–volumeMax).
 func (s *Server) VolumeLevel() int {
 	return s.volume.Get()
+}
+
+// UseAndroidVolume switches output attenuation to AudioFlinger for the
+// Amazon AFE backend. Direct ALSA keeps controlling the codec volume.
+func (s *Server) UseAndroidVolume() {
+	s.volume.UseAndroidVolume()
 }
 
 // SetVolumeChangeCallback wires a callback invoked when volume changes.
@@ -356,6 +368,7 @@ func clampAdd(v uint8, delta int) uint8 {
 //     overlap mute (mic stopped), but mute-terminates-turn (2026-07-10)
 //     means the cancelled turn's LED cleanup arrives after the red ring
 //     is up — it must not clear it. Unmute clears the ring explicitly.
+//
 // listeningHint is the controller's explicit "this frame is the listening
 // ring" flag (nil from pre-scene controllers). When absent, fall back to
 // the historical heuristic — a 12-LED all-green frame — which only works

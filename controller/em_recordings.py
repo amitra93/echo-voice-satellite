@@ -5,7 +5,7 @@ em_recordings.py — utterance audio capture for the Activity panel
 Saves the mic audio of recent voice turns as WAV files so you can *listen*
 to what the array actually captured, rather than inferring mic quality from
 an STT transcript and a wake score. Asked for by users who wanted to judge
-capture quality before spending an evening tuning micGainDb/AEC/NS.
+capture quality before spending an evening tuning the audio path.
 
 Storage mirrors `em_oww_models`: files live in `recordings/` beside the
 SQLite DB, so they sit inside the persisted Docker volume and survive image
@@ -17,8 +17,8 @@ rowids, so the order is exact even if the volume is restored from a backup
 that flattened timestamps.
 
 The audio written is exactly what the controller streamed to Home Assistant
-for recognition — tapped BELOW noise suppression, so on a device with
-`nsAsr` on the file is the denoised stream, not the raw mic. That is the
+for recognition. The file contains the exact ASR-bound stream, not a separate
+processed copy. That is the
 point: a recording that isn't what STT heard can tell you the room was
 noisy but never why a transcript came back wrong. 16kHz mono S16_LE,
 matching the ESPHome satellite wire format.
@@ -60,7 +60,9 @@ MAX_UTTERANCE_BYTES   = MAX_UTTERANCE_SECONDS * SAMPLE_RATE * SAMPLE_WIDTH
 # device_id is ro.serialno (hex) and turn_id is a rowid, but this is the
 # name that comes back off disk and out of the DB, so it gets validated
 # like any other path component rather than trusted.
-_NAME_RE = re.compile(r"^(?P<device>[A-Za-z0-9_.-]{1,64})_(?P<turn>\d{1,19})\.wav$")
+_NAME_RE = re.compile(
+    r"^(?P<device>[A-Za-z0-9_.-]{1,64})_(?P<turn>\d{1,19})(?:_(?P<kind>tts))?\.wav$"
+)
 
 
 def recordings_dir(db_path: str | None = None) -> Path:
@@ -81,29 +83,30 @@ def safe_device_id(device_id: str) -> str | None:
     return None
 
 
-def filename(device_id: str, turn_id: int) -> str | None:
+def filename(device_id: str, turn_id: int, kind: str = "stt") -> str | None:
     """Canonical filename for a turn's utterance, or None if unnameable."""
     safe = safe_device_id(device_id)
-    if safe is None or turn_id is None or int(turn_id) < 0:
+    if safe is None or turn_id is None or int(turn_id) < 0 or kind not in ("stt", "tts"):
         return None
-    return f"{safe}_{int(turn_id)}.wav"
+    suffix = "_tts" if kind == "tts" else ""
+    return f"{safe}_{int(turn_id)}{suffix}.wav"
 
 
-def parse_filename(name: str) -> tuple[str, int] | None:
-    """(device_id, turn_id) for a recording filename, or None if malformed."""
+def parse_filename(name: str) -> tuple[str, int, str] | None:
+    """(device_id, turn_id, kind) for a recording filename, or None."""
     m = _NAME_RE.match(name)
     if not m:
         return None
-    return m.group("device"), int(m.group("turn"))
+    return m.group("device"), int(m.group("turn")), m.group("kind") or "stt"
 
 
-def encode_wav(pcm: bytes) -> bytes:
+def encode_wav(pcm: bytes, sample_rate: int = SAMPLE_RATE) -> bytes:
     """PCM frames → a WAV container, in memory."""
     buf = io.BytesIO()
     with wave.open(buf, "wb") as w:
         w.setnchannels(CHANNELS)
         w.setsampwidth(SAMPLE_WIDTH)
-        w.setframerate(SAMPLE_RATE)
+        w.setframerate(sample_rate)
         w.writeframes(pcm)
     return buf.getvalue()
 
@@ -114,14 +117,15 @@ def duration_ms(pcm_len: int) -> int:
 
 
 def save(device_id: str, turn_id: int, pcm: bytes,
-         db_path: str | None = None, keep: int = KEEP_PER_DEVICE) -> str | None:
+         db_path: str | None = None, keep: int = KEEP_PER_DEVICE,
+         kind: str = "stt", sample_rate: int = SAMPLE_RATE) -> str | None:
     """
     Write one turn's utterance and prune the device back to `keep` files.
 
     Returns the filename to store on the turn row, or None if nothing was
     written. Blocking (runs in an executor at the call site).
     """
-    name = filename(device_id, turn_id)
+    name = filename(device_id, turn_id, kind)
     if name is None or not pcm:
         return None
     directory = recordings_dir(db_path)
@@ -130,7 +134,7 @@ def save(device_id: str, turn_id: int, pcm: bytes,
     # Write-then-rename: a partially written WAV that the API then serves
     # is worse than no recording at all.
     tmp = path.with_suffix(".wav.part")
-    tmp.write_bytes(encode_wav(pcm))
+    tmp.write_bytes(encode_wav(pcm, sample_rate))
     tmp.replace(path)
     prune(device_id, db_path=db_path, keep=keep)
     return name
@@ -153,6 +157,21 @@ def list_for(device_id: str, db_path: str | None = None) -> list[str]:
     return [name for _, name in entries]
 
 
+def list_all(db_path: str | None = None) -> list[str]:
+    """All recording filenames, newest turn first across every device."""
+    directory = recordings_dir(db_path)
+    if not directory.is_dir():
+        return []
+    entries: list[tuple[int, str, str]] = []
+    for child in directory.iterdir():
+        parsed = parse_filename(child.name)
+        if parsed:
+            device, turn, kind = parsed
+            entries.append((turn, kind, child.name))
+    entries.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    return [name for _, _, name in entries]
+
+
 def prune(device_id: str, db_path: str | None = None,
           keep: int = KEEP_PER_DEVICE) -> list[str]:
     """
@@ -161,7 +180,25 @@ def prune(device_id: str, db_path: str | None = None,
     """
     directory = recordings_dir(db_path)
     removed: list[str] = []
-    for name in list_for(device_id, db_path)[max(keep, 0):]:
+    names = list_for(device_id, db_path)
+    keep_turns = sorted({parse_filename(name)[1] for name in names}, reverse=True)[:max(keep, 0)]
+    for name in names:
+        parsed = parse_filename(name)
+        if parsed and parsed[1] in keep_turns:
+            continue
+        try:
+            (directory / name).unlink()
+            removed.append(name)
+        except OSError as e:
+            log.warning(f"[recordings] Could not prune {name}: {e}")
+    return removed
+
+
+def prune_all(db_path: str | None = None, keep: int = 20) -> list[str]:
+    """Delete all but the newest `keep` STT/TTS files globally."""
+    directory = recordings_dir(db_path)
+    removed: list[str] = []
+    for name in list_all(db_path)[max(keep, 0):]:
         try:
             (directory / name).unlink()
             removed.append(name)

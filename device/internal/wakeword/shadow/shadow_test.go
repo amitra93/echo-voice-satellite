@@ -158,7 +158,7 @@ func TestCrossingFiresOncePerUtterance(t *testing.T) {
 		crosses []float32
 	)
 	inf := &fakeInferer{}
-	s := NewScorer(inf, 0.5, func(score, _ float32, at time.Time) {
+	s := NewScorer(inf, 0.5, func(score, _ float32, at time.Time, _ uint16) {
 		mu.Lock()
 		crosses = append(crosses, score)
 		mu.Unlock()
@@ -192,6 +192,36 @@ func TestCrossingFiresOncePerUtterance(t *testing.T) {
 	}
 }
 
+func TestCrossingCarriesTheSourcePCMSequence(t *testing.T) {
+	inf := &fakeInferer{}
+	sequence := make(chan uint16, 1)
+	s := NewScorer(inf, 0.5, func(_ float32, _ float32, _ time.Time, seq uint16) {
+		sequence <- seq
+	})
+	defer s.Close()
+
+	inf.set(0.0, 0)
+	for i := 0; i < wakeword.FeatWindow; i++ {
+		before := s.processed()
+		s.PushBytesSequence(make([]byte, 2560), uint16(i))
+		waitFor(t, "a frame to be scored", func() bool { return s.processed() > before })
+	}
+	waitFor(t, "detector to become ready", func() bool { return s.Ready() })
+	inf.set(0.9, 0)
+	before := s.processed()
+	s.PushBytesSequence(make([]byte, 2560), 4242)
+	waitFor(t, "detection frame to be scored", func() bool { return s.processed() > before })
+
+	select {
+	case got := <-sequence:
+		if got != 4242 {
+			t.Fatalf("crossing sequence = %d, want 4242", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("crossing did not fire")
+	}
+}
+
 // TestBelowThresholdDoesNotCross keeps the obvious direction honest, and checks
 // MaxScore is reported — the number that distinguishes "nearly detecting" from
 // "nowhere close", which is the whole point of shadow mode when a wake is
@@ -200,7 +230,7 @@ func TestBelowThresholdDoesNotCross(t *testing.T) {
 	var fired int
 	var mu sync.Mutex
 	inf := &fakeInferer{}
-	s := NewScorer(inf, 0.5, func(float32, float32, time.Time) {
+	s := NewScorer(inf, 0.5, func(float32, float32, time.Time, uint16) {
 		mu.Lock()
 		fired++
 		mu.Unlock()
@@ -323,7 +353,7 @@ func TestBargeThresholdAppliesOnlyWhileSpeaking(t *testing.T) {
 	var crosses int
 
 	inf := &fakeInferer{}
-	s := NewScorer(inf, 0.5, func(float32, float32, time.Time) {
+	s := NewScorer(inf, 0.5, func(float32, float32, time.Time, uint16) {
 		mu.Lock()
 		crosses++
 		mu.Unlock()
@@ -371,7 +401,7 @@ func TestBargeThresholdIgnoredWhenUnset(t *testing.T) {
 	inf := &fakeInferer{}
 	var fired int
 	var mu sync.Mutex
-	s := NewScorer(inf, 0.5, func(float32, float32, time.Time) {
+	s := NewScorer(inf, 0.5, func(float32, float32, time.Time, uint16) {
 		mu.Lock()
 		fired++
 		mu.Unlock()
@@ -395,7 +425,7 @@ func TestBargeThresholdNeverRaisesTheBar(t *testing.T) {
 	inf := &fakeInferer{}
 	var fired int
 	var mu sync.Mutex
-	s := NewScorer(inf, 0.3, func(float32, float32, time.Time) {
+	s := NewScorer(inf, 0.3, func(float32, float32, time.Time, uint16) {
 		mu.Lock()
 		fired++
 		mu.Unlock()
@@ -479,7 +509,7 @@ func TestCrossingReportsTheThresholdItCleared(t *testing.T) {
 	var got []float32
 
 	inf := &fakeInferer{}
-	s := NewScorer(inf, 0.5, func(_, threshold float32, _ time.Time) {
+	s := NewScorer(inf, 0.5, func(_, threshold float32, _ time.Time, _ uint16) {
 		mu.Lock()
 		got = append(got, threshold)
 		mu.Unlock()
@@ -537,7 +567,7 @@ func TestCrossingReportsTheThresholdItCleared(t *testing.T) {
 // on-device scoring active AND the model changed.
 func TestCloseDuringPushDoesNotPanic(t *testing.T) {
 	for i := 0; i < 50; i++ {
-		s := NewScorer(&fakeInferer{score: 0.1}, 0.5, func(float32, float32, time.Time) {})
+		s := NewScorer(&fakeInferer{score: 0.1}, 0.5, func(float32, float32, time.Time, uint16) {})
 
 		var wg sync.WaitGroup
 		wg.Add(1)

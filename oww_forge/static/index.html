@@ -6,140 +6,47 @@
 <title>EchoMuse — Wake Word Forge</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
-<script>
-  /* Applied before first paint, deliberately: the theme cannot be set from
-     the script at the end of the body without a dark-mode user seeing a
-     full flash of the light page on every load. Defaults to the OS
-     preference until a choice is made; the choice then wins permanently.
-     Same key as the dashboard ('em-theme'), so one pick covers both. */
-  (function () {
-    try {
-      var saved = localStorage.getItem('em-theme');
-      var theme = saved || (window.matchMedia &&
-        window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
-      document.documentElement.setAttribute('data-theme', theme);
-    } catch (e) {
-      document.documentElement.setAttribute('data-theme', 'light');
-    }
-  })();
-</script>
 <style>
   /* EchoMuse dashboard design language: warm greige appliance chassis,
-     gradient key-cap buttons, DM Sans/Mono, LCD console panels.
-
-     The token names and values are the DASHBOARD's, copied rather than
-     invented, so the two surfaces cannot drift into two slightly different
-     warm greys. Dark is not an inversion: it is the same hue family taken
-     down past the LCD, and the inset dark regions (the log console) stay
-     dark in both themes because they read as a lit panel set into the
-     surface. See controller/CLAUDE.md, "Dashboard styling and theming". */
-  :root, :root[data-theme="light"] {
-    --raised:    #e8e4de;
-    --card:      #e0dcd4;
-    --surface:   #d8d4cc;
-    --sunken:    #d0ccc4;
+     gradient key-cap buttons, DM Sans/Mono, LCD console panels. */
+  :root {
     --bg:        #ccc8c0;
-    --chassis:   #b8b4ac;
-
-    --border:      #b8b4ac;
-    --border-soft: #c0bdb6;
-    --border-hard: #b0aca4;
-
-    --text:   #1e1c18;
-    --text2:  #4a4844;
-    --muted:  #8a8680;
-    --faint:  #a8a49c;
-
-    --ok:     #286040;
-    --warn:   #c0601a;
-    --error:  #9a3020;
-
-    --accent:      #405878;
-    --accent-hi:   #6080a8;
-    --accent-deep: #304860;
-    --accent-tint: #dde8f4;
-    --on-accent:   #dde8f0;
-
+    --surface:   #d8d4cc;
+    --card:      #e0dcd4;
+    --border:    #b8b4ac;
     --lcd-bg:    #1e2219;
     --lcd-green: #9aba80;
-    --lcd-amber: #c8a040;
     --lcd-text:  #c8d4b0;
     --lcd-dim:   #7a9a68;
-    --lcd-line:  #1a1c18;
-
-    --key-top:    #d8d4cc;
-    --key-bottom: #c0bdb6;
-    --key-edge:   #a8a49c;
-    --key-face:   #2a2822;
-    --field:      #f0ece4;
-
-    --shadow-card: 0 2px 6px rgba(0,0,0,0.08), 0 1px 0 rgba(255,255,255,0.6) inset;
-    --shadow-key:  0 2px 4px rgba(0,0,0,0.2), 0 1px 0 rgba(255,255,255,0.15) inset;
-    --shadow-inset: inset 0 1px 3px rgba(0,0,0,0.08);
-    --hairline:    rgba(0,0,0,0.07);
-    --tint-ok:     rgba(40,96,64,0.12);
-    --tint-ok-line: rgba(40,96,64,0.3);
-    --tint-err:    rgba(154,48,32,0.09);
-    --tint-err-line: rgba(154,48,32,0.25);
-    --tint-accent: rgba(64,88,120,0.1);
-    --tint-accent-line: rgba(64,88,120,0.25);
+    --text:      #1e1c18;
+    --text2:     #4a4844;
+    --muted:     #8a8680;
+    --ok:        #286040;
+    --warn:      #c0601a;
+    --err:       #b03030;
+    --accent:    #405878;
   }
-
   :root[data-theme="dark"] {
-    --raised:    #2b3024;
-    --card:      #22261c;
-    --surface:   #1b1e16;
-    --sunken:    #171a12;
-    --bg:        #14160f;
-    --chassis:   #0e100a;
-
-    --border:      #343a2b;
-    --border-soft: #2c3124;
-    --border-hard: #414736;
-
-    --text:   #ddd9d1;
-    --text2:  #b2ada4;
-    --muted:  #83807a;
-    --faint:  #6d6a64;
-
-    --ok:     #6fa877;
-    --warn:   #d08a3a;
-    --error:  #cf7a68;
-
-    --accent:      #7397bd;
-    --accent-hi:   #8fb0d0;
-    --accent-deep: #4a6a8c;
-    --accent-tint: #1f2c3a;
-    --on-accent:   #101820;
-
-    --lcd-bg:    #12150e;
-    --lcd-green: #9aba80;
-    --lcd-amber: #c8a040;
-    --lcd-text:  #c8d4b0;
-    --lcd-dim:   #7a9a68;
-    --lcd-line:  #0c0e08;
-
-    --key-top:    #2f3427;
-    --key-bottom: #23271c;
-    --key-edge:   #414736;
-    --key-face:   #ddd9d1;
-    --field:      #11130c;
-
-    --shadow-card: 0 4px 16px rgba(0,0,0,0.45), 0 1px 0 rgba(255,255,255,0.05) inset;
-    --shadow-key:  0 2px 4px rgba(0,0,0,0.5), 0 1px 0 rgba(255,255,255,0.05) inset;
-    --shadow-inset: inset 0 1px 3px rgba(0,0,0,0.5);
-    --hairline:    rgba(255,255,255,0.07);
-    --tint-ok:     rgba(111,168,119,0.14);
-    --tint-ok-line: rgba(111,168,119,0.35);
-    --tint-err:    rgba(207,122,104,0.13);
-    --tint-err-line: rgba(207,122,104,0.3);
-    --tint-accent: rgba(115,151,189,0.14);
-    --tint-accent-line: rgba(115,151,189,0.3);
+    --bg:        #24231f;
+    --surface:   #302e28;
+    --card:      #39362f;
+    --border:    #575249;
+    --lcd-bg:    #151812;
+    --lcd-green: #b5d991;
+    --lcd-text:  #d8e8c5;
+    --lcd-dim:   #8cab70;
+    --text:      #f0ece2;
+    --text2:     #d0cbc0;
+    --muted:     #aaa498;
+    --ok:        #72bd8d;
+    --warn:      #e29a55;
+    --err:       #ee8585;
+    --accent:    #9ebee8;
   }
   * { box-sizing: border-box; margin: 0; }
   html, body { min-height: 100%; }
   body {
-    background: linear-gradient(160deg, var(--bg) 0%, var(--chassis) 100%);
+    background: linear-gradient(160deg, var(--bg) 0%, var(--surface) 100%);
     color: var(--text); font: 400 14px/1.5 'DM Sans', sans-serif;
   }
   .mono { font-family: 'DM Mono', monospace; }
@@ -150,7 +57,7 @@
   header {
     display: flex; align-items: center; gap: 14px; padding: 16px 28px;
     border-bottom: 1px solid var(--border);
-    background: linear-gradient(180deg, var(--surface), var(--bg));
+    background: linear-gradient(180deg, var(--card), var(--surface));
   }
   header h1 { font-size: 17px; font-weight: 600; letter-spacing: 0.02em; }
   header .sub { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted);
@@ -159,42 +66,48 @@
     margin-left: auto; display: inline-flex; align-items: center; gap: 7px;
     font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: 0.06em;
     color: var(--text2); padding: 5px 12px; border-radius: 14px;
-    border: 1px solid var(--border); background: linear-gradient(180deg,var(--raised),var(--sunken));
+    border: 1px solid var(--border); background: linear-gradient(180deg,#e4e0d8,#d4d0c8);
   }
   .pill .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--muted); }
-  .pill.on .dot { background: var(--ok); box-shadow: 0 0 5px var(--ok); }
+  .pill.on .dot { background: #40906a; box-shadow: 0 0 5px #40906a; }
+  #themeToggle { margin-left: 0; }
 
-  main { max-width: 1180px; margin: 0 auto; padding: 22px 28px 120px;
+  :root[data-theme="dark"] .card { background: linear-gradient(170deg, #403d35, #34312b); box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset, 0 2px 6px rgba(0,0,0,0.35); }
+  :root[data-theme="dark"] button { background: linear-gradient(180deg,#4b4840,#39362f); color: var(--text); border-color: #625d54; }
+  :root[data-theme="dark"] button.accent { background: linear-gradient(180deg,#678ab9,#46698f); color: #f1f6ff; border-color: #3b5876; }
+  :root[data-theme="dark"] input { background: #27251f; color: var(--text); border-color: #625d54; }
+
+  main { max-width: 1180px; margin: 0 auto; padding: 22px 28px 80px;
          display: grid; grid-template-columns: 330px 1fr; gap: 20px; }
-  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; padding-bottom: 48px; } }
 
   .card {
-    background: linear-gradient(170deg,var(--raised),var(--card));
+    background: linear-gradient(170deg,#e4e0d8,#dad6ce);
     border: 1px solid var(--border); border-radius: 10px;
     padding: 16px 18px; margin-bottom: 18px;
-    box-shadow: var(--shadow-card);
+    box-shadow: 0 1px 0 rgba(255,255,255,0.6) inset, 0 2px 6px rgba(0,0,0,0.08);
   }
 
   button {
-    background: linear-gradient(180deg,var(--key-top),var(--key-bottom)); color: var(--key-face);
-    border: 1px solid var(--key-edge); border-radius: 20px;
+    background: linear-gradient(180deg,#d8d4cc,#c0bdb6); color: #2a2822;
+    border: 1px solid #a8a49c; border-radius: 20px;
     font: 500 12px 'DM Sans', sans-serif; padding: 7px 18px; cursor: pointer;
-    box-shadow: var(--shadow-key);
+    box-shadow: 0 1px 0 rgba(255,255,255,0.15) inset, 0 2px 4px rgba(0,0,0,0.2);
     transition: all 0.1s; white-space: nowrap;
   }
   button:active:not(:disabled) { transform: translateY(1px); box-shadow: 0 1px 2px rgba(0,0,0,0.2); }
-  button:disabled { background: var(--sunken); color: var(--faint);
-                    border-color: var(--border-soft); box-shadow: none; cursor: not-allowed; }
-  button.accent { background: linear-gradient(180deg,var(--accent-hi),var(--accent)); color: var(--on-accent);
-                  border-color: var(--accent-deep); }
-  button.danger { background: none; border: none; box-shadow: none; color: var(--error);
+  button:disabled { background: linear-gradient(180deg,#d0ccc4,#bab6ae); color: #8a8680;
+                    border-color: #aca8a0; box-shadow: none; cursor: not-allowed; }
+  button.accent { background: linear-gradient(180deg,#6080a8,#405878); color: #dde8f0;
+                  border-color: #304860; }
+  button.danger { background: none; border: none; box-shadow: none; color: var(--err);
                   font-size: 11px; padding: 5px 8px; }
   button.small { font-size: 11px; padding: 5px 14px; }
 
   input {
-    background: var(--field); color: var(--text); border: 1px solid var(--border);
+    background: #f0ece4; color: var(--text); border: 1px solid var(--border);
     border-radius: 7px; padding: 8px 11px; font: 400 13px 'DM Sans', sans-serif;
-    width: 100%; box-shadow: var(--shadow-inset);
+    width: 100%; box-shadow: inset 0 1px 3px rgba(0,0,0,0.08);
   }
   label { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--text2);
           text-transform: uppercase; letter-spacing: 0.08em; display: block; margin: 12px 0 5px; }
@@ -205,80 +118,79 @@
 
   /* asset checklist */
   .asset { display: flex; align-items: center; gap: 10px; padding: 7px 0;
-           border-bottom: 1px solid var(--hairline); font-size: 13px; }
+           border-bottom: 1px solid rgba(0,0,0,0.07); font-size: 13px; }
   .asset:last-child { border-bottom: 0; }
   .asset .detail { margin-left: auto; font-family: 'DM Mono', monospace; font-size: 10px;
                    color: var(--muted); }
-  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--warn); flex: none; }
-  .dot.on { background: var(--ok); }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: #c0601a; flex: none; }
+  .dot.on { background: #40906a; }
 
   /* wake word cards */
+  .wake-tabs { display: flex; gap: 6px; overflow-x: auto; padding: 2px 2px 12px; margin-bottom: 2px; scrollbar-width: thin; }
+  .wake-tab { flex: 0 0 auto; border-radius: 8px 8px 0 0; padding: 8px 13px; background: var(--surface); box-shadow: none; color: var(--text2); border-color: var(--border); }
+  .wake-tab[aria-selected="true"] { background: var(--card); color: var(--text); border-bottom: 2px solid var(--accent); }
+  .wake-tab .tab-status { display: inline-block; width: 6px; height: 6px; margin-right: 7px; border-radius: 50%; background: var(--muted); }
+  .wake-tab .tab-status.ready { background: var(--ok); }
+  .wake-tab .tab-status.warn { background: var(--warn); }
+  .wake-tab .tab-status.error { background: var(--err); }
+  .wake-panel { margin-top: 0; }
   .ww .top { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
   .ww h3 { font-size: 16px; font-weight: 600; }
   .ww .phrase { color: var(--text2); font-style: italic; font-size: 13px; }
-  .ww .phrase a { color: inherit; text-decoration: none; border-bottom: 1px dotted var(--faint); }
-  .ww .phrase a:hover { color: var(--accent); border-bottom-color: var(--accent); }
   .ww .built { margin-left: auto; font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted); }
 
   /* pipeline stepper */
   .stepper { display: flex; align-items: center; margin: 14px 2px 16px; }
   .step { display: flex; flex-direction: column; align-items: center; gap: 5px; flex: none; width: 92px; }
   .step .bub { width: 14px; height: 14px; border-radius: 50%; border: 2px solid var(--border);
-               background: var(--sunken); }
-  .step.done .bub { background: var(--ok); border-color: var(--ok); }
-  .step.active .bub { background: var(--lcd-amber); border-color: var(--warn); animation: pulse 1.2s ease-in-out infinite; }
-  @keyframes pulse { 50% { box-shadow: 0 0 0 4px color-mix(in srgb, var(--lcd-amber) 25%, transparent); } }
+               background: #d4d0c8; }
+  .step.done .bub { background: #40906a; border-color: #286040; }
+  .step.active .bub { background: #c8a040; border-color: #806010; animation: pulse 1.2s ease-in-out infinite; }
+  @keyframes pulse { 50% { box-shadow: 0 0 0 4px rgba(200,160,64,0.25); } }
   .step span { font-family: 'DM Mono', monospace; font-size: 8.5px; text-transform: uppercase;
                letter-spacing: 0.08em; color: var(--muted); text-align: center; }
   .step.done span, .step.active span { color: var(--text2); }
   .conn { flex: 1; height: 2px; background: var(--border); margin: 0 2px 18px; min-width: 8px; }
-  .conn.done { background: var(--ok); }
+  .conn.done { background: #40906a; }
 
   .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
   .actiongroup { margin-top: 10px; }
+  .dataset-options { margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(0,0,0,0.08); }
+  .dataset-options label { display: flex; align-items: center; gap: 7px; margin: 6px 0; text-transform: none; letter-spacing: 0; font-family: 'DM Sans', sans-serif; font-size: 12px; }
+  .dataset-options input { width: auto; }
+  .credential { margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(0,0,0,0.08); }
+  .credential .row { flex-wrap: nowrap; }
+  .credential input { min-width: 0; }
 
   /* results / verdicts */
   .verdict { display: flex; align-items: center; gap: 9px; margin-top: 12px; padding: 10px 13px;
              border-radius: 8px; font-weight: 500; font-size: 13px; }
-  .verdict.ok { background: var(--tint-ok); color: var(--ok); border: 1px solid var(--tint-ok-line); }
-  .verdict.no { background: var(--tint-err); color: var(--error); border: 1px solid var(--tint-err-line); }
-  .verdict.info { background: var(--tint-accent); color: var(--accent); border: 1px solid var(--tint-accent-line); }
+  .verdict.ok { background: rgba(40,96,64,0.12); color: var(--ok); border: 1px solid rgba(40,96,64,0.3); }
+  .verdict.no { background: rgba(176,48,48,0.09); color: var(--err); border: 1px solid rgba(176,48,48,0.25); }
+  .verdict.info { background: rgba(64,88,120,0.1); color: var(--accent); border: 1px solid rgba(64,88,120,0.25); }
   .rawout { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted);
-            margin-top: 7px; white-space: pre-wrap; }
+             margin-top: 7px; white-space: pre-wrap; }
+  .live-score { margin-top: 12px; padding: 11px 12px 9px; border: 1px solid #303a2a;
+                border-radius: 8px; background: var(--lcd-bg); }
+  .live-score .head { display: flex; justify-content: space-between; align-items: baseline;
+                      color: var(--lcd-text); font-family: 'DM Mono', monospace; font-size: 10px; }
+  .live-score .score { color: var(--lcd-green); font-size: 14px; }
+  .live-score canvas { display: block; width: 100%; height: 150px; margin-top: 7px; }
 
-  /* LCD console */
-  #console { position: fixed; left: 0; right: 0; bottom: 0; padding: 10px 28px 14px;
-             background: linear-gradient(180deg, transparent, var(--chassis) 30%); }
-  #console .inner { max-width: 1124px; margin: 0 auto; }
+  /* LCD console stays in the right workspace, below the wake-word cards. */
+  #console { margin-top: 20px; }
+  #console .inner { width: 100%; }
   #console .bar { display: flex; gap: 12px; align-items: center; padding: 5px 4px; }
   #console .bar strong { font-size: 12.5px; font-weight: 600; }
   #console pre {
-    background: var(--lcd-bg); color: var(--lcd-text); border: 1px solid var(--lcd-line);
+    background: var(--lcd-bg); color: var(--lcd-text); border: 1px solid #1a1c16;
     border-radius: 6px; box-shadow: inset 0 2px 6px rgba(0,0,0,0.6);
-    padding: 10px 13px; height: 150px; overflow-y: auto;
+     padding: 10px 13px; height: min(48vh, 520px); min-height: 330px; overflow-y: auto;
     font: 400 11px/1.6 'DM Mono', monospace; white-space: pre-wrap;
   }
-  #console.min pre { display: none; }
   .status { font-family: 'DM Mono', monospace; font-size: 10.5px; letter-spacing: 0.04em; }
-  .status.running { color: var(--warn); } .status.ok { color: var(--ok); } .status.fail { color: var(--error); }
-  #toggleLog { margin-left: auto; }
+  .status.running { color: #806010; } .status.ok { color: var(--ok); } .status.fail { color: var(--err); }
   .empty { color: var(--muted); font-size: 13px; line-height: 1.6; }
-
-  /* theme toggle */
-  .iconbtn { border-radius: 50%; width: 30px; height: 30px; padding: 0;
-             display: inline-flex; align-items: center; justify-content: center;
-             font-size: 13px; line-height: 1; }
-
-  /* google credentials */
-  .kv { display: flex; gap: 10px; font-size: 12px; padding: 3px 0; }
-  .kv .k { font-family: 'DM Mono', monospace; font-size: 10px; color: var(--muted);
-           text-transform: uppercase; letter-spacing: 0.08em; min-width: 62px; }
-  .kv .v { color: var(--text2); word-break: break-all; }
-  textarea {
-    background: var(--field); color: var(--text); border: 1px solid var(--border);
-    border-radius: 7px; padding: 8px 11px; font: 400 11px/1.5 'DM Mono', monospace;
-    width: 100%; min-height: 90px; box-shadow: var(--shadow-inset); resize: vertical;
-  }
 </style>
 </head>
 <body>
@@ -287,37 +199,64 @@
     <h1>Wake Word Forge</h1>
     <div class="sub">EchoMuse &middot; custom wake words</div>
   </div>
+  <button id="themeToggle" class="small" type="button" aria-label="Toggle color theme">Theme: auto</button>
   <span class="pill" id="gpuBadge"><span class="dot"></span><span id="gpuText">connecting…</span></span>
-  <button class="iconbtn" id="themeBtn" title="Light / dark">◐</button>
 </header>
 
 <main>
   <section>
-    <!-- Matches "Your wake words" opposite, so the two columns start on the
-         same line. Without it the left column sat one label-height higher
-         than the right and the cards read as misaligned. -->
-    <div class="microlabel" style="margin-left:2px">Setup</div>
     <div class="card">
-      <div class="microlabel">Step 1 &middot; Voice data</div>
-      <div id="assetSummary" class="hint" style="margin:0 0 10px"></div>
-      <div id="assets" style="display:none"></div>
+      <div class="microlabel">Step 1 &middot; Core modules</div>
+      <div id="coreSummary" class="hint" style="margin:0 0 10px"></div>
+      <div id="coreAssets" style="display:none"></div>
       <div class="row" style="margin-top:12px">
-        <button id="dlAll" class="accent">Download voice data</button>
-        <button id="assetDetail" class="small">details</button>
+        <button id="dlCore" class="accent">Download core modules</button>
+        <button id="coreDetail" class="small">details</button>
       </div>
     </div>
 
     <div class="card">
-      <div class="microlabel">Step 2 &middot; Create a wake word</div>
+      <div class="microlabel">Step 2 &middot; Optional voice data</div>
+      <div class="hint" style="margin:0">Add large real-speech corpora for broader negative coverage and far-field validation.</div>
+      <div class="credential">
+        <label>Mozilla Data Collective API key</label>
+        <div class="row">
+          <input id="mdcApiKey" type="password" autocomplete="off" placeholder="Required for full Common Voice">
+          <button id="saveMdcApiKey" class="small">save</button>
+        </div>
+      </div>
+      <div id="optionalAssets" class="dataset-options"></div>
+      <div class="row" style="margin-top:14px">
+        <button id="dlOptional" class="accent">Download selected voice data</button>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="microlabel">Step 3 &middot; Create a wake word</div>
       <label>Wake phrase</label>
       <input id="newPhrase" placeholder='e.g. "hey clara, hey clarra"'>
       <div class="hint">Pick a short phrase of 3&ndash;4 syllables. The training voices are American
         &mdash; add a comma-separated spelling of how <em>your family</em> says it
         (&ldquo;clarra&rdquo; for a British &ldquo;clara&rdquo;). One wake word listens for all spellings.</div>
-      <div class="row" style="margin-top:8px">
-        <button class="small" id="previewBtn">▶ Hear each spelling</button>
-        <span class="hint" id="previewNote" style="margin:0"></span>
-      </div>
+      <label>Confusables</label>
+       <input id="newConfusables" placeholder='e.g. "hey carla, hey clara"'>
+       <div class="hint">Comma-separated phrases that must not wake the device. Piper generates them as negatives; Google voices add matching negative clips when used.</div>
+       <details>
+         <summary>Google Chirp 3 options</summary>
+         <label>Locales</label>
+         <input id="newGttsLanguages" value="en-US,en-GB,en-AU,en-IN,en-PH,en-SG,en-ZA">
+         <label>Exact voice names</label>
+         <input id="newGttsVoices" placeholder="Optional comma-separated Chirp 3 voice names; blank = all matching">
+          <label>Samples per voice per locale</label>
+          <input id="newGttsSamples" type="number" min="1" value="250">
+          <label>Queries per second</label>
+          <input id="newGttsQps" type="number" min="0.1" step="0.1" value="2">
+         <div class="row" style="margin-top:6px">
+           <button type="button" class="small" id="listGttsVoices">List available Chirp 3 voices</button>
+         </div>
+         <pre id="gttsVoiceList" class="rawout" style="display:none;max-height:180px"></pre>
+         <div class="hint">These settings are saved with the wake word and used when adding Google Chirp 3 samples.</div>
+       </details>
       <details>
         <summary>advanced</summary>
         <label>Model name</label>
@@ -332,53 +271,46 @@
       </div>
     </div>
 
-    <div class="card">
-      <div class="microlabel">Optional &middot; Google voices</div>
-      <div id="googleState"></div>
-      <div id="googleSetup" style="display:none">
-        <div class="hint" style="margin-top:0">Adds British, Australian and US synthetic
-          voices on top of the built-in ones. Needs a Google Cloud
-          <strong>service account</strong> with the Text-to-Speech API enabled: in the
-          console, IAM &amp; Admin &rarr; Service Accounts &rarr; Keys &rarr; Add key &rarr; JSON.</div>
-        <label>Key file</label>
-        <input type="file" id="gFile" accept="application/json,.json">
-        <details>
-          <summary>or paste it</summary>
-          <textarea id="gPaste" placeholder='{ "type": "service_account", … }'></textarea>
-        </details>
-        <div class="row" style="margin-top:12px">
-          <button class="accent small" id="gSave">Save key</button>
-        </div>
-      </div>
-      <div class="row" id="googleActions" style="margin-top:12px; display:none">
-        <button class="small" id="gCheck">Test connection</button>
-        <button class="danger" id="gRemove" style="margin-left:auto">remove key</button>
-      </div>
-      <div class="verdict" id="gVerdict" style="display:none"></div>
-    </div>
   </section>
 
   <section>
     <div class="microlabel" style="margin-left:2px">Your wake words</div>
     <div id="wakewords"></div>
+    <div id="console">
+      <div class="inner">
+        <div class="bar">
+          <strong id="jobLabel"></strong>
+          <span class="status" id="jobStatus"></span>
+          <button id="cancelJob" class="small" style="display:none">Stop job</button>
+        </div>
+        <pre id="logPre"></pre>
+      </div>
+    </div>
   </section>
 </main>
 
-<div id="console" class="min" style="display:none">
-  <div class="inner">
-    <div class="bar">
-      <strong id="jobLabel"></strong>
-      <span class="status" id="jobStatus"></span>
-      <button id="cancelJob" class="small" style="display:none">Stop</button>
-      <button id="toggleLog" class="small">show log</button>
-    </div>
-    <pre id="logPre"></pre>
-  </div>
-</div>
-
 <script>
 const $ = id => document.getElementById(id);
-let state = null, logOffset = 0, lastJobKey = null, lastWwHtml = null;
+const THEME_KEY = 'em-forge-theme';
+function applyTheme(value) {
+  const theme = value === 'dark' || value === 'light' ? value : 'auto';
+  const dark = theme === 'dark' || (theme === 'auto' && matchMedia('(prefers-color-scheme: dark)').matches);
+  document.documentElement.dataset.theme = dark ? 'dark' : 'light';
+  $('themeToggle').textContent = `Theme: ${theme}`;
+  $('themeToggle').dataset.theme = theme;
+}
+function cycleTheme() {
+  const current = $('themeToggle').dataset.theme || 'auto';
+  const next = current === 'auto' ? 'light' : current === 'light' ? 'dark' : 'auto';
+  localStorage.setItem(THEME_KEY, next);
+  applyTheme(next);
+}
+applyTheme(localStorage.getItem(THEME_KEY) || 'auto');
+$('themeToggle').onclick = cycleTheme;
+let state = null, logOffset = 0, lastJobKey = null, liveTest = null;
+const LOG_WINDOW_LINES = 120;
+const optionalSelection = new Set();
+let optionalSelectionInitialized = false;
 
 async function api(path, opts) {
   const r = await fetch(path, opts);
@@ -386,6 +318,22 @@ async function api(path, opts) {
   return r.json();
 }
 const esc = s => String(s).replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+const sourceLabel = {custom: 'Your recordings', piper: 'Piper synthetic', google: 'Google Chirp 3'};
+const fmtHours = seconds => `${Math.round((seconds || 0) / 3600)}h`;
+
+function sourceMixPanel(w, polarity) {
+  const inventory = w.source_inventory?.[polarity] || {};
+  const mix = w.training_mix?.[polarity] || {};
+  const rows = ['custom', 'piper', 'google'].map(source => {
+    const item = inventory[source] || {train: {}, test: {}, total: {}};
+    const available = (item.train?.count || 0) > 0;
+    const value = mix[source] == null ? '' : mix[source];
+    return `<tr><td>${sourceLabel[source]}</td><td>${item.train?.count || 0}</td><td>${item.test?.count || 0}</td><td>${item.total?.count || 0}</td><td>${fmtHours(item.total?.seconds)}</td><td><input type="number" min="0" max="100" step="1" data-mix-${polarity}-${source} value="${value}" ${available && !busy() ? '' : 'disabled'} style="width:60px">%</td></tr>`;
+  }).join('');
+  const draws = w.resolved_training_mix?.[polarity]?.draws || {};
+  const drawText = Object.entries(draws).filter(([, count]) => count).map(([source, count]) => `${sourceLabel[source]} ${count}`).join(', ') || 'no train clips';
+  return `<div class="dataset-options" style="margin-top:10px"><div class="microlabel">${polarity[0].toUpperCase() + polarity.slice(1)} training sources</div><table style="width:100%;font-size:12px;border-collapse:collapse"><thead><tr><th align="left">Source</th><th>Train</th><th>Test</th><th>Total</th><th>Audio</th><th>Mix</th></tr></thead><tbody>${rows}</tbody></table><div class="hint">Per build: ${esc(drawText)} draws. Leave every mix field blank to use natural source proportions. Audio is rounded to the nearest hour; test clips are never weighted.</div></div>`;
+}
 
 function fmtAgo(ts) {
   const d = new Date(ts * 1000);
@@ -398,8 +346,7 @@ function friendlyJob(label) {
   return label
     .replace(/^downloading assets.*/, 'Downloading voice data')
     .replace(/^building '(.+)'$/, 'Training “$1”')
-    .replace(/^Google TTS × (\d+) \((.+)\) for '(.+)'$/, 'Adding $1 Google voices ($2) to “$3”')
-    .replace(/^(\S+) voices × (\d+) for '(.+)'$/, 'Adding $2 $1 voices to “$3”');
+    .replace(/^Google TTS × (\d+) \((.+)\) for '(.+)'$/, 'Adding $1 Google voices ($2) to “$3”');
 }
 
 function render() {
@@ -408,29 +355,114 @@ function render() {
   $('gpuBadge').className = 'pill' + (g.available ? ' on' : '');
 
   // assets
+  const requiredParts = ['piper', 'features', 'rirs', 'audioset', 'fma'];
   const missing = state.assets.filter(a => !a.present);
-  $('assetSummary').textContent = missing.length
-    ? `A one-time ~25 GB download of training voices and background sounds is needed before training. (${state.assets.length - missing.length}/${state.assets.length} parts done)`
-    : 'All voice data downloaded — ready to train.';
-  $('assets').innerHTML = state.assets.map(a => `
+  const missingCore = missing.filter(a => requiredParts.includes(a.part));
+  const core = state.assets.filter(a => requiredParts.includes(a.part));
+  $('coreSummary').textContent = missingCore.length
+    ? `The original Forge modules need ~25 GB. (${core.length - missingCore.length}/${core.length} ready)`
+    : 'All core modules are ready.';
+  $('coreAssets').innerHTML = core.map(a => `
     <div class="asset">
       <span class="dot ${a.present ? 'on' : ''}"></span>
       <span>${esc(a.label)}</span>
       <span class="detail">${a.present ? esc(a.detail) : 'missing'}</span>
     </div>`).join('');
-  $('dlAll').disabled = busy() || missing.length === 0;
-  $('dlAll').textContent = missing.length ? 'Download voice data' : '✓ Downloaded';
-  $('dlAll').className = missing.length ? 'accent' : '';
-
-  renderGoogle();
+  $('dlCore').disabled = busy() || missingCore.length === 0;
+  $('dlCore').textContent = missingCore.length ? 'Download core modules' : '✓ Core ready';
+  $('dlCore').className = missingCore.length ? 'accent' : '';
+  const mdc = state.credentials?.mdc_api_key;
+  $('mdcApiKey').placeholder = mdc ? `Saved: ${mdc}` : 'Required for full Common Voice';
+  const commonVoice = state.assets.find(a => a.part === 'common_voice');
+  const commonVoiceFeatures = state.assets.find(a => a.part === 'common_voice_features');
+  const ami = state.assets.find(a => a.part === 'ami');
+  const fleurs = state.assets.find(a => a.part === 'fleurs');
+  const voxpopuli = state.assets.find(a => a.part === 'voxpopuli');
+  const musan = state.assets.find(a => a.part === 'musan');
+  const slr28 = state.assets.find(a => a.part === 'slr28');
+  const commonReady = commonVoiceFeatures.present;
+  const commonNeedsKey = !commonVoice.present && !mdc;
+  if (!optionalSelectionInitialized) {
+    try {
+      const saved = JSON.parse(localStorage.getItem('em-forge-optional-data'));
+      if (Array.isArray(saved)) saved.forEach(part => optionalSelection.add(part));
+      else throw new Error('no saved selection');
+    } catch {
+      if (commonReady) optionalSelection.add('common_voice');
+      if (ami.present) optionalSelection.add('ami');
+    }
+    optionalSelectionInitialized = true;
+  }
+  $('optionalAssets').innerHTML = `
+    <label><input type="checkbox" data-optional="common_voice" ${optionalSelection.has('common_voice') ? 'checked' : ''} ${busy() || commonNeedsKey ? 'disabled' : ''}>
+      Common Voice 26 English negatives <span class="hint">${commonReady ? 'ready' : commonNeedsKey ? 'save an MDC key first' : '88GB archive + full feature build'}</span></label>
+    <label><input type="checkbox" data-optional="ami" ${optionalSelection.has('ami') ? 'checked' : ''} ${busy() ? 'disabled' : ''}>
+      AMI distant-mic validation <span class="hint">${ami.present ? 'ready' : 'CC-BY-4.0, ~7 hours'}</span></label>
+    <label><input type="checkbox" data-optional="fleurs" ${optionalSelection.has('fleurs') ? 'checked' : ''} ${busy() ? 'disabled' : ''}>
+      FLEURS multilingual speech <span class="hint">${fleurs.present ? 'ready' : 'priority 1, 10-language balanced cap'}</span></label>
+    <label><input type="checkbox" data-optional="voxpopuli" ${optionalSelection.has('voxpopuli') ? 'checked' : ''} ${busy() ? 'disabled' : ''}>
+      VoxPopuli accents <span class="hint">${voxpopuli.present ? 'ready' : 'priority 2, accented English + 8 languages'}</span></label>
+    <label><input type="checkbox" data-optional="musan" ${optionalSelection.has('musan') ? 'checked' : ''} ${busy() ? 'disabled' : ''}>
+      MUSAN speech, music, noise <span class="hint">${musan.present ? 'ready' : 'priority 4, 11 GB'}</span></label>
+    <label><input type="checkbox" data-optional="slr28" ${optionalSelection.has('slr28') ? 'checked' : ''} ${busy() ? 'disabled' : ''}>
+      OpenSLR 28 RIR and noise <span class="hint">${slr28.present ? 'ready' : 'priority 5, 1.3 GB'}</span></label>`;
+  $('dlOptional').disabled = busy() || optionalSelection.size === 0;
 
   // wake words
-  const html = state.wakewords.length ? state.wakewords.map(w => {
+  //
+  // refresh() polls every 2.5s and always reaches this innerHTML replace, so
+  // without the capture/restore below, ANY field inside a wake-word card that
+  // hasn't been explicitly SAVED yet (Samples per voice, Locales, Voice
+  // names, Confusable phrases) gets silently snapped back to the last-saved
+  // server value and loses focus mid-edit — typing feels broken, and a native
+  // number input's spinner only *appears* to work because a few clicks can
+  // land inside one 2.5s window before the next poll erases them. Remember
+  // whichever field the user is actively editing, and put it back afterwards.
+  const wwRoot = $('wakewords');
+  const wakeNames = state.wakewords.map(w => w.name);
+  let activeWakeword = localStorage.getItem('em-forge-active-wakeword');
+  if (!wakeNames.includes(activeWakeword)) {
+    activeWakeword = wakeNames[0] || null;
+    if (activeWakeword) localStorage.setItem('em-forge-active-wakeword', activeWakeword);
+  }
+  const editing = document.activeElement;
+  const pendingMix = {};
+  wwRoot.querySelectorAll('input[data-mix-positive-custom], input[data-mix-positive-piper], input[data-mix-positive-google], input[data-mix-negative-custom], input[data-mix-negative-piper], input[data-mix-negative-google]').forEach(input => {
+    const card = input.closest('.card.ww');
+    const attr = [...input.attributes].find(a => a.name.startsWith('data-mix-'));
+    if (card && attr) pendingMix[`${card.dataset.name}:${attr.name}`] = input.value;
+  });
+  const pendingPiper = {};
+  wwRoot.querySelectorAll('input[data-piper-language], input[data-piper-voices], input[data-piper-samples]').forEach(input => {
+    const card = input.closest('.card.ww');
+    const attr = [...input.attributes].find(a => a.name.startsWith('data-piper-'));
+    if (card && attr) pendingPiper[`${card.dataset.name}:${attr.name}`] = input.value;
+  });
+  let pendingEdit = null;
+  if (editing && wwRoot.contains(editing) && (editing.tagName === 'INPUT' || editing.tagName === 'TEXTAREA')) {
+    const card = editing.closest('.card.ww');
+    // Every editable field in a card carries its own data-* attribute as a
+    // stable identifier (data-gtts-samples, data-gtts-languages, …) — reuse
+    // whichever one is present rather than hardcoding the field list twice.
+    const dataAttr = card && [...editing.attributes].find(a => a.name.startsWith('data-'));
+    if (card && dataAttr) {
+      pendingEdit = {
+        cardName: card.dataset.name, selector: `[${dataAttr.name}]`,
+        value: editing.value, selStart: editing.selectionStart, selEnd: editing.selectionEnd,
+      };
+    }
+  }
+  const wakeTabs = state.wakewords.map(w => {
+    const ready = w.model_built && !w.features_stale;
+    const status = ready ? 'ready' : w.features_stale ? 'warn' : 'error';
+    return `<button class="wake-tab" role="tab" data-wake-tab="${esc(w.name)}" aria-selected="${w.name === activeWakeword}" type="button"><span class="tab-status ${status}"></span>${esc(w.name)}</button>`;
+  }).join('');
+  const wakeCards = state.wakewords.filter(w => w.name === activeWakeword).map(w => {
     const stages = [
       ['Created', true],
       ['Voices', w.clips_train > 0],
-      ['Mixing', w.features_built],
-      ['Ready', w.model_built],
+      ['Mixing', w.features_built && !w.features_stale],
+      ['Ready', w.model_built && !w.features_stale],
     ];
     const activeIdx = stages.findIndex(s => !s[1]);
     const isTraining = busy() && state.job.label.includes(`'${w.name}'`);
@@ -440,118 +472,149 @@ function render() {
              (i < stages.length - 1 ? `<div class="conn ${stages[i+1][1] ? 'done' : ''}"></div>` : '');
     }).join('');
     return `
-    <div class="card ww" data-name="${esc(w.name)}">
-      <div class="top">
+    <div class="card ww wake-panel" role="tabpanel" data-name="${esc(w.name)}">
+        <div class="top">
         <h3>${esc(w.name)}</h3>
-        <span class="phrase">${w.phrases.map((p, i) =>
-          `<a href="#" data-say="${esc(p)}" title="Hear this spelling">“${esc(p)}” ▸</a>`).join(' / ')}</span>
+        <span class="phrase">“${esc(w.phrases.join('” / “'))}”</span>
         ${w.model_built ? `<span class="built">trained ${fmtAgo(w.model_mtime)}</span>` : ''}
       </div>
       <div class="stepper">${stepper}</div>
-      <div class="row">
-        <button class="accent" data-act="build" ${busy() ? 'disabled' : ''}>
-          ${w.model_built ? 'Retrain' : w.clips_train ? 'Continue training' : 'Train'}</button>
-        ${w.model_built ? `
-          <button data-act="mic">🎤 Try it</button>
-          <button data-act="test">Test a recording…</button>
-          <a href="/api/models/${esc(w.name)}.onnx"><button>Download model</button></a>` : ''}
-        <button class="danger" data-act="del" style="margin-left:auto">remove</button>
-        <input type="file" accept="audio/*" multiple style="display:none">
+      ${w.features_stale ? `<div class="hint" style="color:var(--err);margin:-8px 0 12px">New or changed clips need mixing. Retrain will rebuild features automatically.</div>` : ''}
+      <div class="live-score" data-live-score style="display:none">
+        <div class="head"><span>LIVE MIC SCORE <span data-live-state>connecting</span></span>
+          <span><span data-live-level>MIC -- dBFS</span> <span class="score" data-live-value>0.000</span></span></div>
+        <canvas data-live-canvas></canvas>
+        <div class="hint" style="color:var(--lcd-dim);margin:3px 0 0">Score over time. Dotted line: example threshold 0.50.</div>
       </div>
       <div class="actiongroup">
-        <div class="microlabel" style="margin-bottom:6px">Improve accuracy</div>
-        <div class="row">
-          <button class="small" data-act="addrec" ${busy() ? 'disabled' : ''}
-            title="The strongest accuracy boost: real recordings of your household saying the phrase">
-            + Family recordings…</button>
-          <button class="small" data-act="pipergb" ${busy() ? 'disabled' : ''}
-            title="Add voices in another accent or language, generated locally — no account, no cost">+ Accents &amp; languages…</button>
-          <button class="small" data-act="gtts" ${busy() ? 'disabled' : ''}
-            title="Adds British/Australian/US synthetic voices (usually free)">+ Google voices…</button>
-          <span class="hint" style="margin:0">then retrain to apply</span>
-        </div>
-        <details>
-          <summary>training settings</summary>
-          <div class="hint" style="margin-top:8px">Stop a run, change these, then press
-            Train again. Nothing already generated is thrown away.</div>
-          <label>Synthetic voice samples</label>
-          <input type="number" data-f="n_samples" value="${w.n_samples ?? ''}">
-          <label>Max training steps</label>
-          <input type="number" data-f="steps" value="${w.steps ?? ''}">
-          <label>Words it must NOT wake on</label>
-          <input data-f="negatives" placeholder="comma separated, e.g. hey clarice"
-                 value="${esc((w.custom_negative_phrases || []).join(', '))}">
-          <div class="hint">Add anything you hear it wake on by mistake, then retrain.</div>
-          <div class="row" style="margin-top:12px">
-            <button class="small" data-act="save" ${busy() ? 'disabled' : ''}>Save settings</button>
+        <div class="dataset-options">
+          <div class="microlabel">Confusable phrases</div>
+          <label>Comma-separated phrases that must not wake
+            <input data-confusables value="${esc(w.confusables.join(', '))}"
+              placeholder="e.g. hey carla, hey brisket" ${busy() ? 'disabled' : ''} style="width:100%"></label>
+          <div class="row" style="margin-top:6px">
+            <button class="small" data-act="confusables" ${busy() ? 'disabled' : ''}>Save confusables</button>
+            <span class="hint" style="margin:0">Rebuild from Generate after changing these.</span>
           </div>
-        </details>
+        </div>
+        <div class="dataset-options">
+          <div class="microlabel">Optional datasets</div>
+          <label><input type="checkbox" data-dataset="common_voice" ${w.use_common_voice_negatives ? 'checked' : ''} ${!state.assets.find(a => a.part === 'common_voice_features').present ? 'disabled' : ''}> Common Voice 26 English training negatives</label>
+          <label><input type="checkbox" data-dataset="ami" ${w.use_ami_farfield_validation ? 'checked' : ''} ${!state.assets.find(a => a.part === 'ami').present ? 'disabled' : ''}> AMI distant-mic false-positive validation</label>
+          <label><input type="checkbox" data-dataset="fleurs" ${w.use_fleurs_negatives ? 'checked' : ''} ${!state.assets.find(a => a.part === 'fleurs').present ? 'disabled' : ''}> FLEURS multilingual negatives (96 / batch)</label>
+          <label><input type="checkbox" data-dataset="voxpopuli" ${w.use_voxpopuli_negatives ? 'checked' : ''} ${!state.assets.find(a => a.part === 'voxpopuli').present ? 'disabled' : ''}> VoxPopuli accent negatives (96 / batch)</label>
+          <label><input type="checkbox" data-dataset="musan" ${w.use_musan_background ? 'checked' : ''} ${!state.assets.find(a => a.part === 'musan').present ? 'disabled' : ''}> MUSAN augmentation background</label>
+          <label><input type="checkbox" data-dataset="slr28" ${w.use_slr28_augmentation ? 'checked' : ''} ${!state.assets.find(a => a.part === 'slr28').present ? 'disabled' : ''}> OpenSLR 28 room/noise augmentation</label>
+        </div>
+        <div class="dataset-options" style="margin-top:10px">
+          <div class="microlabel">Google Chirp 3 audio</div>
+          <label>Locales <input data-gtts-languages value="${esc(w.google_tts_languages)}"
+            ${busy() ? 'disabled' : ''} style="width:100%"></label>
+          <label>Voice names <input data-gtts-voices value="${esc(w.google_tts_voices)}"
+            placeholder="Optional comma-separated exact Chirp 3 names; blank = all matching"
+            ${busy() ? 'disabled' : ''} style="width:100%"></label>
+          <label>Samples per voice per locale <input data-gtts-samples type="number" min="1" value="${w.google_tts_samples_per_voice}"
+            ${busy() ? 'disabled' : ''}></label>
+          <label>Queries per second <input data-gtts-qps type="number" min="0.1" step="0.1" value="${w.google_tts_qps}"
+            ${busy() ? 'disabled' : ''}></label>
+          <div class="hint">A voice available for two selected locales receives this many clips for each locale. Confusable negatives receive the same matrix.</div>
+          <div class="row" style="margin-top:6px">
+            <button class="small" data-act="gtts" ${busy() ? 'disabled' : ''}
+              title="Adds Chirp 3 positive samples for every selected locale and voice">Generate audio</button>
+            <button class="small" data-act="save-gtts" ${busy() ? 'disabled' : ''}
+              title="Save Google TTS locales, voices, and sample count without starting synthesis">Save Google TTS config</button>
+            <button class="small" data-act="prune-gtts" ${busy() ? 'disabled' : ''}
+              title="Preview and remove generated Chirp clips outside the saved locale and voice selection">Preview prune unselected clips</button>
+          </div>
+        </div>
+        <div class="dataset-options" style="margin-top:10px">
+          <div class="microlabel">Piper audio</div>
+          <label>Locale <input data-piper-language value="en_GB" placeholder="e.g. en_GB, de_DE"></label>
+          <label>Exact voice names <input data-piper-voices placeholder="Optional comma-separated names; blank = best for locale"></label>
+          <label>Samples <input data-piper-samples type="number" min="1" value="4000"></label>
+          <div class="hint">Local, no account or API cost. Added clips displace the default US Piper set at build time.</div>
+          <div class="row" style="margin-top:6px">
+            <button class="small" data-act="piper" ${busy() ? 'disabled' : ''}
+              title="Adds local Piper voices in another accent or language">Generate audio</button>
+            <button class="small" data-act="preview-piper" ${busy() ? 'disabled' : ''}>Preview Piper</button>
+            <button class="small danger" data-act="delete-piper" ${busy() ? 'disabled' : ''}>Delete Piper samples</button>
+          </div>
+        </div>
+        <div class="dataset-options" style="margin-top:10px">
+          <div class="microlabel">Labelled dataset from controller</div>
+          <div class="row" style="margin-top:6px">
+            <button class="small" data-act="import" ${busy() ? 'disabled' : ''}
+              title="Import a labelled dataset (.zip) exported from the EchoMuse dashboard's Training tab">Import labelled dataset…</button>
+            <span class="hint" style="margin:0">then retrain to apply</span>
+          </div>
+        </div>
+        ${sourceMixPanel(w, 'positive')}
+        ${sourceMixPanel(w, 'negative')}
+        <div class="row" style="margin-top:6px"><button class="small" data-act="save-mix" ${busy() ? 'disabled' : ''}>Save training mix</button><span class="hint" data-mix-result style="margin:0"></span></div>
+      </div>
+      <div class="row" style="margin-top:14px;padding-top:12px;border-top:1px solid var(--line)">
+        <button class="accent" data-act="build" ${busy() ? 'disabled' : ''}>
+          ${w.features_stale ? 'Retrain new clips' : w.model_built ? 'Retrain' : w.clips_train ? 'Continue training' : 'Train'}</button>
+        ${w.model_built ? `
+          <button data-act="mic">🎤 Try it</button>
+          <button data-act="eval" ${busy() ? 'disabled' : ''} title="${w.features_stale ? 'Scores current clips against a model trained on older data' : 'Score all test clips and generate a full accuracy report'}">📊 Evaluation report</button>
+          <a href="/api/models/${esc(w.name)}.onnx"><button>Download model</button></a>` : ''}
+        <button class="danger" data-act="del" style="margin-left:auto">remove</button>
+        <input type="file" accept=".zip,application/zip" data-zip style="display:none">
       </div>
       <div class="verdict" style="display:none"></div>
       <div class="rawout" style="display:none"></div>
     </div>`;
-  }).join('') : `<div class="card empty">No wake words yet.<br>
+  }).join('');
+  $('wakewords').innerHTML = state.wakewords.length ? `<div class="wake-tabs" role="tablist" aria-label="Wake words">${wakeTabs}</div>${wakeCards}` : `<div class="card empty">No wake words yet.<br>
       Download the voice data (step 1), then create your first wake word on the left —
       after training you can try it with the microphone right here.</div>`;
 
-  // The poll rebuilds this list every 2.5s, which would wipe whatever is
-  // being typed into the settings fields and snap open panels shut. Only
-  // touch the DOM when the markup actually changed, never while the user is
-  // in one of the inputs, and put the open panels back afterwards.
-  const host = $('wakewords');
-  if (html === lastWwHtml) return;
-  // Only while something is being TYPED. Guarding on focus generally was
-  // wrong: a button keeps focus after it is clicked, so pressing "remove"
-  // froze the list — the delete succeeded, every later poll saw the focus
-  // still sitting on the (now stale) button, and nothing updated until the
-  // page was reloaded.
-  const ae = document.activeElement;
-  if (ae && host.contains(ae) && /^(INPUT|TEXTAREA|SELECT)$/.test(ae.tagName)
-      && ae.type !== 'file') return;
-  const open = new Set([...host.querySelectorAll('.ww details[open]')]
-    .map(d => d.closest('.ww').dataset.name));
-  host.innerHTML = html;
-  lastWwHtml = html;
-  for (const d of host.querySelectorAll('.ww details'))
-    if (open.has(d.closest('.ww').dataset.name)) d.open = true;
-}
-
-/* Google credentials panel */
-function renderGoogle() {
-  const g = state.google || {};
-  const set = $('googleState'), setup = $('googleSetup'), acts = $('googleActions');
-  if (g.present && g.valid) {
-    set.innerHTML = `
-      <div class="kv"><span class="k">Project</span><span class="v">${esc(g.project_id || '—')}</span></div>
-      <div class="kv"><span class="k">Account</span><span class="v">${esc(g.client_email || '—')}</span></div>`;
-    setup.style.display = 'none';
-    acts.style.display = '';
-  } else {
-    set.innerHTML = g.present
-      ? `<div class="verdict no" style="margin-top:0">✗ The saved key is unreadable: ${esc(g.error || '')}</div>`
-      : '';
-    setup.style.display = '';
-    acts.style.display = g.present ? '' : 'none';
+  if (pendingEdit) {
+    const revived = wwRoot.querySelector(
+      `.card.ww[data-name="${CSS.escape(pendingEdit.cardName)}"] ${pendingEdit.selector}`);
+    if (revived) {
+      revived.value = pendingEdit.value;
+      revived.focus();
+      // type=number inputs throw on setSelectionRange in every major
+      // browser; text fields get their cursor position back so a poll
+      // landing mid-sentence doesn't jump it to the end.
+      try { revived.setSelectionRange(pendingEdit.selStart, pendingEdit.selEnd); } catch {}
+    }
   }
+  wwRoot.querySelectorAll('.card.ww').forEach(card => {
+    card.querySelectorAll('input[data-mix-positive-custom], input[data-mix-positive-piper], input[data-mix-positive-google], input[data-mix-negative-custom], input[data-mix-negative-piper], input[data-mix-negative-google]').forEach(input => {
+      const attr = [...input.attributes].find(a => a.name.startsWith('data-mix-'));
+      const key = `${card.dataset.name}:${attr?.name}`;
+      if (key in pendingMix) input.value = pendingMix[key];
+    });
+    card.querySelectorAll('input[data-piper-language], input[data-piper-voices], input[data-piper-samples]').forEach(input => {
+      const attr = [...input.attributes].find(a => a.name.startsWith('data-piper-'));
+      const key = `${card.dataset.name}:${attr?.name}`;
+      if (key in pendingPiper) input.value = pendingPiper[key];
+    });
+  });
 }
 
 function renderJob() {
   const j = state.job;
-  $('console').style.display = j ? '' : 'none';
-  if (!j) return;
+  if (!j) {
+    $('jobLabel').textContent = 'Forge log';
+    const s = $('jobStatus');
+    s.textContent = 'idle'; s.className = 'status';
+    $('cancelJob').style.display = 'none';
+    return;
+  }
   const key = j.kind + j.started;
   if (key !== lastJobKey) {
     lastJobKey = key; logOffset = 0; $('logPre').textContent = '';
-    $('console').classList.add('min');
-    $('toggleLog').textContent = 'show log';
   }
   $('jobLabel').textContent = friendlyJob(j.label);
   const s = $('jobStatus');
-  if (j.running) { s.textContent = '● working — you can leave this page, it keeps going'; s.className = 'status running'; }
-  else if (j.cancelled) { s.textContent = '■ stopped — nothing generated so far was lost'; s.className = 'status'; }
-  else if (j.rc === 0) { s.textContent = '✓ finished'; s.className = 'status ok'; }
-  else { s.textContent = `✗ something went wrong (see log)`; s.className = 'status fail'; }
   $('cancelJob').style.display = j.running ? '' : 'none';
+  if (j.running) { s.textContent = '● working — you can leave this page, it keeps going'; s.className = 'status running'; }
+  else if (j.rc === 0) { s.textContent = '✓ finished'; s.className = 'status ok'; }
+  else { s.textContent = j.cancelled ? '■ stopped' : '✗ something went wrong (see log)'; s.className = 'status fail'; }
 }
 
 async function pollLog() {
@@ -561,37 +624,229 @@ async function pollLog() {
     logOffset = r.offset;
     const pre = $('logPre');
     const stick = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30;
-    pre.textContent = (pre.textContent + r.data).slice(-100000);
+     const lines = (pre.textContent + r.data).split('\n');
+     pre.textContent = lines.slice(-LOG_WINDOW_LINES).join('\n');
     if (stick) pre.scrollTop = pre.scrollHeight;
   }
 }
 
 async function refresh() {
   try { state = await api('/api/state'); } catch { return; }
-  render(); renderJob();
+  if (!liveTest) render();
+  renderJob();
 }
 
-/* Turn `forge.py test` output into a plain-language verdict */
-function showVerdict(card, output) {
-  const v = card.querySelector('.verdict'), raw = card.querySelector('.rawout');
-  const scores = [...output.matchAll(/peak score ([\d.]+)/g)].map(m => +m[1]);
-  raw.textContent = output.trim(); raw.style.display = '';
-  v.style.display = '';
-  if (!scores.length) { v.className = 'verdict no'; v.textContent = '✗ Could not score that audio'; return; }
-  const best = Math.max(...scores);
-  if (best >= 0.5) { v.className = 'verdict ok'; v.textContent = `✓ Heard it! (score ${best.toFixed(2)} — the device would wake)`; }
-  else if (best >= 0.2) { v.className = 'verdict info'; v.textContent = `~ Close but under the wake threshold (score ${best.toFixed(2)} of 0.5 needed) — try again closer to the mic, or add family recordings and retrain`; }
-  else { v.className = 'verdict no'; v.textContent = `✗ Not recognised (score ${best.toFixed(2)}) — add family recordings or a spelling variant, then retrain`; }
+class MicResampler {
+  constructor(sourceRate, targetRate = 16000) {
+    this.step = sourceRate / targetRate;
+    this.carry = new Float32Array(0);
+    this.position = 0;
+  }
+  push(input) {
+    const data = new Float32Array(this.carry.length + input.length);
+    data.set(this.carry); data.set(input, this.carry.length);
+    const output = [];
+    while (this.position + 1 < data.length) {
+      const left = Math.floor(this.position), fraction = this.position - left;
+      output.push(data[left] + (data[left + 1] - data[left]) * fraction);
+      this.position += this.step;
+    }
+    const keep = Math.floor(this.position);
+    this.carry = data.slice(keep);
+    this.position -= keep;
+    return output;
+  }
 }
 
-$('assetDetail').onclick = () => {
-  const el = $('assets');
+function drawLiveScore(test) {
+  const canvas = test.canvas, box = canvas.getBoundingClientRect();
+  const scale = window.devicePixelRatio || 1;
+  const width = Math.max(240, Math.floor(box.width));
+  const height = Math.max(120, Math.floor(box.height));
+  const pixelWidth = Math.round(width * scale), pixelHeight = Math.round(height * scale);
+  if (canvas.width !== pixelWidth || canvas.height !== pixelHeight) {
+    canvas.width = pixelWidth; canvas.height = pixelHeight;
+  }
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(pixelWidth / width, 0, 0, pixelHeight / height, 0, 0);
+  ctx.clearRect(0, 0, width, height);
+  const left = 30, right = 8, top = 8, bottom = 20;
+  const plotWidth = width - left - right, plotHeight = height - top - bottom;
+  ctx.strokeStyle = 'rgba(154,186,128,0.18)'; ctx.lineWidth = 1;
+  ctx.fillStyle = '#7a9a68'; ctx.font = '9px DM Mono, monospace';
+  for (const score of [0, 0.5, 1]) {
+    const y = top + (1 - score) * plotHeight;
+    ctx.beginPath(); ctx.moveTo(left, y); ctx.lineTo(left + plotWidth, y); ctx.stroke();
+    ctx.fillText(score.toFixed(1), 2, y + 3);
+  }
+  const thresholdY = top + 0.5 * plotHeight;
+  ctx.strokeStyle = '#c8a040'; ctx.setLineDash([4, 4]);
+  ctx.beginPath(); ctx.moveTo(left, thresholdY); ctx.lineTo(left + plotWidth, thresholdY); ctx.stroke();
+  ctx.setLineDash([]); ctx.fillStyle = '#c8a040'; ctx.fillText('0.50', left + 3, thresholdY - 4);
+  const now = performance.now(), earliest = now - 12000;
+  test.scores = test.scores.filter(point => point.time >= earliest);
+  if (!test.scores.length) return;
+  ctx.strokeStyle = '#9aba80'; ctx.lineWidth = 2; ctx.beginPath();
+  test.scores.forEach((point, index) => {
+    const x = left + Math.max(0, (point.time - earliest) / 12000) * plotWidth;
+    const y = top + (1 - Math.max(0, Math.min(1, point.score))) * plotHeight;
+    if (index) ctx.lineTo(x, y); else ctx.moveTo(x, y);
+  });
+  ctx.stroke();
+  ctx.fillStyle = '#7a9a68'; ctx.fillText('12s ago', left, height - 5); ctx.fillText('now', width - 27, height - 5);
+}
+
+function scheduleLiveScoreDraw(test) {
+  if (test.chartFrame) return;
+  test.chartFrame = requestAnimationFrame(() => {
+    test.chartFrame = null;
+    if (liveTest !== test) return;
+    drawLiveScore(test);
+  });
+}
+
+function sendLivePcm(test, samples) {
+  for (const sample of samples) {
+    test.pcm[test.pcmLength++] = Math.max(-32768, Math.min(32767, Math.round(sample * 32767)));
+    if (test.pcmLength !== 1280) continue;
+    test.ws.send(test.pcm.buffer.slice(0));
+    test.pcmLength = 0;
+  }
+}
+
+function updateMicLevel(label, samples) {
+  let sum = 0;
+  for (const sample of samples) sum += sample * sample;
+  const rms = Math.sqrt(sum / Math.max(1, samples.length));
+  label.textContent = `MIC ${rms > 0 ? (20 * Math.log10(rms)).toFixed(0) : '-∞'} dBFS`;
+}
+
+function stopLiveTest(message = '') {
+  const test = liveTest;
+  if (!test) return;
+  liveTest = null;
+  if (test.chartFrame) cancelAnimationFrame(test.chartFrame);
+  test.processor.disconnect(); test.source.disconnect();
+  test.stream.getTracks().forEach(track => track.stop());
+  test.context.close().catch(() => {});
+  if (test.ws.readyState < WebSocket.CLOSING) test.ws.close();
+  test.button.dataset.live = ''; test.button.textContent = '🎤 Try it';
+  test.panel.style.display = 'none';
+  if (message) {
+    const verdict = test.card.querySelector('.verdict');
+    verdict.style.display = ''; verdict.className = 'verdict no'; verdict.textContent = message;
+  }
+  refresh();
+}
+
+async function startLiveTest(card, name, button) {
+  if (liveTest) stopLiveTest();
+  const panel = card.querySelector('[data-live-score]');
+  const stateLabel = panel.querySelector('[data-live-state]');
+  const scoreLabel = panel.querySelector('[data-live-value]');
+  const levelLabel = panel.querySelector('[data-live-level]');
+  const canvas = panel.querySelector('[data-live-canvas]');
+  let stream, context, source, processor, ws;
+  try {
+    panel.style.display = ''; stateLabel.textContent = 'requesting microphone';
+    stream = await navigator.mediaDevices.getUserMedia({audio: {
+      channelCount: 1, echoCancellation: false, noiseSuppression: false, autoGainControl: false,
+    }});
+    context = new (window.AudioContext || window.webkitAudioContext)({sampleRate: 16000, latencyHint: 'interactive'});
+    await context.resume();
+    source = context.createMediaStreamSource(stream);
+    await context.audioWorklet.addModule('/live-mic-worklet.js');
+    processor = new AudioWorkletNode(context, 'live-mic-processor', {
+      channelCount: 1, processorOptions: {frameSamples: Math.round(context.sampleRate * 0.08)},
+    });
+    const url = new URL(`/api/wakewords/${encodeURIComponent(name)}/live-score`, window.location.href);
+    url.protocol = url.protocol === 'https:' ? 'wss:' : 'ws:';
+    ws = new WebSocket(url);
+    await new Promise((resolve, reject) => {
+      ws.onopen = resolve;
+      ws.onerror = () => reject(new Error('could not connect to the live scorer'));
+    });
+    const test = {card, button, panel, stateLabel, scoreLabel, canvas, stream, context, source, processor, ws,
+                  resampler: new MicResampler(context.sampleRate), pcm: new Int16Array(1280), pcmLength: 0,
+                  scores: [], chartFrame: null};
+    liveTest = test;
+    button.dataset.live = '1'; button.textContent = '⏹ Stop live test';
+    stateLabel.textContent = 'listening'; scheduleLiveScoreDraw(test);
+    ws.onmessage = event => {
+      const result = JSON.parse(event.data);
+      if (result.error) return stopLiveTest(`Live scoring failed: ${result.error}`);
+      const score = Number(result.score || 0);
+      scoreLabel.textContent = score.toFixed(3);
+      test.scores.push({time: performance.now(), score});
+      scheduleLiveScoreDraw(test);
+    };
+    ws.onclose = () => { if (liveTest === test) stopLiveTest('Live score connection closed.'); };
+    processor.onprocessorerror = () => stopLiveTest('Browser microphone processor stopped unexpectedly.');
+    processor.port.onmessage = event => {
+      if (liveTest !== test || ws.readyState !== WebSocket.OPEN) return;
+      const chunk = new Float32Array(event.data);
+      updateMicLevel(levelLabel, chunk);
+      sendLivePcm(test, test.resampler.push(chunk));
+    };
+    source.connect(processor); processor.connect(context.destination);
+  } catch (error) {
+    if (processor) processor.disconnect();
+    if (source) source.disconnect();
+    if (context) context.close().catch(() => {});
+    if (stream) stream.getTracks().forEach(track => track.stop());
+    if (ws && ws.readyState < WebSocket.CLOSING) ws.close();
+    panel.style.display = 'none';
+    const verdict = card.querySelector('.verdict');
+    verdict.style.display = ''; verdict.className = 'verdict no';
+    verdict.textContent = 'Microphone or live scorer unavailable (needs HTTPS or localhost and microphone permission).';
+  }
+}
+
+$('coreDetail').onclick = () => {
+  const el = $('coreAssets');
   el.style.display = el.style.display === 'none' ? '' : 'none';
 };
 
-$('dlAll').onclick = async () => {
+$('dlCore').onclick = async () => {
   await api('/api/assets/download', {method: 'POST',
-    headers: {'Content-Type': 'application/json'}, body: '{}'});
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify({only: 'piper,features,rirs,audioset,fma'})});
+  refresh();
+};
+
+$('optionalAssets').addEventListener('change', e => {
+  const input = e.target.closest('input[data-optional]');
+  if (!input) return;
+  if (input.checked) optionalSelection.add(input.dataset.optional);
+  else optionalSelection.delete(input.dataset.optional);
+  localStorage.setItem('em-forge-optional-data', JSON.stringify([...optionalSelection]));
+  render();
+});
+
+$('dlOptional').onclick = async () => {
+  const parts = [];
+  if (optionalSelection.has('common_voice')) parts.push('common_voice', 'common_voice_features');
+  if (optionalSelection.has('ami')) parts.push('ami');
+  if (optionalSelection.has('fleurs')) parts.push('fleurs');
+  if (optionalSelection.has('voxpopuli')) parts.push('voxpopuli');
+  if (optionalSelection.has('musan')) parts.push('musan');
+  if (optionalSelection.has('slr28')) parts.push('slr28');
+  await api('/api/assets/download', {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify({only: parts.join(',')})});
+  refresh();
+};
+
+$('saveMdcApiKey').onclick = async () => {
+  const key = $('mdcApiKey').value.trim();
+  if (!key) return alert('Enter your Mozilla Data Collective API key first.');
+  await api('/api/settings/mdc-api-key', {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify({api_key: key})});
+  $('mdcApiKey').value = '';
+  refresh();
+};
+
+$('cancelJob').onclick = async () => {
+  if (!confirm('Stop the running job? Completed clips and assets are kept.')) return;
+  await api('/api/job/cancel', {method: 'POST'});
   refresh();
 };
 
@@ -601,109 +856,38 @@ $('createBtn').onclick = async () => {
   await api('/api/wakewords', {method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({phrase, name: $('newName').value,
-      samples: $('newSamples').value, steps: $('newSteps').value})});
-  $('newPhrase').value = ''; $('newName').value = '';
+      samples: $('newSamples').value, steps: $('newSteps').value,
+      confusables: $('newConfusables').value,
+      google_tts_languages: $('newGttsLanguages').value,
+      google_tts_voices: $('newGttsVoices').value,
+      google_tts_samples_per_voice: $('newGttsSamples').value,
+      google_tts_qps: $('newGttsQps').value})});
+  $('newPhrase').value = ''; $('newName').value = ''; $('newConfusables').value = '';
   refresh();
 };
 
-/* Speak a phrase so it can be judged by ear before a training run.
-   The first call downloads the voice (~77MB) and takes a moment; after that
-   the session is cached and it is roughly instant. */
-let previewing = false;
-async function say(text, note) {
-  if (previewing) return;
-  previewing = true;
-  if (note) note.textContent = 'synthesizing…';
+$('listGttsVoices').onclick = async () => {
+  const locales = $('newGttsLanguages').value.trim();
+  if (!locales) return alert('Enter at least one locale first.');
+  const out = $('gttsVoiceList');
+  out.style.display = ''; out.textContent = 'Loading Chirp 3 voices…';
   try {
-    const r = await fetch('/api/preview', {method: 'POST',
-      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text})});
-    if (!r.ok) { alert(await r.text()); return; }
-    const url = URL.createObjectURL(await r.blob());
-    const a = new Audio(url);
-    // Wait for it, so "hear each spelling" plays them in order rather than
-    // on top of each other.
-    await new Promise(res => { a.onended = a.onerror = res; a.play().catch(res); });
-    URL.revokeObjectURL(url);
-  } finally {
-    previewing = false;
-    if (note) note.textContent = '';
+    const data = await api(`/api/google-tts/voices?languages=${encodeURIComponent(locales)}`);
+    out.textContent = Object.entries(data.voices).map(([locale, voices]) =>
+      `${locale}:\n${voices.length ? voices.map(v => `  ${v}`).join('\n') : '  no matching voices'}`
+    ).join('\n\n');
+  } catch (error) {
+    out.textContent = `Could not list voices: ${error.message}`;
   }
-}
-
-$('previewBtn').onclick = async () => {
-  const variants = $('newPhrase').value.split(',').map(s => s.trim()).filter(Boolean);
-  if (!variants.length) return alert('Type the wake phrase first, e.g. "hey clara"');
-  const note = $('previewNote');
-  for (const v of variants) {
-    note.textContent = `“${v}”`;
-    await say(v, null);
-  }
-  note.textContent = '';
-};
-
-$('wakewords').addEventListener('click', e => {
-  const link = e.target.closest('a[data-say]');
-  if (!link) return;
-  e.preventDefault();
-  say(link.dataset.say, null);
-});
-
-$('themeBtn').onclick = () => {
-  const next = document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark';
-  document.documentElement.setAttribute('data-theme', next);
-  try { localStorage.setItem('em-theme', next); } catch (e) {}
-};
-
-$('cancelJob').onclick = async () => {
-  if (!confirm('Stop this run?\n\nWork already done is kept — pressing Train again picks up where it left off.')) return;
-  await api('/api/job/cancel', {method: 'POST'});
-  refresh();
-};
-
-/* Google credentials */
-function gVerdict(cls, text) {
-  const v = $('gVerdict');
-  v.style.display = ''; v.className = 'verdict ' + cls; v.textContent = text;
-}
-
-$('gSave').onclick = async () => {
-  const file = $('gFile').files[0];
-  const pasted = $('gPaste').value.trim();
-  let body;
-  if (file) { body = file; }
-  else if (pasted) { body = pasted; }
-  else return alert('Choose the JSON key file, or paste its contents.');
-  gVerdict('info', 'Saving…');
-  try {
-    await api('/api/google', {method: 'PUT', headers: {'Content-Type': 'application/json'}, body});
-  } catch (e) { $('gVerdict').style.display = 'none'; return; }
-  $('gFile').value = ''; $('gPaste').value = '';
-  gVerdict('info', 'Saved — testing the connection…');
-  await refresh();
-  $('gCheck').click();
-};
-
-$('gCheck').onclick = async () => {
-  gVerdict('info', 'Asking Google…');
-  const r = await api('/api/google/check', {method: 'POST'});
-  if (r.ok) gVerdict('ok', `✓ Connected — ${r.voices} voices across ${r.languages} languages available`);
-  else gVerdict('no', `✗ ${r.error}`);
-};
-
-$('gRemove').onclick = async () => {
-  if (!confirm('Remove the saved Google key?')) return;
-  await api('/api/google', {method: 'DELETE'});
-  $('gVerdict').style.display = 'none';
-  refresh();
-};
-
-$('toggleLog').onclick = () => {
-  const c = $('console');
-  c.classList.toggle('min');
-  $('toggleLog').textContent = c.classList.contains('min') ? 'show log' : 'hide log';
 };
 
 $('wakewords').addEventListener('click', async e => {
+  const tab = e.target.closest('[data-wake-tab]');
+  if (tab) {
+    localStorage.setItem('em-forge-active-wakeword', tab.dataset.wakeTab);
+    render();
+    return;
+  }
   const btn = e.target.closest('button[data-act]');
   if (!btn) return;
   const card = btn.closest('.ww'), name = card.dataset.name;
@@ -711,99 +895,133 @@ $('wakewords').addEventListener('click', async e => {
   if (act === 'build') {
     await api(`/api/wakewords/${name}/build`, {method: 'POST',
       headers: {'Content-Type': 'application/json'}, body: '{}'});
-  } else if (act === 'save') {
-    const val = f => card.querySelector(`input[data-f="${f}"]`).value;
-    const r = await api(`/api/wakewords/${name}`, {method: 'PATCH',
+  } else if (act === 'eval') {
+    await api(`/api/wakewords/${name}/evaluate`, {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: '{}'});
+  } else if (act === 'save-mix') {
+    const weights = polarity => Object.fromEntries(['custom', 'piper', 'google'].map(source => {
+      const raw = card.querySelector(`[data-mix-${polarity}-${source}]`).value.trim();
+      return [source, raw === '' ? null : Number(raw)];
+    }));
+    const result = await api(`/api/wakewords/${name}/training-mix`, {method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({n_samples: val('n_samples'), steps: val('steps'),
-                            custom_negative_phrases: val('negatives')})});
-    const v = card.querySelector('.verdict');
-    v.style.display = ''; v.className = 'verdict ok';
-    v.textContent = '✓ Saved — press Train to apply';
-    lastWwHtml = null;
-  } else if (act === 'pipergb') {
-    let langs;
-    try { langs = await api('/api/voices'); } catch { return; }
-    const withMulti = langs.filter(l => l.max_speakers > 1);
-    const lang = prompt(
-      'Which accent or language should the extra voices use?\n\n' +
-      'The built-in voices are all American English, so this is how you teach it\n' +
-      'the way the phrase is actually said in your house.\n\n' +
-      'Codes with the most distinct speakers:\n  ' +
-      withMulti.slice(0, 8).map(l => `${l.language} (${l.max_speakers} speakers, ${l.label})`).join('\n  ') +
-      `\n\n${langs.length} languages available in total.`, 'en_GB');
-    if (!lang) return;
-    const n = prompt('How many clips to add?\n(Generated locally — no account, no cost. The first run downloads the voice, typically 20-80MB.)', '4000');
-    if (!n) return;
-    await api(`/api/wakewords/${name}/piper-voices`, {method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({samples: +n, language: lang.trim()})});
+      body: JSON.stringify({training_mix: {positive: weights('positive'), negative: weights('negative')}})});
+    const summary = ['positive', 'negative'].map(p =>
+      `${p}: ${Object.entries(result.resolved[p].draws).filter(([, n]) => n).map(([s, n]) => `${sourceLabel[s]} ${n}`).join(', ') || 'no clips'}`
+    ).join(' | ');
+    card.querySelector('[data-mix-result]').textContent = `Saved. Per build: ${summary}`;
   } else if (act === 'gtts') {
-    if (!(state.google && state.google.valid)) {
-      return alert('Set up the Google key first — see "Google voices" on the left.');
-    }
-    const n = prompt('How many Google voice clips to add?\n(Usually free — a run this size is ~2% of Google\'s monthly free allowance.)', '2000');
-    if (!n) return;
-    const langs = prompt('Which accents?\n  en-GB,en-AU = British + Australian only\n  en-US,en-GB,en-AU = all three', 'en-GB,en-AU');
-    if (!langs) return;
+    const n = +card.querySelector('[data-gtts-samples]').value;
+    const langs = card.querySelector('[data-gtts-languages]').value.trim();
+    const voices = card.querySelector('[data-gtts-voices]').value.trim();
+    const qps = +card.querySelector('[data-gtts-qps]').value;
+    if (!Number.isInteger(n) || n < 1 || !langs || !(qps > 0)) return alert('Enter locales, a positive sample count, and a positive QPS.');
     await api(`/api/wakewords/${name}/google-tts`, {method: 'POST',
-      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({samples: +n, languages: langs})});
-  } else if (act === 'test' || act === 'addrec') {
-    const input = card.querySelector('input[type=file]');
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({samples: n, languages: langs, voices, qps})});
+  } else if (act === 'piper') {
+    const samples = +card.querySelector('[data-piper-samples]').value;
+    const language = card.querySelector('[data-piper-language]').value.trim();
+    const voices = card.querySelector('[data-piper-voices]').value.trim();
+    if (!Number.isInteger(samples) || samples < 1 || !language) return alert('Enter a locale and positive sample count.');
+    await api(`/api/wakewords/${name}/piper-voices`, {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({samples, language, voices})});
+  } else if (act === 'delete-piper') {
+    if (!confirm(`Delete generated Piper samples for '${name}'?`)) return;
+    const result = await api(`/api/wakewords/${name}/piper-voices/delete`, {method: 'POST'});
+    alert(`Deleted ${result.deleted} Piper sample(s). Retrain to rebuild features.`);
+  } else if (act === 'preview-piper') {
+    const language = card.querySelector('[data-piper-language]').value.trim() || 'en_GB';
+    const voices = card.querySelector('[data-piper-voices]').value.trim().split(',').map(v => v.trim()).filter(Boolean);
+    const response = await fetch('/api/preview', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: wPhrase(card), language, voice: voices[0] || null})});
+    if (!response.ok) return alert(await response.text());
+    new Audio(URL.createObjectURL(await response.blob())).play();
+  } else if (act === 'confusables') {
+    const phrases = card.querySelector('[data-confusables]').value
+      .split(',').map(value => value.trim()).filter(Boolean);
+    await api(`/api/wakewords/${name}/confusables`, {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({phrases})});
+    refresh();
+  } else if (act === 'save-gtts') {
+    const samples = +card.querySelector('[data-gtts-samples]').value;
+    const languages = card.querySelector('[data-gtts-languages]').value.trim();
+    const voices = card.querySelector('[data-gtts-voices]').value.trim();
+    const qps = +card.querySelector('[data-gtts-qps]').value;
+    if (!Number.isInteger(samples) || samples < 1 || !languages || !(qps > 0)) return alert('Enter locales, a positive sample count, and a positive QPS.');
+    await api(`/api/wakewords/${name}/google-tts-config`, {method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({samples, languages, voices, qps})});
+    refresh();
+  } else if (act === 'prune-gtts') {
+    const preview = await api(`/api/wakewords/${name}/google-tts-prune`, {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: '{}'});
+    if (!preview.clips) return alert('No generated Chirp clips are outside the saved locale and voice selection.');
+    const groups = preview.groups.slice(0, 40).map(g =>
+      `${g.directory}: ${g.locale} / ${g.voice} (${g.clips})`).join('\n');
+    const more = preview.groups.length > 40 ? `\n...and ${preview.groups.length - 40} more group(s)` : '';
+    const message = `Delete ${preview.clips} generated Chirp clip(s) outside:\n` +
+      `Locales: ${preview.selection.languages}\nVoices: ${preview.selection.voices}\n\n${groups}${more}`;
+    if (!confirm(message)) return;
+    const result = await api(`/api/wakewords/${name}/google-tts-prune`, {method: 'POST',
+      headers: {'Content-Type': 'application/json'}, body: JSON.stringify({confirm: true})});
+    alert(`Deleted ${result.deleted} generated Chirp clip(s). Retrain to rebuild features.`);
+    refresh();
+  } else if (act === 'import') {
+    const input = card.querySelector('input[data-zip]');
     input.onchange = async () => {
+      if (!input.files.length) return;
       const fd = new FormData();
-      for (const f of input.files) fd.append(act === 'test' ? 'wav' : 'audio', f);
+      fd.append('dataset', input.files[0]);
       const v = card.querySelector('.verdict');
       v.style.display = ''; v.className = 'verdict info';
-      v.textContent = act === 'test' ? 'Scoring…' : 'Adding recordings…';
-      if (act === 'test') {
-        const r = await api(`/api/wakewords/${name}/test`, {method: 'POST', body: fd});
-        showVerdict(card, r.output);
-      } else {
-        const r = await api(`/api/wakewords/${name}/samples`, {method: 'POST', body: fd});
-        v.className = r.errors.length ? 'verdict no' : 'verdict ok';
-        v.textContent = `✓ Added ${r.added} recording(s) — press Retrain to teach the model with them` +
-          (r.errors.length ? ` (${r.errors.length} failed)` : '');
+      v.textContent = 'Importing dataset…';
+      try {
+        const r = await api(`/api/wakewords/${name}/import-dataset`, {method: 'POST', body: fd});
+        const c = r.counts;
+        v.className = 'verdict ok';
+        v.textContent = `✓ Imported ${c.positive_train + c.positive_test} positive, ` +
+          `${c.negative_train + c.negative_test} negative clip(s)` +
+          (c.skipped ? ` (${c.skipped} skipped)` : '') +
+          ' — press Retrain to apply';
         refresh();
+      } catch (e) {
+        v.className = 'verdict no';
+        v.textContent = `✗ Import failed: ${e.message || e}`;
       }
+      input.value = '';
     };
     input.click();
     return;
   } else if (act === 'mic') {
-    const v = card.querySelector('.verdict');
-    if (btn.dataset.rec) {
-      btn.dataset.rec = ''; btn.textContent = '🎤 Try it';
-      window.__rec?.stop();
-      return;
-    }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({audio: true});
-      const rec = new MediaRecorder(stream);
-      const chunks = [];
-      rec.ondataavailable = e => chunks.push(e.data);
-      rec.onstop = async () => {
-        stream.getTracks().forEach(t => t.stop());
-        v.style.display = ''; v.className = 'verdict info'; v.textContent = 'Scoring…';
-        const fd = new FormData();
-        fd.append('wav', new Blob(chunks, {type: rec.mimeType}), 'mic.webm');
-        const r = await api(`/api/wakewords/${name}/test`, {method: 'POST', body: fd});
-        showVerdict(card, r.output);
-      };
-      window.__rec = rec;
-      rec.start();
-      btn.dataset.rec = '1'; btn.textContent = '⏹ Done';
-      v.style.display = ''; v.className = 'verdict info';
-      v.textContent = 'Recording — say the wake word, then press Done';
-      setTimeout(() => { if (btn.dataset.rec) { btn.dataset.rec = ''; btn.textContent = '🎤 Try it'; rec.stop(); } }, 5000);
-    } catch (err) {
-      v.style.display = ''; v.className = 'verdict no';
-      v.textContent = 'Microphone not available in this browser (needs HTTPS or localhost) — use "Test a recording…" with a phone recording instead';
-    }
+    if (liveTest && liveTest.button === btn) stopLiveTest();
+    else await startLiveTest(card, name, btn);
     return;
   } else if (act === 'del') {
     if (!confirm(`Remove '${name}'? This deletes its training data and model.`)) return;
     await api(`/api/wakewords/${name}`, {method: 'DELETE'});
   }
+  refresh();
+});
+
+function wPhrase(card) {
+  const phrase = card.querySelector('.phrase').textContent;
+  return phrase.replace(/[“”]/g, '').split(' / ')[0];
+}
+
+$('wakewords').addEventListener('change', async e => {
+  const input = e.target.closest('input[data-dataset]');
+  if (!input) return;
+  const card = input.closest('.ww'), name = card.dataset.name;
+  await api(`/api/wakewords/${name}/datasets`, {method: 'POST',
+    headers: {'Content-Type': 'application/json'}, body: JSON.stringify({
+      use_common_voice_negatives: card.querySelector('[data-dataset="common_voice"]').checked,
+      use_ami_farfield_validation: card.querySelector('[data-dataset="ami"]').checked,
+      use_fleurs_negatives: card.querySelector('[data-dataset="fleurs"]').checked,
+      use_voxpopuli_negatives: card.querySelector('[data-dataset="voxpopuli"]').checked,
+      use_musan_background: card.querySelector('[data-dataset="musan"]').checked,
+      use_slr28_augmentation: card.querySelector('[data-dataset="slr28"]').checked,
+    })});
   refresh();
 });
 

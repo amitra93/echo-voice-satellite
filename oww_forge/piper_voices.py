@@ -21,10 +21,14 @@ wherever a language has one, because speaker identity is the axis that buys
 the most variety per download: `en_GB-vctk` carries 109 speakers and
 `en_US-libritts_r` 904, against 1 for most named voices.
 
-Clips land in the wake word's positive_train/positive_test directories.
+Clips land in the wake word's positive_train/positive_test directories; the
+same generator is used for confusable negatives.
 openWakeWord's generate step counts existing files toward n_samples, so
 anything added before `forge.py build` displaces that many US clips rather
 than growing the set — which is the point: it changes the MIX.
+
+Generation is resumable: if the requested target is already present, the
+existing clips are left untouched instead of being regenerated.
 
 Note the wake word model itself still rests on openWakeWord's frozen English
 speech embedding, so a non-English wake word is not equally well served by
@@ -254,9 +258,15 @@ def preview(text: str, assets: Path, voice: str = None, speaker: int = 0,
 
 def synthesize(phrases, n_samples: int, train_dir: Path, test_dir: Path,
                assets: Path, voices=None, language: str = None) -> None:
+    voices = list(voices or default_voices(assets, language or "en_GB"))
+    existing = sum(len(list(directory.glob("piper_gb_*.wav")))
+                   for directory in (train_dir, test_dir)
+                   if directory.is_dir())
+    if existing >= n_samples:
+        log(f"skipping Piper generation: {existing} existing clips meet the {n_samples} target")
+        return
     import soundfile as sf
 
-    voices = list(voices or default_voices(assets, language or "en_GB"))
     loaded = []
     for name in voices:
         onnx, cfg = ensure_voice(assets, name)
@@ -276,10 +286,14 @@ def synthesize(phrases, n_samples: int, train_dir: Path, test_dir: Path,
     log(f"{len(combos)} speaker/prosody combinations available")
 
     jobs = []
+    skipped = 0
     for i, (name, sess, cfg, sid, ls, ns) in enumerate(
             itertools.islice(itertools.cycle(combos), n_samples)):
         out_dir = test_dir if random.random() < TEST_FRACTION else train_dir
         dest = out_dir / f"piper_gb_{i:06d}_{name}_s{sid}.wav"
+        if dest.exists():
+            skipped += 1
+            continue
         jobs.append((phrases[i % len(phrases)], name, sess, cfg, sid, ls, ns, dest))
 
     done = [0]
@@ -331,4 +345,4 @@ def synthesize(phrases, n_samples: int, train_dir: Path, test_dir: Path,
         log(f"{sum(errors.values())} clips failed:")
         for msg, n in sorted(errors.items(), key=lambda kv: -kv[1])[:3]:
             log(f"  {n}x {msg}")
-    log(f"wrote {done[0]} clips → {train_dir.parent}")
+    log(f"wrote {done[0]} clips, skipped {skipped} existing → {train_dir.parent}")

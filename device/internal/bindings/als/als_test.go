@@ -1,8 +1,10 @@
 package als
 
 import (
+	"context"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -195,5 +197,151 @@ func TestStatusRefreshesAcrossScans(t *testing.T) {
 	mu.Unlock()
 	if got := Report(); got.Code != StatusNoChip {
 		t.Fatalf("second scan: code = %q, want %q", got.Code, StatusNoChip)
+	}
+}
+
+func TestLuxReadsValidValueAndReturnsNilForBadReads(t *testing.T) {
+	fakeBus(t, map[string]bool{"tsl2540": true})
+	p := Report().Path
+	if got := Lux(); got == nil || *got != 42 {
+		t.Fatalf("valid Lux() = %v, want 42", got)
+	}
+	if err := os.WriteFile(p, []byte("not-a-number\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if got := Lux(); got != nil {
+		t.Fatalf("malformed Lux() = %d, want nil", *got)
+	}
+	if err := os.Remove(p); err != nil {
+		t.Fatal(err)
+	}
+	if got := Lux(); got != nil {
+		t.Fatalf("missing Lux() = %d, want nil", *got)
+	}
+}
+
+func TestLuxIsNilWithoutSensor(t *testing.T) {
+	fakeBus(t, map[string]bool{"tsl2540": false})
+	if got := Lux(); got != nil {
+		t.Fatalf("Lux() without a readable sensor = %d, want nil", *got)
+	}
+}
+
+func TestWatchReturnsWithoutSensor(t *testing.T) {
+	fakeBus(t, map[string]bool{"tsl2540": false})
+	Watch(context.Background(), func(int) { t.Fatal("callback fired without a sensor") })
+}
+
+// ─── Watch's polling loop ───────────────────────────────────────────────────
+//
+// These drive Watch through presentFunc/luxFunc rather than fakeBus: the loop
+// itself (baseline seeding, the Significant/MinInterval gates, dispatch) has
+// nothing to do with how the sensor is read, and PollInterval/MinInterval
+// are vars specifically so this doesn't have to wait on the real ~1s/2s
+// production cadence.
+
+func intp(v int) *int { return &v }
+
+// runWatch feeds readings to Watch one per poll (holding at the last
+// reading once the list is exhausted, so a poll that outruns the fixture
+// doesn't panic), lets it run for window, then stops it and returns every
+// onChange call observed in order.
+func runWatch(t *testing.T, readings []*int, pollInterval, minInterval, window time.Duration) []int {
+	t.Helper()
+	oldPresent, oldLux := presentFunc, luxFunc
+	oldPoll, oldMinInterval := PollInterval, MinInterval
+	PollInterval, MinInterval = pollInterval, minInterval
+	t.Cleanup(func() {
+		presentFunc, luxFunc = oldPresent, oldLux
+		PollInterval, MinInterval = oldPoll, oldMinInterval
+	})
+
+	var mu sync.Mutex
+	i := 0
+	presentFunc = func() bool { return true }
+	luxFunc = func() *int {
+		mu.Lock()
+		defer mu.Unlock()
+		if i >= len(readings) {
+			return readings[len(readings)-1]
+		}
+		v := readings[i]
+		i++
+		return v
+	}
+
+	var calls []int
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		Watch(ctx, func(v int) {
+			mu.Lock()
+			calls = append(calls, v)
+			mu.Unlock()
+		})
+		close(done)
+	}()
+	time.Sleep(window)
+	cancel()
+	<-done
+
+	mu.Lock()
+	defer mu.Unlock()
+	return append([]int(nil), calls...)
+}
+
+// The first reading has nothing to compare against — it can only seed the
+// baseline. Reporting it would tell the controller a light "changed" the
+// instant the device booted.
+func TestWatchSeedsBaselineWithoutReporting(t *testing.T) {
+	calls := runWatch(t, []*int{intp(300)}, time.Millisecond, time.Second, 30*time.Millisecond)
+	if len(calls) != 0 {
+		t.Fatalf("Watch reported on a steady baseline: %v", calls)
+	}
+}
+
+func TestWatchIgnoresAnInsignificantChange(t *testing.T) {
+	// 310 vs 300 is a 3.3% change — well under MinRatio.
+	calls := runWatch(t, []*int{intp(300), intp(310)}, time.Millisecond, time.Second, 30*time.Millisecond)
+	if len(calls) != 0 {
+		t.Fatalf("Watch reported an insignificant change: %v", calls)
+	}
+}
+
+func TestWatchReportsASignificantChange(t *testing.T) {
+	// 500 vs 300 is a 66% change — comfortably over MinRatio.
+	calls := runWatch(t, []*int{intp(300), intp(500)}, time.Millisecond, time.Second, 30*time.Millisecond)
+	if len(calls) != 1 || calls[0] != 500 {
+		t.Fatalf("calls = %v, want [500]", calls)
+	}
+}
+
+// A nil reading (sensor read failed mid-poll) must be skipped, not treated
+// as a reading of zero lux — that would read as "went completely dark" and
+// could fire on every transient I2C hiccup.
+func TestWatchSkipsANilReading(t *testing.T) {
+	calls := runWatch(t, []*int{intp(300), nil, nil, intp(500)}, time.Millisecond, time.Second, 30*time.Millisecond)
+	if len(calls) != 1 || calls[0] != 500 {
+		t.Fatalf("calls = %v, want [500] (nil reads skipped, not reported as 0)", calls)
+	}
+}
+
+// A flickering light must not flood the control plane: two significant
+// changes closer together than MinInterval collapse to one report.
+func TestWatchSuppressesARepeatWithinMinInterval(t *testing.T) {
+	calls := runWatch(t, []*int{intp(300), intp(500), intp(800)},
+		time.Millisecond, 500*time.Millisecond, 30*time.Millisecond)
+	if len(calls) != 1 || calls[0] != 500 {
+		t.Fatalf("calls = %v, want only [500] — 800 arrives well inside MinInterval", calls)
+	}
+}
+
+// The same second change, given enough real time to clear MinInterval, must
+// still be reported — suppression is a delay, not a permanent silence.
+func TestWatchReportsAfterMinIntervalClears(t *testing.T) {
+	calls := runWatch(t, []*int{intp(300), intp(500), intp(800)},
+		time.Millisecond, 20*time.Millisecond, 100*time.Millisecond)
+	if len(calls) != 2 || calls[0] != 500 || calls[1] != 800 {
+		t.Fatalf("calls = %v, want [500 800]", calls)
 	}
 }

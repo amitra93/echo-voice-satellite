@@ -39,7 +39,9 @@ def test_recordings_dir_is_absolute_from_env(monkeypatch, tmp_path):
 def test_filename_roundtrips_through_parse():
     name = rec.filename("G090LF11", 42)
     assert name == "G090LF11_42.wav"
-    assert rec.parse_filename(name) == ("G090LF11", 42)
+    assert rec.parse_filename(name) == ("G090LF11", 42, "stt")
+    assert rec.filename("G090LF11", 42, "tts") == "G090LF11_42_tts.wav"
+    assert rec.parse_filename("G090LF11_42_tts.wav") == ("G090LF11", 42, "tts")
 
 
 def test_filename_rejects_unsafe_device_ids():
@@ -82,6 +84,14 @@ def test_save_writes_a_playable_wav(tmp_path):
         assert w.getnframes() == rec.SAMPLE_RATE // 5
 
 
+def test_save_writes_tts_at_24khz(tmp_path):
+    name = rec.save("dev1", 7, b"\x00\x01" * 2400, db_path=_db(tmp_path),
+                    kind="tts", sample_rate=24000)
+    assert name == "dev1_7_tts.wav"
+    with wave.open(str(tmp_path / "recordings" / name), "rb") as w:
+        assert w.getframerate() == 24000
+
+
 def test_save_ignores_empty_audio(tmp_path):
     assert rec.save("dev1", 7, b"", db_path=_db(tmp_path)) is None
     assert not (tmp_path / "recordings").exists()
@@ -102,6 +112,16 @@ def test_retention_keeps_the_newest_n_per_device(tmp_path):
     # Newest turn first, and it is the ids that decide — not mtime.
     assert kept[0] == "dev1_15.wav"
     assert kept[-1] == "dev1_6.wav"
+
+
+def test_retention_keeps_both_audio_kinds_for_the_newest_turns(tmp_path):
+    db = _db(tmp_path)
+    for turn in range(1, 5):
+        rec.save("dev1", turn, _pcm(20), db_path=db, keep=2)
+        rec.save("dev1", turn, _pcm(20), db_path=db, keep=2, kind="tts", sample_rate=24000)
+    assert set(rec.list_for("dev1", db)) == {
+        "dev1_3.wav", "dev1_3_tts.wav", "dev1_4.wav", "dev1_4_tts.wav",
+    }
 
 
 def test_retention_is_per_device_not_global(tmp_path):
@@ -171,3 +191,18 @@ def test_delete_device_removes_only_its_own(tmp_path):
     assert rec.delete_device("dev1", db) == 3
     assert rec.list_for("dev1", db) == []
     assert len(rec.list_for("dev2", db)) == 3
+
+
+def test_prune_all_keeps_newest_files_across_devices_and_kinds(tmp_path):
+    db = _db(tmp_path)
+    for turn in range(1, 13):
+        rec.save("dev1", turn, _pcm(20), db_path=db, keep=100, kind="stt")
+        rec.save("dev2", turn, _pcm(20), db_path=db, keep=100, kind="tts")
+
+    removed = rec.prune_all(db, keep=20)
+
+    assert len(removed) == 4
+    assert rec.list_all(db) == [
+        name for turn in range(12, 2, -1)
+        for name in (f"dev2_{turn}_tts.wav", f"dev1_{turn}.wav")
+    ]

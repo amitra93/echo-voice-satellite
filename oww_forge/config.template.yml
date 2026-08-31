@@ -15,6 +15,25 @@ target_phrase:
 # adversarial negatives). Add problem words you observe in practice.
 custom_negative_phrases: []
 
+# Google Chirp 3 generation defaults. The UI uses these when adding extra TTS
+# samples; sample count applies to every matching locale/voice pair.
+google_tts_languages: "en-US,en-GB,en-AU,en-IN,en-PH,en-SG,en-ZA"
+google_tts_voices: ""
+google_tts_samples_per_voice: 250
+google_tts_qps: 2
+
+# Optional source weights for the generated training view. Leave every value
+# null to train on each source in its natural file-count proportion.
+training_mix:
+  positive:
+    custom: null
+    piper: null
+    google: null
+  negative:
+    custom: null
+    piper: null
+    google: null
+
 # Synthetic positives: 20k minimum recommended, 100k+ is best.
 n_samples: @N_SAMPLES@
 n_samples_val: @N_SAMPLES_VAL@
@@ -40,6 +59,17 @@ background_paths_duplication_rate:
   - 1
 
 false_positive_validation_data_path: "/data/assets/features/validation_set_features.npy"
+
+# Optional public-corpus additions. Download the corresponding asset in the
+# Forge UI, then enable it per wake word. The build resolves these into the
+# upstream keys above. Common Voice retains the official archive; AMI streams
+# directly into its compact validation feature array.
+use_common_voice_negatives: false
+use_ami_farfield_validation: false
+use_fleurs_negatives: false
+use_voxpopuli_negatives: false
+use_musan_background: false
+use_slr28_augmentation: false
 
 feature_data_files:
   "ACAV100M_sample": "/data/assets/features/openwakeword_features_ACAV100M_2000_hrs_16bit.npy"

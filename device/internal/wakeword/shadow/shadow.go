@@ -101,9 +101,9 @@ type Scorer struct {
 	bargeThreshold float32
 	speakerActive  func() bool
 	refract        time.Duration
-	onCross        func(score, threshold float32, at time.Time)
+	onCross        func(score, threshold float32, at time.Time, sequence uint16)
 
-	ch   chan []int16
+	ch   chan scoredFrame
 	done chan struct{}
 	stop sync.Once
 	// quit ends the scorer goroutine. Close must NOT close `ch`: the mic
@@ -145,6 +145,14 @@ type Scorer struct {
 	resetReq bool
 }
 
+// scoredFrame keeps the data-plane position associated with the audio handed
+// to inference. The scorer runs asynchronously, so time.Now at a crossing is
+// not a reliable substitute for this sequence number.
+type scoredFrame struct {
+	pcm      []int16
+	sequence uint16
+}
+
 // NewScorer starts a scorer. onCross is called from the scorer goroutine when
 // the score reaches threshold, so it must not block — the controller-bound
 // send it wraps is buffered for that reason.
@@ -154,13 +162,13 @@ type Scorer struct {
 // because this is the only place that knows: the bar depends on whether the
 // speaker was streaming at the instant the frame was SCORED, and by the time a
 // callback asks, playback may have ended.
-func NewScorer(inf wakeword.Inferer, threshold float32, onCross func(score, threshold float32, at time.Time)) *Scorer {
+func NewScorer(inf wakeword.Inferer, threshold float32, onCross func(score, threshold float32, at time.Time, sequence uint16)) *Scorer {
 	s := &Scorer{
 		det:       wakeword.New(inf),
 		threshold: threshold,
 		refract:   DefaultRefractory,
 		onCross:   onCross,
-		ch:        make(chan []int16, queueFrames),
+		ch:        make(chan scoredFrame, queueFrames),
 		done:      make(chan struct{}),
 		quit:      make(chan struct{}),
 	}
@@ -211,13 +219,20 @@ func (s *Scorer) effectiveThresholdLocked() float32 {
 func (s *Scorer) Push(samples []int16) {
 	cp := make([]int16, len(samples))
 	copy(cp, samples)
-	s.enqueue(cp)
+	s.enqueue(scoredFrame{pcm: cp})
 }
 
 // PushBytes is Push for little-endian S16 bytes, which is what the mic
 // pipeline carries. An odd trailing byte cannot happen (frames are whole
 // samples) and is dropped rather than silently shifting every sample after it.
 func (s *Scorer) PushBytes(b []byte) {
+	s.PushBytesSequence(b, 0)
+}
+
+// PushBytesSequence is PushBytes with the original data-plane PCM sequence.
+// It is the sequence emitted with a crossing so the controller can rewind its
+// own short PCM ring to the exact frame where device inference crossed.
+func (s *Scorer) PushBytesSequence(b []byte, sequence uint16) {
 	n := len(b) / 2
 	if n == 0 {
 		return
@@ -226,13 +241,13 @@ func (s *Scorer) PushBytes(b []byte) {
 	for i := 0; i < n; i++ {
 		cp[i] = int16(uint16(b[2*i]) | uint16(b[2*i+1])<<8)
 	}
-	s.enqueue(cp)
+	s.enqueue(scoredFrame{pcm: cp, sequence: sequence})
 }
 
 // enqueue is the only path into the scorer, and the only place a drop can
 // happen — deliberately one place, so "never block the audio path" is a
 // property of one function rather than a convention.
-func (s *Scorer) enqueue(cp []int16) {
+func (s *Scorer) enqueue(frame scoredFrame) {
 	// A closed scorer still receives frames: the mic goroutine holds the
 	// pointer it captured when the stream started, and a config push can
 	// replace and close it mid-stream.
@@ -252,7 +267,7 @@ func (s *Scorer) enqueue(cp []int16) {
 	}
 
 	select {
-	case s.ch <- cp:
+	case s.ch <- frame:
 	default:
 		s.mu.Lock()
 		s.stats.Drops++
@@ -315,11 +330,11 @@ func (s *Scorer) Close() {
 func (s *Scorer) run() {
 	defer close(s.done)
 	for {
-		var pcm []int16
+		var frame scoredFrame
 		select {
 		case <-s.quit:
 			return
-		case pcm = <-s.ch:
+		case frame = <-s.ch:
 		}
 		s.mu.Lock()
 		reset := s.resetReq
@@ -336,7 +351,7 @@ func (s *Scorer) run() {
 		}
 
 		t0 := time.Now()
-		if _, err := s.det.Push(pcm); err != nil {
+		if _, err := s.det.Push(frame.pcm); err != nil {
 			s.recordErr(err)
 			continue
 		}
@@ -375,7 +390,7 @@ func (s *Scorer) run() {
 		s.mu.Unlock()
 
 		if crossed && s.onCross != nil {
-			s.onCross(score, threshold, now)
+			s.onCross(score, threshold, now, frame.sequence)
 		}
 	}
 }

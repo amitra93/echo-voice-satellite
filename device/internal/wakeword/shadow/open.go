@@ -54,7 +54,7 @@ func ModelStem(owwModel string) string {
 // device: shadow mode is off until someone installs them, the caller logs it
 // once and carries on with controller-side wake word. That is the whole reason
 // the runtime is dlopen'd rather than linked.
-func Open(owwModel string, threshold float32, onCross func(score, threshold float32, at time.Time)) (*Scorer, error) {
+func Open(owwModel string, threshold float32, onCross func(score, threshold float32, at time.Time, sequence uint16)) (*Scorer, error) {
 	dir := Dir()
 	stem := ModelStem(owwModel)
 	if stem == "" {

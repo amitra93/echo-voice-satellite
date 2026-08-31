@@ -10,12 +10,18 @@ services:
     restart: unless-stopped
     network_mode: host
     environment:
+      - TZ=America/New_York
       - DEBUG=1
     env_file:
       - .env
     volumes:
-      # Persist database across container rebuilds
-      - ~EchoMuse/controller/data:/app/data
+      # Persist database across container rebuilds. Relative to this file's
+      # directory (controller/), NOT the shell's cwd — `~EchoMuse/...` here
+      # used to silently resolve to a stale, unrelated directory from an old
+      # checkout location rather than erroring, so `docker compose up` on a
+      # clean host quietly ran against an empty database next to the real
+      # one instead of failing loudly.
+      - ./data:/app/data
     deploy:
       resources:
         reservations:

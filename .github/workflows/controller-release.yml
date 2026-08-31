@@ -22,26 +22,11 @@ name: Controller Release (Docker image)
 # nothing; it is emulated with QEMU, which costs time on the runner and
 # nothing at run time.
 
-# Two channels, one publish path — the image is identical, only the tag and
-# the add-on directory whose pin is checked differ:
-#   controller-v2.20.0        -> :2.20.0 + :latest   (GA,  controller/)
-#   controller-ea-v2.20.0-ea.1 -> :2.20.0-ea.1        (EA, controller-ea/)
-#
-# EA never moves :latest. That tag is what docker-compose.deploy.yml pulls,
-# so an EA build touching it would push a prerelease to every standalone
-# container on the next `docker compose pull` — users who never opted into
-# anything.
-#
-# The prefixes are deliberately distinct rather than one scheme with a
-# suffix: em_api._fetch_controller_release lists tags with a PREFIX match on
-# `controller-v`, so `controller-ea-v*` is excluded from the dashboard's
-# update notice for free, and GA users are never advised to install a
-# prerelease.
+# The stable add-on and standalone deployment share this published image.
 on:
   push:
     tags:
       - 'controller-v*'
-      - 'controller-ea-v*'
 
 jobs:
   build-and-push:
@@ -57,26 +42,10 @@ jobs:
       - name: Identify the channel
         id: channel
         run: |
-          case "$GITHUB_REF_NAME" in
-            controller-ea-v*)
-              echo "channel=ea"                                    >> "$GITHUB_OUTPUT"
-              echo "addon_dir=controller-ea"                       >> "$GITHUB_OUTPUT"
-              echo "image_tag=${GITHUB_REF_NAME#controller-ea-v}"  >> "$GITHUB_OUTPUT"
-              echo "version=${GITHUB_REF_NAME#controller-ea-}"     >> "$GITHUB_OUTPUT"
-              echo "latest=false"                                  >> "$GITHUB_OUTPUT"
-              ;;
-            controller-v*)
-              echo "channel=ga"                                    >> "$GITHUB_OUTPUT"
-              echo "addon_dir=controller"                          >> "$GITHUB_OUTPUT"
-              echo "image_tag=${GITHUB_REF_NAME#controller-v}"     >> "$GITHUB_OUTPUT"
-              echo "version=${GITHUB_REF_NAME#controller-}"        >> "$GITHUB_OUTPUT"
-              echo "latest=true"                                   >> "$GITHUB_OUTPUT"
-              ;;
-            *)
-              echo "::error::$GITHUB_REF_NAME matches no known channel"
-              exit 1
-              ;;
-          esac
+          echo "addon_dir=controller"                          >> "$GITHUB_OUTPUT"
+          echo "image_tag=${GITHUB_REF_NAME#controller-v}"     >> "$GITHUB_OUTPUT"
+          echo "version=${GITHUB_REF_NAME#controller-}"        >> "$GITHUB_OUTPUT"
+          echo "latest=true"                                   >> "$GITHUB_OUTPUT"
 
       # The Home Assistant add-on pulls a PUBLISHED image, pinned by
       # its config.yaml's `version:` — so that file names an image

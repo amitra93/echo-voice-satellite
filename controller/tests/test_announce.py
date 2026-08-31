@@ -4,39 +4,42 @@ VoiceAssistantAnnounceFinished is HA's completion signal, and HA BLOCKS on it.
 `assist_satellite.entity.async_internal_announce` documents `async_announce`
 as "should block until the announcement is done playing", holds
 `_is_announcing` and the RESPONDING state for its duration, and raises
-`SatelliteBusyError` if another announcement arrives meanwhile. The esphome
-integration implements that by awaiting our reply
-(`send_voice_assistant_announcement_await_response`).
-
-We used to answer it synchronously in the message handler, before a byte had
-played. So the `assist_satellite.announce` service returned early, the entity
-left RESPONDING early, and two chained announcements overlapped on the device
-instead of queueing behind HA's own guard.
-
-The justification in the code was that the setup wizard would otherwise time
-out. It would not: `_ANNOUNCEMENT_TIMEOUT_SEC` is 5 minutes, and the wizard's
-connection test does not wait on this message at all — it fires when the device
-fetches the `CONNECTION_TEST_URL_BASE` media id.
+`SatelliteBusyError` if another announcement arrives meanwhile. The old
+ESPHome-impersonation satellite (`em_esphome.py`, deleted — docs/design/full-duplex-plan.md
+Phase 4) implemented that by awaiting our reply
+(`send_voice_assistant_announcement_await_response`); it used to answer
+synchronously in the message handler, before a byte had played, so the
+`assist_satellite.announce` service returned early and two chained
+announcements overlapped on the device instead of queueing behind HA's own
+guard.
 
 Both directions are pinned here, because they pull against each other and the
 code reads fine either way: the reply must not come early, and it must always
 come.
 
-The sequencing lives in `em_announce` rather than `em_esphome` so this suite can
-reach it — the suite does not import `em_esphome` (zeroconf, aiohttp, the
-database). Async tests run through `asyncio.run()`, the idiom the rest of the
-suite uses; pytest-asyncio is not in the test environment and this is not worth
-adding it for.
+The sequencing lives in `em_announce` rather than the satellite for the reason
+`em_linkauth.decide` is split out: the suite cannot import heavy modules
+(zeroconf, aiohttp, the database). Async tests run through `asyncio.run()`,
+the idiom the rest of the suite uses; pytest-asyncio is not in the test
+environment and this is not worth adding it for.
+
+`em_announce.run`/`play_media` have no live caller today: the new turn
+engine's own announcement path
+(`em_turn_engine.create_turn(kind="announcement")`) reimplements the
+never-reply-early / always-reply / bounded-timeout properties inline rather
+than calling into this module — see `em_turn_engine.py`'s `_run_turn`
+(bounded by `em_announce.ANNOUNCE_TIMEOUT_S`, the one live import that keeps
+this module from being fully orphaned) and `_outcome_for`. These tests stay
+because they are the specification those properties still have to meet, not
+because the code path under test runs in production — the "wiring pinned
+against the source" section below, which pinned exactly how the now-deleted
+ESPHome satellite called into this module, does not survive that; only the
+sequencing tests do.
 """
 
 import asyncio
-import re
-from pathlib import Path
 
 import em_announce
-
-CONTROLLER = Path(__file__).resolve().parents[1]
-ESPHOME_SRC = (CONTROLLER / "em_esphome.py").read_text()
 
 
 def fetch_returning(pcm):
@@ -303,64 +306,15 @@ def test_our_cap_sits_under_has():
     """
     assert em_announce.ANNOUNCE_TIMEOUT_S < 300
 
-
-# ── The wiring, pinned against the source ────────────────────────────────────
-
-
-def test_the_handler_does_not_answer_the_announce_itself():
-    """
-    The bug, in the shape it took: AnnounceFinished constructed in the
-    message handler, so HA was answered before the background task had
-    fetched anything. Everything else here would still pass with that
-    restored.
-    """
-    handler = ESPHOME_SRC[ESPHOME_SRC.index("def handle_message"):]
-    handler = handler[: handler.index("\n    def ", 10)]
-    assert "VoiceAssistantAnnounceFinished" not in handler, (
-        "the announce is answered in the message handler again — HA is told "
-        "the announcement finished before any audio has played"
-    )
-
-
-def test_announcing_state_is_still_sent_synchronously():
-    """
-    ANNOUNCING describes the state we are ENTERING, unlike the completion
-    reply, so it belongs in the handler. Moving it out would leave the entity
-    idle for the length of the announcement.
-    """
-    handler = ESPHOME_SRC[ESPHOME_SRC.index("def handle_message"):]
-    handler = handler[: handler.index("\n    def ", 10)]
-    assert "MediaPlayerState.ANNOUNCING" in handler
-
-
-def test_both_announce_paths_resolve_the_callback_the_same_way():
-    """
-    Renaming the shared helper broke the play_media path and not the other,
-    because only one call site was checked — every play_media announce raised
-    AttributeError on a released build (2026-08-17). One resolver, used by
-    both, so there is nothing to miss next time.
-    """
-    src = ESPHOME_SRC
-    assert src.count("_announce_play_cb()") >= 2, (
-        "the two announce paths must share one callback resolver"
-    )
-    assert "_fetch_and_play_announce" not in src, (
-        "a caller still references the removed helper"
-    )
-
-
-def test_no_handler_dispatches_to_a_method_that_does_not_exist():
-    """
-    handle_message catches nothing: a missing attribute surfaces only as
-    'handle_message raised for MediaPlayerCommandRequest' in the log, at
-    runtime, on a device someone is using. Cheap to check statically.
-    """
-    src = ESPHOME_SRC
-    base = (CONTROLLER / "esphome" / "satellite_server.py").read_text()
-    defined = set(re.findall(r"^    (?:async )?def (_[a-z_]+)", src + base, re.M))
-    # Callables held as attributes rather than defined as methods — the
-    # turn-scoped callbacks. Assigned with aligned "=" so the spacing varies.
-    held = set(re.findall(r"self\.(_[a-z_]+)\s*[:=]", src))
-    called = set(re.findall(r"self\.(_[a-z_]+)\(", src))
-    missing = called - defined - held
-    assert not missing, f"dispatched to methods that do not exist: {sorted(missing)}"
+# The "wiring, pinned against the source" section that used to follow this
+# point checked em_esphome.EchoMuseSatellite.handle_message's exact dispatch
+# shape (AnnounceFinished not answered synchronously, ANNOUNCING sent
+# synchronously, both announce paths sharing one callback resolver, no
+# self._method() call dispatching to a method that doesn't exist). None of
+# it has an equivalent in the HACS assist_satellite.py that replaced it —
+# there is no handle_message dispatch table anymore, HA's own
+# AssistSatelliteEntity owns that shape. The properties that still matter
+# (announce completion timing, callback resolution) are exercised directly
+# against the real class in hacs/tests/test_assist_satellite.py, which is a
+# stronger guarantee than static source scanning: a typo'd self._method()
+# call fails the test by raising, rather than by a missing string.

@@ -22,6 +22,13 @@ def test_every_preset_resolves_render_ready():
         assert scene["spin_anim"]["pattern"] in ("spin", "rotate")
         assert scene["spin_anim"]["ttlSec"] > 0
         assert scene["meter_anim"]["pattern"] == "meter"
+        assert scene["timer_anim"]["pattern"] == "pulse"
+        assert scene["timer_anim"]["ttlSec"] >= 120
+
+
+def test_timer_animation_is_visible():
+    anim = em_scenes.resolve({"ledScene": "standard"})["timer_anim"]
+    assert anim["colors"]
 
 
 def test_unknown_scene_falls_back_to_standard():

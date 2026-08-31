@@ -21,6 +21,8 @@ services:
     container_name: echomuse-controller
     restart: unless-stopped
     network_mode: host
+    environment:
+      - TZ=America/New_York
     env_file:
       - .env
     volumes:

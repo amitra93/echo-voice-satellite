@@ -89,7 +89,6 @@ screen and you will re-enter these by hand:
 | `OWW_THRESHOLD` | **Wake word threshold** |
 | `DEVICE_APPROVAL` | **Device approval** |
 | `REQUIRE_DEVICE_TLS` | **Require device TLS** |
-| `ESPHOME_PROJECT_VERSION` | **ESPHome project version** |
 | `DEBUG` | **Debug** |
 
 Four have no option, deliberately or otherwise:
@@ -128,8 +127,8 @@ that verifies — there is no way to tell them apart
 running means devices attach to whichever answered first, which will look like
 the migration randomly half-worked.
 
-It also matters for Home Assistant: it only re-points an ESPHome device at a
-new address when the old one has actually gone away.
+It also avoids two controllers sending contradictory device updates to the
+EchoMuse HACS integration.
 
 ### 2. Install the add-on, then stop it
 
@@ -211,22 +210,18 @@ You do not need to touch any Dot. They discover the controller by mDNS, so
 they follow it to the new machine on their next reconnect. The certificate
 they already hold still verifies, because you copied `tls/`.
 
-## Home Assistant re-points itself, if you copied the database
+## Reconnect Home Assistant through HACS
 
-Each EchoMuse device appears in Home Assistant as an ESPHome device on its own
-port. Those port numbers live in the database, so copying it keeps every
-device on the port Home Assistant already knows.
+EchoMuse no longer creates one ESPHome server per device. After the add-on is
+running, open the EchoMuse dashboard, generate an integration API key in
+**Settings → Home Assistant Integration**, and configure the EchoMuse HACS
+integration with the add-on's controller URL and that key. It receives the
+approved-device inventory from the controller and recreates supported entities.
 
-Home Assistant identifies them by a MAC address derived from the Dot's serial
-number, and when it sees that MAC at a new address it **updates the existing
-entry rather than creating a new one** — provided the old one is no longer
-answering, which is why step 1 mattered. Your entities, their `entity_id`s,
-and every automation built on them survive.
-
-If you did not copy the database, Home Assistant sees unfamiliar devices on
-unfamiliar ports and offers them as new discoveries. Your automations will be
-pointing at entities that no longer exist. This is not recoverable by
-re-approving; restore the database.
+Copying the database preserves device IDs, labels, configuration, TLS material,
+and activity history. If the HACS integration has to be re-added, Home
+Assistant may ask you to reconcile entity IDs; verify automations after the
+migration before deleting the standalone controller backup.
 
 ## Signing in changes
 
@@ -284,9 +279,6 @@ anything that happened in between. Decide within a day rather than a month.
   them, ask before migrating.
 - **Open the dashboard yourself first** — the first Home Assistant user
   through the door becomes the admin.
-- **Early Access is a separate add-on with separate storage.** Installing it
-  is *another* migration with all of the above again, `tls/` included.
-  Switching channels is not a toggle.
 - **`docker compose pull` on the old install can quietly bring it back.** If
   you have automation that pulls and restarts, disable it, or the two
   controllers problem returns weeks later when you have forgotten about it.

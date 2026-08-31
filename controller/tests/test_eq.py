@@ -1,8 +1,10 @@
 import math
 
 import numpy as np
+import pytest
 
 import em_eq
+import em_limiter
 
 RATE = 48000
 
@@ -20,7 +22,7 @@ def _rms(pcm: bytes) -> float:
 
 def test_flat_bands_are_transparent():
     pcm = _sine(1000)
-    out = em_eq.apply(pcm, RATE, bands=[0.0] * 8)
+    out = em_eq.apply(pcm, RATE, bands=[0.0] * 8, subsonic=False)
     assert len(out) == len(pcm)
     # 0 dB everywhere should be within a fraction of a dB of identity.
     ratio = _rms(out) / _rms(pcm)
@@ -29,24 +31,23 @@ def test_flat_bands_are_transparent():
 
 def test_none_bands_default_to_flat():
     pcm = _sine(1000)
-    assert abs(_rms(em_eq.apply(pcm, RATE)) - _rms(pcm)) / _rms(pcm) < 0.03
+    assert abs(_rms(em_eq.apply(pcm, RATE, subsonic=False)) - _rms(pcm)) / _rms(pcm) < 0.03
 
 
 def test_band_boost_raises_its_own_frequency_only():
-    # 60 Hz sits below the 125 Hz shelf corner (full +6 dB); at the corner
-    # itself a shelf only delivers half its gain.
+    # Test low shelf band boost in isolation without subsonic cutoff
     low = _sine(60)
     high = _sine(8000)
     bands = [6.0, 0, 0, 0, 0, 0, 0, 0]  # +6 dB low shelf
-    low_gain = _rms(em_eq.apply(low, RATE, bands=bands)) / _rms(low)
-    high_gain = _rms(em_eq.apply(high, RATE, bands=bands)) / _rms(high)
+    low_gain = _rms(em_eq.apply(low, RATE, bands=bands, subsonic=False)) / _rms(low)
+    high_gain = _rms(em_eq.apply(high, RATE, bands=bands, subsonic=False)) / _rms(high)
     assert low_gain > 1.7          # ~+6 dB ≈ ×2
     assert 0.9 < high_gain < 1.1   # shelf must not leak into the top band
 
 
 def test_cut_reduces_level():
     pcm = _sine(1000)
-    out = em_eq.apply(pcm, RATE, bands=[0, 0, 0, -12.0, 0, 0, 0, 0])
+    out = em_eq.apply(pcm, RATE, bands=[0, 0, 0, -12.0, 0, 0, 0, 0], subsonic=False)
     assert _rms(out) / _rms(pcm) < 0.5
 
 
@@ -64,8 +65,8 @@ def test_wrong_band_count_still_returns_audio():
 def test_streaming_eq_matches_batch_apply():
     pcm = _sine(1000, seconds=0.4)
     bands = [3.0, 0, -2.0, 0, 0, 4.0, 0, 1.0]
-    want = em_eq.apply(pcm, RATE, bands=bands)
-    eq = em_eq.StreamingEQ(RATE, bands=bands)
+    want = em_eq.apply(pcm, RATE, bands=bands, subsonic=True)
+    eq = em_eq.StreamingEQ(RATE, bands=bands, subsonic=True)
     out = b""
     for i in range(0, len(pcm), 4096):
         out += eq.process(pcm[i:i + 4096])
@@ -77,6 +78,55 @@ def test_streaming_eq_matches_batch_apply():
 
 
 def test_streaming_eq_flat_is_passthrough():
-    eq = em_eq.StreamingEQ(RATE, bands=[0.0] * 8)
+    eq = em_eq.StreamingEQ(RATE, bands=[0.0] * 8, subsonic=False)
     chunk = _sine(500, seconds=0.05)
     assert eq.process(chunk) == chunk
+
+
+def test_tts_gain_increases_level_before_processing():
+    pcm = (np.ones(4800, dtype=np.int16) * 1000).tobytes()
+    flat = em_eq.apply(pcm, RATE, bands=[0.0] * 8, subsonic=False)
+    boosted = em_eq.apply(pcm, RATE, bands=[0.0] * 8, subsonic=False, gain_db=6)
+    assert np.mean(np.abs(np.frombuffer(boosted, dtype=np.int16))) > \
+        np.mean(np.abs(np.frombuffer(flat, dtype=np.int16))) * 1.9
+
+
+def test_streaming_tts_gain_matches_buffered_gain():
+    pcm = (np.ones(4800, dtype=np.int16) * 1000).tobytes()
+    eq = em_eq.StreamingEQ(RATE, bands=[0.0] * 8, subsonic=False, gain_db=6)
+    out = eq.process(pcm[:4000]) + eq.process(pcm[4000:])
+    want = em_eq.apply(pcm, RATE, bands=[0.0] * 8, subsonic=False, gain_db=6)
+    assert out == want
+
+
+def test_subsonic_filter_attenuates_sub_bass():
+    sub = _sine(35)
+    mid = _sine(1000)
+    out_sub = em_eq.apply(sub, RATE, bands=[0.0] * 8, subsonic=True)
+    out_mid = em_eq.apply(mid, RATE, bands=[0.0] * 8, subsonic=True)
+    assert _rms(out_sub) / _rms(sub) < 0.35  # ~-10dB at 35Hz
+    assert 0.98 < _rms(out_mid) / _rms(mid) < 1.02
+
+
+def test_loudness_presence_and_warmth_boost():
+    # Loudness adds speech presence (2.5kHz) and warmth (180Hz)
+    presence_tone = _sine(2500, seconds=0.2)
+    warmth_tone = _sine(180, seconds=0.2)
+    flat_presence = _rms(em_eq.apply(presence_tone, RATE, bands=[0.0] * 8, loudness=False, subsonic=False))
+    boost_presence = _rms(em_eq.apply(presence_tone, RATE, bands=[0.0] * 8, loudness=True, subsonic=False))
+    flat_warmth = _rms(em_eq.apply(warmth_tone, RATE, bands=[0.0] * 8, loudness=False, subsonic=False))
+    boost_warmth = _rms(em_eq.apply(warmth_tone, RATE, bands=[0.0] * 8, loudness=True, subsonic=False))
+
+    assert boost_presence / flat_presence > 1.35  # ~+4dB presence boost
+    assert boost_warmth / flat_warmth > 1.15      # ~+1.5dB warmth boost
+
+
+def test_streaming_eq_reset_clears_filter_memory():
+    bands = [6.0, 0, 0, 0, 0, 0, 0, 0]
+    eq = em_eq.StreamingEQ(RATE, bands=bands, subsonic=True)
+    # Process audio with energy
+    eq.process(_sine(125, seconds=0.1))
+    assert not np.all(eq._zi == 0.0)
+    # Reset must zero out state
+    eq.reset()
+    assert np.all(eq._zi == 0.0)

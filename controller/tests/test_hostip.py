@@ -103,3 +103,39 @@ def test_the_warning_never_changes_the_answer():
     # because refusing would break anyone deliberately running that way.
     assert em_hostip.resolve("", "172.17.0.2") == ("172.17.0.2", "detected")
     assert em_hostip.resolve("172.17.0.2", None) == ("172.17.0.2", "configured")
+
+
+def test_detect_closes_socket_and_returns_source_or_none(monkeypatch):
+    class Socket:
+        def __init__(self, *, fail=False):
+            self.fail = fail
+            self.closed = False
+
+        def connect(self, _probe):
+            if self.fail:
+                raise OSError("no route")
+
+        def getsockname(self):
+            return ("192.168.1.10", 0)
+
+        def close(self):
+            self.closed = True
+
+    success = Socket()
+    monkeypatch.setattr(em_hostip.socket, "socket", lambda *_args: success)
+    assert em_hostip.detect() == "192.168.1.10"
+    assert success.closed
+
+    failed = Socket(fail=True)
+    monkeypatch.setattr(em_hostip.socket, "socket", lambda *_args: failed)
+    assert em_hostip.detect() is None
+    assert failed.closed
+
+
+def test_server_ip_uses_cached_resolution_and_detected_container_warning(monkeypatch):
+    em_hostip._resolved.cache_clear()
+    monkeypatch.setattr(em_hostip, "detect", lambda: "172.17.0.2")
+    assert em_hostip.server_ip(None) == "172.17.0.2"
+    monkeypatch.setattr(em_hostip, "detect", lambda: (_ for _ in ()).throw(AssertionError("cache missed")))
+    assert em_hostip.server_ip(None) == "172.17.0.2"
+    em_hostip._resolved.cache_clear()

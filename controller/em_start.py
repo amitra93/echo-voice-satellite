@@ -33,19 +33,16 @@ OPTION_ENV_VARS = {
     "server_host": "SERVER_HOST",
     "server_ip": "SERVER_IP",
     "mdns_name": "MDNS_NAME",
-    "esphome_project_version": "ESPHOME_PROJECT_VERSION",
-    "esphome_port_base": "EM_ESPHOME_PORT_BASE",
     "oww_model": "OWW_MODEL",
     "oww_threshold": "OWW_THRESHOLD",
     "require_device_tls": "REQUIRE_DEVICE_TLS",
     "device_approval": "DEVICE_APPROVAL",
     "debug": "DEBUG",
+    "music_assistant_url": "MUSIC_ASSISTANT_URL",
     "extra_ca_cert": "EM_EXTRA_CA_CERT",
 }
 
-if OPTIONS_PATH.is_file():
-    options = json.loads(OPTIONS_PATH.read_text(encoding="utf-8"))
-
+def apply_options(options: dict) -> None:
     for key, value in options.items():
         env_key = OPTION_ENV_VARS.get(key)
         if env_key is None:
@@ -69,22 +66,19 @@ if OPTIONS_PATH.is_file():
             env_value = str(value)
         os.environ.setdefault(env_key, env_value)
 
-# Trust a private CA before starting, so BOTH TLS stacks see it — Python for
-# the TTS fetch and GnuTLS-linked ffmpeg for media URLs. Done here rather than
-# in em_controller because it is a property of the container, has to happen
-# before anything opens a connection, and needs the root privileges this
-# process still has.
-#
-# Failing hard is deliberate. The alternative is a controller that starts
-# cleanly and then dies on every voice turn with a certificate error nobody
-# connects back to this setting — the user set an option and it silently did
-# not take.
-_ca = os.environ.get("EM_EXTRA_CA_CERT", "").strip()
-if _ca:
-    try:
-        print(f"em_start: {em_cacerts.install(_ca)}", flush=True)
-    except em_cacerts.CATrustError as err:
-        print(f"em_start: EM_EXTRA_CA_CERT — {err}", flush=True)
-        sys.exit(1)
 
-os.execvp("python3", ["python3", "-u", "em_controller.py"])
+def main() -> None:
+    if OPTIONS_PATH.is_file():
+        apply_options(json.loads(OPTIONS_PATH.read_text(encoding="utf-8")))
+    extra_ca = os.environ.get("EM_EXTRA_CA_CERT", "").strip()
+    if extra_ca:
+        try:
+            print(f"em_start: {em_cacerts.install(extra_ca)}", flush=True)
+        except em_cacerts.CATrustError as err:
+            print(f"em_start: EM_EXTRA_CA_CERT: {err}", flush=True)
+            sys.exit(1)
+    os.execvp("python3", ["python3", "-u", "em_controller.py"])
+
+
+if __name__ == "__main__":
+    main()

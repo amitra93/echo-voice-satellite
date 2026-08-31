@@ -1,6 +1,10 @@
 package beamformer
 
-import "testing"
+import (
+	"encoding/binary"
+	"math"
+	"testing"
+)
 
 // warmBeamformer returns a Beamformer with baseline warmed up and a uniform
 // noise floor, as if it had been running in a quiet room.
@@ -110,5 +114,154 @@ func TestBurstRatioPartialHistory(t *testing.T) {
 	want := 3.0
 	if got != want {
 		t.Fatalf("burstRatio = %v, want %v", got, want)
+	}
+}
+
+func TestOnsetRatioUsesBaselineAndFallsBackWhenUninitialised(t *testing.T) {
+	b := New()
+	b.energySmooth[0] = 4
+	if got := b.onsetRatio(0); got != 4 {
+		t.Fatalf("zero-baseline onsetRatio = %v, want 4", got)
+	}
+	b.energyBaseline[0] = 2
+	if got := b.onsetRatio(0); got != 2 {
+		t.Fatalf("onsetRatio = %v, want 2", got)
+	}
+}
+
+func TestBurstRatioFallsBackToBurstWhenBaselineIsZero(t *testing.T) {
+	b := New()
+	b.energyHistory[0][0] = 4
+	b.historyCount = 1
+	if got := b.burstRatio(0); got != 4 {
+		t.Fatalf("zero-baseline burstRatio = %v, want 4", got)
+	}
+}
+
+func TestUnlockAndRepeatedLock(t *testing.T) {
+	b := warmBeamformer(1)
+	b.energySmooth[2] = 5
+	b.Lock(true)
+	selected := b.lockedChannel
+	b.Lock(true)
+	if b.lockedChannel != selected {
+		t.Fatalf("repeated Lock changed channel from %d to %d", selected, b.lockedChannel)
+	}
+	b.Unlock()
+	if b.lockedChannel != -1 {
+		t.Fatalf("Unlock left channel %d locked", b.lockedChannel)
+	}
+	b.Unlock() // idempotent while already unlocked
+}
+
+func TestDecodeS24SampleHandlesPositiveAndNegativeValues(t *testing.T) {
+	if got := decodeS24Sample(0x00, 0x00, 0x00); got != 0 {
+		t.Fatalf("zero sample = %v, want 0", got)
+	}
+	if got := decodeS24Sample(0xff, 0xff, 0x7f); math.Abs(float64(got-0.9999999)) > 1e-5 {
+		t.Fatalf("positive full-scale sample = %v", got)
+	}
+	if got := decodeS24Sample(0x00, 0x00, 0x80); math.Abs(float64(got+1)) > 1e-6 {
+		t.Fatalf("negative full-scale sample = %v, want -1", got)
+	}
+}
+
+func TestBandDiffAndHFEnergy(t *testing.T) {
+	b := New()
+	b.chanBuf[0][0] = 1
+	b.chanBuf[0][1] = 2
+	b.chanBuf[0][2] = 5
+	b.bandDiff()
+	if b.hfBuf[0][0] != 0 || b.hfBuf[0][1] != 0 || b.hfBuf[0][2] != 2 {
+		t.Fatalf("bandDiff prefix/stride output = %v, %v, %v", b.hfBuf[0][0], b.hfBuf[0][1], b.hfBuf[0][2])
+	}
+	var channels [6][]float32
+	for i := range channels {
+		channels[i] = []float32{0, 1, 2}
+	}
+	if got := hfEnergy(channels, 0); got != 5.0/3.0 {
+		t.Fatalf("hfEnergy = %v, want %v", got, 5.0/3.0)
+	}
+}
+
+func TestNearestDirectionWrapsAtZero(t *testing.T) {
+	if got := nearestDirection(359); got != 0 {
+		t.Fatalf("nearestDirection(359) = %d, want 0", got)
+	}
+	if got := nearestDirection(45); got != 1 {
+		t.Fatalf("nearestDirection(45) = %d, want 1", got)
+	}
+	if got := angleDiff(10, 350); got != 20 {
+		t.Fatalf("angleDiff(10, 350) = %v, want 20", got)
+	}
+	if got := angleDiff(350, 10); got != -20 {
+		t.Fatalf("angleDiff(350, 10) = %v, want -20", got)
+	}
+	if got := CandidateAngles(); got != candidateAngles {
+		t.Fatalf("CandidateAngles() = %v, want %v", got, candidateAngles)
+	}
+}
+
+func putS24(raw []byte, frame, channel int, value int32) {
+	offset := frame*frameSize + channel*byteSample
+	if value < 0 {
+		value += 1 << 24
+	}
+	raw[offset] = byte(value)
+	raw[offset+1] = byte(value >> 8)
+	raw[offset+2] = byte(value >> 16)
+}
+
+func TestExtractChannelAppliesGainAndCountsClipping(t *testing.T) {
+	b := New()
+	raw := make([]byte, frameSize*2)
+	putS24(raw, 0, 0, 1<<20)
+	putS24(raw, 1, 0, -(1 << 23))
+
+	out := b.extractChannel(raw, 0, 2)
+	if got := int16(binary.LittleEndian.Uint16(out[0:2])); got != 8192 {
+		t.Fatalf("positive extracted sample = %d, want 8192", got)
+	}
+	if got := int16(binary.LittleEndian.Uint16(out[2:4])); got != -32768 {
+		t.Fatalf("negative extracted sample = %d, want -32768", got)
+	}
+	if b.ClippedSamples() != 1 {
+		t.Fatalf("ClippedSamples() = %d, want 1", b.ClippedSamples())
+	}
+}
+
+func TestProcessShortInputUsesCentreChannel(t *testing.T) {
+	b := New()
+	raw := make([]byte, frameSize*2)
+	putS24(raw, 0, centreCh, 1<<20)
+	putS24(raw, 1, centreCh, -(1 << 20))
+
+	mono, angle := b.Process(raw, -1, 1)
+	if angle != -1 || len(mono) != 4 {
+		t.Fatalf("short Process() returned len=%d angle=%v", len(mono), angle)
+	}
+	if got := int16(binary.LittleEndian.Uint16(mono[0:2])); got != 4096 {
+		t.Fatalf("centre sample = %d, want 4096", got)
+	}
+}
+
+func TestProcessFullPeriodUnlockedAndLockedModes(t *testing.T) {
+	raw := make([]byte, periodFrames*frameSize)
+	putS24(raw, 0, 1, 1<<20)
+
+	b := New()
+	mono, angle := b.Process(raw, -1, 1)
+	if angle != -1 || len(mono) != periodFrames*2 || b.historyCount != 1 {
+		t.Fatalf("unlocked Process() len=%d angle=%v history=%d", len(mono), angle, b.historyCount)
+	}
+
+	b.lockedChannel = 2
+	_, angle = b.Process(raw, -1, 1)
+	if angle != candidateAngles[1] {
+		t.Fatalf("auto locked angle = %v, want %v", angle, candidateAngles[1])
+	}
+	_, angle = b.Process(raw, 31, 1)
+	if angle != candidateAngles[1] {
+		t.Fatalf("fixed locked angle = %v, want %v", angle, candidateAngles[1])
 	}
 }

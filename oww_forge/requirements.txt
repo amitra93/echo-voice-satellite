@@ -19,8 +19,18 @@ piper-phonemize==1.1.0
 webrtcvad==2.0.10
 # torch.onnx.export needs the onnx package at model-save time
 onnx==1.17.0
+# Installed separately with --no-deps in Dockerfile to preserve the pinned
+# ROCm torch wheel; see torch_features.py for the torchvision-free graph path.
+# onnx2torch==1.5.15
 # asset downloads + audio IO
 huggingface_hub>=0.19
+# Rust multi-connection downloader used by hf_hub_download when
+# HF_HUB_ENABLE_HF_TRANSFER=1 — the difference between one throttled CDN
+# stream (~1-4 MB/s on us.aws.cdn.hf.co) and line-rate for the big single-file
+# FLEURS/VoxPopuli shards.
+hf_transfer>=0.1
+# Official Mozilla Data Collective downloader for the full Common Voice archive.
+datacollective>=0.5,<0.6
 soundfile
 librosa==0.10.1
 pyyaml

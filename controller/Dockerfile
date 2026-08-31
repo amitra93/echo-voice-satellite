@@ -66,41 +66,40 @@ COPY em_mbc.py .
 COPY em_scenes.py .
 COPY em_support.py .
 COPY em_shadow.py .
+COPY em_oww_warmup.py .
 COPY em_barge.py .
-COPY em_ns.py .
 COPY em_pki.py .
 COPY em_hostip.py .
 COPY em_ingressauth.py .
 COPY em_linkauth.py .
-COPY em_esphome.py .
-COPY em_ble_proxy.py .
 COPY em_oww_assets.py  ./
 COPY em_oww_models.py .
-COPY em_oww_warmup.py .
 COPY em_arbiter.py .
 COPY em_button.py .
 COPY em_tap_burst.py .
 COPY em_player.py .
 COPY em_config_sections.py .
 COPY em_recordings.py .
+COPY em_training_captures.py .
 COPY em_turnclock.py .
 COPY em_firmware.py .
 COPY em_announce.py .
 COPY em_runbarrier.py .
 COPY em_volume.py .
+COPY em_timers.py .
+COPY em_timer_alarm.py .
+COPY em_audio_frame.py .
+COPY em_clock.py .
+COPY em_sendspin.py .
+COPY em_sync_sim.py .
+COPY em_turn_engine.py .
+COPY em_wake_audio.py .
+COPY em_test_audio.py .
+COPY em_ha_sidechannels.py .
 COPY version.py .
-# ESPHome native API subpackage (frame protocol, message registry, vendored protobuf)
-COPY esphome/ ./esphome/
 # Device payloads (start_server.sh etc.) — canonical copies served to devices
 COPY device_payloads/ ./device_payloads/
-
-# DTLN noise-suppression models (em_ns.py) — vendored at build time like the
-# JS deps above; pinned to a commit so builds are reproducible. MIT licensed.
-RUN mkdir -p /app/models/dtln && \
-    curl -sfL -o /app/models/dtln/model_1.onnx \
-      https://raw.githubusercontent.com/breizhn/DTLN/1de1f15a8b5b7e1c44905618ff2ef70ca8277fbc/pretrained_model/model_1.onnx && \
-    curl -sfL -o /app/models/dtln/model_2.onnx \
-      https://raw.githubusercontent.com/breizhn/DTLN/1de1f15a8b5b7e1c44905618ff2ef70ca8277fbc/pretrained_model/model_2.onnx
+COPY sounds/ ./sounds/
 
 # ONNX Runtime for the DEVICE (armeabi-v7a) — on-device wake word assets.
 #

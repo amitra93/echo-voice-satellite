@@ -10,9 +10,14 @@ walkthroughs welcome.
 | [Configuration Guide](configuration.md) | Every dashboard setting explained in plain language — what it does, when to touch it, and how to tune it. Ends with [what leaves your network](configuration.md#what-leaves-your-network) — there is no telemetry, and the one outbound connection is named. |
 | [The Voice Pipeline, Explained](voice-pipeline.md) | How your voice travels from the microphones to Home Assistant and back, stage by stage, with the benefits and caveats of each design choice. |
 | [Moving to the Home Assistant add-on](migrate-to-addon.md) | Migrating an existing Docker install to the add-on without losing your devices, settings or Home Assistant entities. Read the part about `tls/` before you start. |
+| [Wake-word training](wake-training.md) | Capture, label, export, and retrain wake-word examples without sending speech off your network. |
 
 Deeper technical references live elsewhere:
 
+- [design/](design/) — engineering plans, architecture proposals, and
+  implementation specifications.
+- [HACS integration](../hacs/README.md) — install EchoMuse in Home Assistant
+  and connect it to the controller with an API key.
 - [support-bundle.md](support-bundle.md) — what a support bundle contains,
   what it deliberately excludes, and how to check before you share one.
 - [rooting.md](rooting.md) — what a device needs before EchoMuse can use it.

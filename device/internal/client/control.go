@@ -17,9 +17,10 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/wilbowes/EchoMuse/internal/bindings/als"
+	deviceclock "github.com/wilbowes/EchoMuse/internal/clock"
 	"github.com/wilbowes/EchoMuse/internal/config"
 	"github.com/wilbowes/EchoMuse/internal/discovery"
-	"github.com/wilbowes/EchoMuse/internal/bindings/als"
 	"github.com/wilbowes/EchoMuse/pkg/buttons"
 	"github.com/wilbowes/EchoMuse/pkg/led"
 )
@@ -28,6 +29,31 @@ import (
 //
 //	-ldflags "-X github.com/wilbowes/EchoMuse/internal/client.Version=v2.1.0"
 var Version = "dev"
+
+func clockProbeReply(raw []byte, receivedUs, sentUs int64) (map[string]interface{}, bool) {
+	if receivedUs < 0 || sentUs < receivedUs {
+		return nil, false
+	}
+	var probe struct {
+		ID json.RawMessage `json:"id"`
+	}
+	if err := json.Unmarshal(raw, &probe); err != nil || len(probe.ID) == 0 {
+		return nil, false
+	}
+	var id interface{}
+	if err := json.Unmarshal(probe.ID, &id); err != nil || id == nil {
+		return nil, false
+	}
+	if value, ok := id.(string); ok && value == "" {
+		return nil, false
+	}
+	return map[string]interface{}{
+		"type":               "clock_probe",
+		"id":                 probe.ID,
+		"device_received_us": receivedUs,
+		"device_sent_us":     sentUs,
+	}, true
+}
 
 // ─── Message types ────────────────────────────────────────────────────────────
 
@@ -57,7 +83,7 @@ type MicStopCallback func()
 type StateCallback func()
 type ConfigAppliedCallback func(msg config.ConfigMessage)
 type VolumeSetCallback func(level int)
-type BeamLockCallback func(lock bool)
+type MuteToggleCallback func()
 
 // WifiChangeCallback receives a wifi_change request. It must return
 // quickly (the executor runs in its own goroutine) — the control
@@ -69,25 +95,27 @@ type WifiChangeCallback func(ssid, psk string)
 type ControlClient struct {
 	deviceID string
 
-	ledCallback           LEDCallback
-	ledAnimCallback       LEDAnimCallback
-	micStartCallback      MicStartCallback
-	micStopCallback       MicStopCallback
-	disconnectedCallback  StateCallback
-	connectedCallback     StateCallback
-	pendingCallback       StateCallback
-	configAppliedCallback ConfigAppliedCallback
-	volumeSetCallback     VolumeSetCallback
-	beamLockCallback      BeamLockCallback
-	speakerFlushCallback  StateCallback
-	musicFlushCallback    StateCallback
-	duckCallback          func(on bool)
-	wifiChangeCallback    WifiChangeCallback
-	wifiCommitCallback    StateCallback
-	wifiScanCallback      StateCallback
+	ledCallback              LEDCallback
+	ledAnimCallback          LEDAnimCallback
+	micStartCallback         MicStartCallback
+	micStopCallback          MicStopCallback
+	disconnectedCallback     StateCallback
+	connectedCallback        StateCallback
+	pendingCallback          StateCallback
+	configAppliedCallback    ConfigAppliedCallback
+	volumeSetCallback        VolumeSetCallback
+	muteToggleCallback       MuteToggleCallback
+	speakerFlushCallback     StateCallback
+	musicFlushCallback       StateCallback
+	duckCallback             func(on bool)
+	wifiChangeCallback       WifiChangeCallback
+	wifiCommitCallback       StateCallback
+	wifiScanCallback         StateCallback
+	testAudioCallback        StateCallback
+	testAudioCleanupCallback StateCallback
 
-	conn         *websocket.Conn
-	connMu       sync.Mutex
+	conn   *websocket.Conn
+	connMu sync.Mutex
 
 	// serverBaseURL is the WebSocket base URL actually in use
 	// ("ws://host:port" or "wss://host:tlsport"), set on successful
@@ -118,18 +146,20 @@ func NewControlClient(
 }
 
 func (c *ControlClient) OnLEDAnim(cb LEDAnimCallback)             { c.ledAnimCallback = cb }
-func (c *ControlClient) OnDisconnected(cb StateCallback)           { c.disconnectedCallback = cb }
+func (c *ControlClient) OnDisconnected(cb StateCallback)          { c.disconnectedCallback = cb }
 func (c *ControlClient) OnConnected(cb StateCallback)             { c.connectedCallback = cb }
 func (c *ControlClient) OnPending(cb StateCallback)               { c.pendingCallback = cb }
 func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback) { c.configAppliedCallback = cb }
 func (c *ControlClient) OnVolumeSet(cb VolumeSetCallback)         { c.volumeSetCallback = cb }
-func (c *ControlClient) OnBeamLock(cb BeamLockCallback)           { c.beamLockCallback = cb }
+func (c *ControlClient) OnMuteToggle(cb MuteToggleCallback)       { c.muteToggleCallback = cb }
 func (c *ControlClient) OnSpeakerFlush(cb StateCallback)          { c.speakerFlushCallback = cb }
 func (c *ControlClient) OnMusicFlush(cb StateCallback)            { c.musicFlushCallback = cb }
 func (c *ControlClient) OnDuck(cb func(on bool))                  { c.duckCallback = cb }
 func (c *ControlClient) OnWifiChange(cb WifiChangeCallback)       { c.wifiChangeCallback = cb }
 func (c *ControlClient) OnWifiCommit(cb StateCallback)            { c.wifiCommitCallback = cb }
 func (c *ControlClient) OnWifiScan(cb StateCallback)              { c.wifiScanCallback = cb }
+func (c *ControlClient) OnTestAudio(cb StateCallback)             { c.testAudioCallback = cb }
+func (c *ControlClient) OnTestAudioCleanup(cb StateCallback)      { c.testAudioCleanupCallback = cb }
 
 // IsConnected reports whether the control WebSocket is registered and
 // live — the wifi change executor's "controller reachable" gate.
@@ -253,9 +283,9 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 	c.serverAddrMu.Unlock()
 
 	reg := map[string]interface{}{
-		"type":         "register",
-		"device_id":    c.deviceID,
-		"version":      Version,
+		"type":      "register",
+		"device_id": c.deviceID,
+		"version":   Version,
 		// Capabilities, not version strings, are how the controller decides
 		// what a device can be asked to do. A version comparison has to encode
 		// knowledge of our release history in the controller and gets it wrong
@@ -411,18 +441,17 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 				c.micStopCallback()
 			}
 
-		// beam_lock/beam_unlock: controller-driven beamformer control for the
-		// continuous wake stream. Sent at wake detection (lock onto the
-		// speaker's perimeter mic mid-utterance, no stream restart) and at
-		// turn end (back to ch6 omni for wake listening).
-		case "beam_lock":
-			if c.beamLockCallback != nil {
-				c.beamLockCallback(true)
+		case "test_audio":
+			// Stream the controller-installed temporary WAV as microphone
+			// input. The callback runs asynchronously so a
+			// multi-second query cannot block pings or other control messages.
+			if c.testAudioCallback != nil {
+				go c.testAudioCallback()
 			}
 
-		case "beam_unlock":
-			if c.beamLockCallback != nil {
-				c.beamLockCallback(false)
+		case "test_audio_cleanup":
+			if c.testAudioCleanupCallback != nil {
+				c.testAudioCleanupCallback()
 			}
 
 		case "volume_set":
@@ -434,6 +463,18 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 			}
 			if err := json.Unmarshal(raw, &msg); err == nil && c.volumeSetCallback != nil {
 				c.volumeSetCallback(msg.Level)
+			}
+
+		case "mute_toggle":
+			// Controller forwarding a remote mute-toggle request (HA button
+			// entity). Deliberately routes to the exact same callback the
+			// hardware button uses (Server.MuteToggle -> mute.Toggle()), not
+			// a parallel remote-mute code path — ADC mute, LED ring, button
+			// LED and state.json persistence all come for free, identical to
+			// a physical press, and SendMuteState already reports the result
+			// back through the existing mute_state channel either way.
+			if c.muteToggleCallback != nil {
+				c.muteToggleCallback()
 			}
 
 		case "config":
@@ -555,6 +596,17 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 				c.writeJSON(map[string]any{"type": "pong", "id": ping.ID})
 			} else {
 				c.writeJSON(map[string]string{"type": "pong"})
+			}
+
+		case "clock_probe":
+			// These timestamps are from the device's monotonic domain. The
+			// controller combines them with its send/receive timestamps to
+			// estimate offset and clock-rate drift; wall time is deliberately
+			// not involved because an Echo may boot before NTP is available.
+			receivedUs := deviceclock.NowUs()
+			sentUs := deviceclock.NowUs()
+			if reply, ok := clockProbeReply(raw, receivedUs, sentUs); ok {
+				c.writeJSON(reply)
 			}
 
 		case "pong":
@@ -748,8 +800,8 @@ func capabilities() []string {
 	// device that scores, stays silent, and looks broken. Announcing a
 	// capability the firmware has, rather than inferring one from a version
 	// string, is the rule the whole registration follows.
-	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons",
-		"oww_shadow", "oww_trigger", "button_hold", "audio_mix"}
+	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons", "test_audio",
+		"oww_shadow", "oww_trigger", "button_hold", "audio_mix", "sendspin_native", "output_chain"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}
@@ -770,7 +822,7 @@ func (c *ControlClient) SendButton(event buttons.ButtonClickEvent) {
 		// Always sent, never omitempty: absent must mean "this firmware does
 		// not report it" so the controller can fall back to mute_state, and
 		// omitempty would make an unmuted press indistinguishable from that.
-		"muted":  event.Muted,
+		"muted": event.Muted,
 		"button": map[string]string{
 			"type": string(event.Button.Type),
 		},
@@ -899,12 +951,13 @@ func (c *ControlClient) SendOwwShadowCross(score float32, ageMs int64) {
 // for the same reason as shadow crossings: an Echo's wall clock is unreliable
 // before NTP. The controller needs it to compare claims across devices without
 // network delay deciding which room answers.
-func (c *ControlClient) SendOwwWake(score, threshold float32, ageMs int64) {
+func (c *ControlClient) SendOwwWake(score, threshold float32, ageMs int64, activationSeq uint16) {
 	_ = c.writeJSON(map[string]interface{}{
-		"type":      "oww_wake",
-		"score":     score,
-		"threshold": threshold,
-		"ageMs":     ageMs,
+		"type":          "oww_wake",
+		"score":         score,
+		"threshold":     threshold,
+		"ageMs":         ageMs,
+		"activationSeq": activationSeq,
 	})
 }
 

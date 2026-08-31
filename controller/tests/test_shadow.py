@@ -243,11 +243,12 @@ def test_wake_carries_its_corrected_instant_not_arrival():
     """The age is measured on the device, so a slow link shows up as an old
     wake — not a fresh one that then drags the comparison by the network hop."""
     p = pending()
-    assert p.offer(0.82, 0.5, age_ms=250, at_now=100.0) is True
+    assert p.offer(0.82, 0.5, age_ms=250, activation_seq=42, at_now=100.0) is True
     wake, age = p.take(at_now=100.0)
     assert wake["at"] == 99.75
     assert wake["score"] == 0.82
     assert wake["threshold"] == 0.5
+    assert wake["activation_seq"] == 42
     assert age == 0.25
 
 
@@ -255,7 +256,7 @@ def test_stale_wake_is_dropped_and_reports_its_age():
     """A wake several seconds old means the person has finished speaking, so
     acting on it answers into silence. The age is the only evidence of why."""
     p = pending()
-    p.offer(0.9, 0.5, age_ms=0, at_now=0.0)
+    p.offer(0.9, 0.5, age_ms=0, activation_seq=1, at_now=0.0)
     wake, age = p.take(at_now=em_shadow.MAX_PENDING_WAKE_S + 0.5)
     assert wake is None
     assert age == pytest.approx(em_shadow.MAX_PENDING_WAKE_S + 0.5)
@@ -265,7 +266,7 @@ def test_expiry_clears_the_slot():
     """A wake too stale to act on now will not be fresher next frame; leaving
     it would fire a turn at some arbitrary later moment."""
     p = pending()
-    p.offer(0.9, 0.5, age_ms=0, at_now=0.0)
+    p.offer(0.9, 0.5, age_ms=0, activation_seq=1, at_now=0.0)
     p.take(at_now=100.0)
     assert p.peek() is False
     assert p.take(at_now=100.0) == (None, None)
@@ -273,7 +274,7 @@ def test_expiry_clears_the_slot():
 
 def test_take_consumes_so_one_wake_cannot_start_two_turns():
     p = pending()
-    p.offer(0.9, 0.5, age_ms=0, at_now=0.0)
+    p.offer(0.9, 0.5, age_ms=0, activation_seq=1, at_now=0.0)
     assert p.take(at_now=0.0)[0] is not None
     assert p.take(at_now=0.0) == (None, None)
 
@@ -283,8 +284,8 @@ def test_second_wake_replaces_the_first():
     nothing happened — both want one turn on the newest wake, not a queue that
     starts a second turn the moment the first ends."""
     p = pending()
-    p.offer(0.7, 0.5, age_ms=0, at_now=0.0)
-    p.offer(0.95, 0.5, age_ms=0, at_now=1.0)
+    p.offer(0.7, 0.5, age_ms=0, activation_seq=1, at_now=0.0)
+    p.offer(0.95, 0.5, age_ms=0, activation_seq=2, at_now=1.0)
     wake, _ = p.take(at_now=1.0)
     assert wake["score"] == 0.95
     assert p.peek() is False
@@ -293,7 +294,8 @@ def test_second_wake_replaces_the_first():
 def test_malformed_wake_is_dropped_not_coerced():
     """A turn is a worse thing to invent than a data point."""
     p = pending()
-    assert p.offer("loud", 0.5, age_ms=0) is False
+    assert p.offer("loud", 0.5, age_ms=0, activation_seq=1) is False
+    assert p.offer(0.9, 0.5, age_ms=0, activation_seq=65536) is False
     assert p.peek() is False
 
 
@@ -301,7 +303,7 @@ def test_missing_threshold_does_not_cost_the_wake():
     """The threshold is recorded against the turn, not used to decide
     anything — losing it must not lose the user their wake."""
     p = pending()
-    assert p.offer(0.9, None, age_ms=0, at_now=0.0) is True
+    assert p.offer(0.9, None, age_ms=0, activation_seq=1, at_now=0.0) is True
     wake, _ = p.take(at_now=0.0)
     assert wake["score"] == 0.9
     assert wake["threshold"] is None
@@ -312,7 +314,7 @@ def test_absurd_wake_age_is_clamped_and_then_dropped():
     staleness limit then refuses it, because MAX_AGE_S is well past the point
     where starting a turn is any use. Both bounds apply, in that order."""
     p = pending()
-    assert p.offer(0.9, 0.5, age_ms=600_000, at_now=1000.0) is True
+    assert p.offer(0.9, 0.5, age_ms=600_000, activation_seq=1, at_now=1000.0) is True
     wake, age = p.take(at_now=1000.0)
     assert wake is None
     assert age == pytest.approx(em_shadow.MAX_AGE_S)

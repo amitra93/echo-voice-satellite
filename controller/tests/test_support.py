@@ -138,6 +138,27 @@ def test_speech_is_excluded_with_no_opt_in():
     assert "stt_text" not in S._TURN_FIELDS
 
 
+def test_wake_captures_have_no_path_into_a_bundle():
+    """
+    Wake-word training captures are recognisable speech on disk, the same class
+    of data as saved utterances. The bundle is an allowlist built from explicit
+    parameters, so captures are excluded structurally — there is no parameter
+    for them and nothing in em_support walks their directory. Pin BOTH, because
+    the failure mode is someone later "helpfully" adding one: a new param, or a
+    filesystem walk of training_captures/.
+    """
+    sig = inspect.signature(S.build)
+    for param in sig.parameters:
+        assert "capture" not in param.lower() and "training" not in param.lower(), (
+            f"build() grew a {param!r} parameter — wake captures must have no opt-in"
+        )
+    src = (Path(__file__).resolve().parents[1] / "em_support.py").read_text()
+    for needle in ("em_training_captures", "training_captures", "captures_dir"):
+        assert needle not in src, (
+            f"em_support references {needle!r} — captures must never reach a bundle"
+        )
+
+
 def test_labels_are_replaced_with_positional_pseudonyms():
     """Device labels are user-authored and routinely contain names."""
     b = _bundle()

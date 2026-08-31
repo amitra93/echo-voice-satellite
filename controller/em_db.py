@@ -20,7 +20,6 @@ Usage:
     db.log_device(device_id, "info", "device", "Connected")
 """
 
-import hashlib
 import json
 import logging
 import os
@@ -32,6 +31,7 @@ from typing import Optional
 
 import em_config_sections
 import em_recordings
+import em_training_captures
 
 log = logging.getLogger("echomuse.db")
 
@@ -46,36 +46,8 @@ DEFAULT_DEVICE_CONFIG = {
     # needs ONNX Runtime plus the models installed on the device out of band
     # (they are not in the firmware). Enable on ONE device at a time.
     "owwOnDevice":      "off",
-    "adcDigitalGain":   88,
-    "adcMicpga":        40,
-    # micGainDb: fixed digital gain (dB) the device applies to the full
-    # 24-bit capture before quantising to the 16-bit stream. Sized from
-    # 20h fleet logs (2026-07-07): speech RMS at wake detection was
-    # 0.0001–0.0006 FS (~3–20 LSB in 16-bit — the old S24→S16 truncation
-    # discarded most of the signal), loudest observed chunk 0.0035 FS, so
-    # +24dB (×16) lifts speech into a usable range with ample clipping
-    # headroom. Device clamps to [0, 42]; clipped-sample count appears in
-    # the device's periodic VAD diag log. Note: the device interprets
-    # vadThreshold in pre-gain units (threshold is scaled by the gain
-    # internally), so this can be tuned without retuning vadThreshold.
-    "micGainDb":        24,
-    # AEC (speexdsp, device-side, whole mic path incl. wake stream).
-    # Default ON, and coupled to bargeInEnabled below: with barge-in the mic
-    # streams throughout playback, and AEC is the only thing stopping the
-    # device waking on its own TTS. Turning one on without the other is the
-    # self-trigger case the barge threshold reasoning assumes away, so if
-    # this goes back to False, bargeInEnabled must go with it.
-    # ~14dB attenuation per response, held across turns since v2.7.8; check
-    # the [aec] att= logs when tuning.
-    # aecDelayMs: 0, measured on hardware 2026-07-08 — the mic side reads
-    # 160ms ALSA batches, which eats most of the speaker's write-to-ear
-    # latency; the filter tail absorbs the remainder. (The original 250
-    # guess made the echo arrive *before* its reference — non-causal, zero
-    # cancellation.) aecTailMs is the adaptive filter length (residual
-    # delay + room reverb). Device clamps: delay 0–1000, tail 50–500.
-    "aecEnabled":       True,
-    "aecDelayMs":       0,
-    "aecTailMs":        300,
+    # AFE output is already S16 after Amazon's processing; default unity.
+    "afeMicGainDb":     0,
     "startupVolume":    85,
     # vadThreshold: 0.001 (normalised RMS pre-AGC).
     # Q2 fix (2026-07-05 review, tracked as B6): this was drifted to 0.003 in
@@ -116,34 +88,24 @@ DEFAULT_DEVICE_CONFIG = {
     # trades recall for false positives (see oww_forge/README.md).
     "owwThreshold":     0.5,
     # Barge-in (§3.2, controller-side): wake word spoken during TTS playback
-    # cancels it and starts a fresh turn. Requires device AEC (aecEnabled)
-    # on — with barge-in the mic streams through playback, and AEC is what
-    # stops the device hearing itself — so aecEnabled above defaults on with
-    # it, and the two move together.
+    # cancels it and starts a fresh turn. bargeInThreshold is used as-is,
+    # deliberately BELOW the normal wake threshold: the echo at the mic is
+    # ~25dB louder than the person talking over it, so speech-over-TTS wake
+    # scores are inherently depressed (~0.10–0.12 measured), while post-AEC
+    # self-echo scores only 0.004 (0.055 worst-case unconverged) — there is
+    # no self-trigger risk down to ~0.08.
     #
-    # 0.25, raised from 0.05 on 2026-08-20 after the device interrupted
-    # ITSELF. The old value was chosen against short responses, where the
-    # watcher's peak score over a whole turn measured 0.029, and against a
-    # post-AEC self-echo figure of 0.002–0.003. Long-form speech breaks both
-    # premises: a story peaked at 0.091 and 0.184 on the same hardware, and
-    # was cut off mid-sentence twice in a row. Continuous synthetic narration
-    # offers far more phoneme sequences resembling a wake word than a short
-    # factual reply, and hundreds more frames to find one in.
+    # That 0.004 is STALE and the margin is wider than it says: v2.7.8 made
+    # the filter hold convergence across turns, so self-echo measures
+    # 0.002–0.003. 0.10 sat awkwardly close to real speech-over-TTS scores,
+    # which is the wrong way to be wrong — barge-in that never fires is
+    # undiagnosable from the outside ("it just ignores me"), while barge-in
+    # that fires too eagerly is self-evident and adjustable. 0.05 is the
+    # dashboard slider floor, so the only way to tune from here is UP, which
+    # is the direction the visible failure asks for.
     #
-    # The comment this replaces predicted exactly that symptom — "a device
-    # cutting its own response short" — and asserted the fleet did not do it.
-    # It does; the measurement had simply never included a long answer.
-    #
-    # 0.25 sits below real speech-over-TTS scores (0.3–0.5 observed, depressed
-    # because the echo at the mic is ~25dB louder than the person) so genuine
-    # barge-in still fires, and above the 0.184 that was self-triggering. The
-    # margin at the top is thinner than it was: if barge-in starts being
-    # missed, that is this trade, and the answer is a per-channel AEC filter
-    # state rather than creeping back down. em_barge's two-consecutive-frame
-    # rule is the other half — it is what makes a low bar survivable at all,
-    # and the two are meant to move together.
     "bargeInEnabled":   True,
-    "bargeInThreshold": 0.25,
+    "bargeInThreshold": 0.05,
     # How far music is attenuated while a voice turn plays OVER it, on
     # firmware that can mix the two planes (the "audio_mix" capability).
     # Ducking replaces pausing there: the music feed runs 4s ahead of
@@ -169,11 +131,10 @@ DEFAULT_DEVICE_CONFIG = {
     # A/B this is waiting on is now actually runnable. Off until someone
     # runs it — not off because it cannot be turned on.
     "owwSpeexNs":       False,
-    # nsAsr: DTLN noise suppression (em_ns.py), controller-side, applied
     # ONLY to the turn audio streamed to HA's STT — the wake stream and
     # all noise-floor measurement stay raw. Helps steady noise (fan, AC,
     # hum) at marginal SNR; does little against competing speech (TV) —
-    # that's the beamformer's job. Default off, and the A/B that was
+    # that's the AFE's job. Default off, and the A/B that was
     # "pending" has since run with a result that is NOT yet reconciled: with
     # NS on, recordings showed 8-15% of samples at exact digital zero at a
     # healthy signal level (the gate chewing speech); with it off, 0.3%.
@@ -184,7 +145,6 @@ DEFAULT_DEVICE_CONFIG = {
     # Models are vendored into the Docker image, so if the
     # files are missing (bare-metal without NS_MODEL_DIR) the flag
     # degrades to raw streaming with a warning.
-    "nsAsr":            False,
     # saveUtterances: keep the mic audio of the last few voice turns
     # (em_recordings.KEEP_PER_DEVICE) as WAVs, downloadable from the
     # Activity tab. Diagnostic tooling for "is my mic any good" — the
@@ -195,41 +155,35 @@ DEFAULT_DEVICE_CONFIG = {
     # only (the device never sees the audio again); the key rides the
     # config channel and the device ignores it, same as wakeArbitrationMs.
     "saveUtterances":   False,
+    # saveWakeCaptures: keep short 16kHz clips of the audio leading up to a
+    # wake ACTIVATION or NEAR-MISS, for an admin to label and hand to
+    # oww_forge for retraining (em_training_captures). Captured entirely
+    # controller-side off the always-on wake stream the OWW listener already
+    # scores — the device never sees the audio again and ignores this key,
+    # same as saveUtterances. Default OFF: like saveUtterances this writes
+    # recognisable speech to disk, so enabling it is a decision. wakeCaptureSec
+    # sets how many seconds of pre-roll each clip holds.
+    "saveWakeCaptures": False,
+    "wakeCaptureSec":   2.0,
+    # wakeNearMissFloor: minimum openWakeWord score to register as a near-miss
+    # (for the near-miss counters, logs, and saveWakeCaptures snapshotting).
+    # Default 0.05. Below this is treated as background room noise.
+    "wakeNearMissFloor": 0.05,
     # bleProxyEnabled: BLE proxy (device-side passive scan over the raw HCI
     # transport, forwarded to HA as a separate ESPHome bluetooth_proxy
     # device — em_ble_proxy.py). Default off: enabling durably disables the
     # Android Bluetooth stack on the device (required — /dev/stpbt is
     # single-owner) and brings up a second ESPHome listener + mDNS entry.
     "bleProxyEnabled":  False,
-    # beamformingEnabled: True — ch6 (centre/omni) hears the wake word, then
-    # the turn locks to the best perimeter mic. The flag ONLY gates Lock():
-    # unlocked is always ch6 and the wake path never locks, so the wake
-    # stream is ch6 either way (beamformer.go). It cannot splice wake audio.
-    #
-    # This was False, on a comment describing the every-32ms reselection that
-    # be2f16d (v2.6.3 P0-2) had already fixed in the same commit. The real
-    # reason recorded there was that onset discrimination was unreliable at
-    # <=1.5m, "re-enable once P0-3/P0-4 are addressed" — P0-3 closed
-    # 2026-07-12 (DTLN) and v2.7.2's lock-back selection fixed the decayed-
-    # spike picks that caused most of the wrong-lock risk. Nobody went back.
-    # Meanwhile this fleet has run True since the 2026-07-20 config restore
-    # with no reported regression, so True is the value with field evidence
-    # behind it and False is the one that has not been run in months.
-    "beamformingEnabled": True,
-    "beamAngle":        -1,
-    "eqBands":          [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-    "eqLoudness":       False,
-    # Output limiter. On by default: the EQ chain hard-clipped anything it
-    # boosted past full scale (#231), and a default that leaves that in place
-    # protects nobody. Threshold/release are config rather than constants
-    # because limiter character wants tuning by ear in a real room — the same
-    # reasoning as duckDb and the LED meter curve.
+    "eqBands":          [4.5, 3.0, -0.5, 0.0, 1.5, 1.0, 0.0, 1.5],
+    "eqLoudness":       True,
+    "ttsGainDb":        0.0,
+    # Output limiter and dynamic bass guard protect the device after EQ.
     # Dynamic bass guard. Removes low-frequency content the driver cannot
     # deliver, which is what makes the midrange clean — see em_mbc.
     "bassGuardEnabled": True,
     "bassGuardDb":      -30.0,
     "limiterEnabled":   True,
-    "limiterThreshold": -1.0,
     "limiterRelease":   150,
     # LED ring scene (controller-side rendering — see em_scenes.py).
     # ledListenColor/ledThinkColor only apply when ledScene is "custom".
@@ -248,12 +202,6 @@ DEFAULT_DEVICE_CONFIG = {
     "meterGamma":       2.2,   # >1 expands the dark end so the swing reads
     "meterRef":         0.22,  # speaker RMS mapped to full brightness
     "meterCurve":       0.7,   # <1 lifts quiet consonants
-    # agcEnabled: automatic gain control (lockMic/button turn streams only).
-    # Disable to hear raw mic levels. (nsEnabled/RNNoise removed 2026-07-12
-    # with the device-side RNNoise code — a stale nsEnabled key in stored
-    # configs is harmless: new firmware ignores unknown fields, and old
-    # firmware keeps honouring the stored False until it's OTA'd.)
-    "agcEnabled":       True,
 }
 
 # Maximum log rows retained per device. Older rows are pruned on insert.
@@ -766,35 +714,66 @@ MIGRATIONS: list[str] = [
     UPDATE system_config SET value = '18' WHERE key = 'schema_version';
     """,
 
-    # ── v19 — the ESPHome identity becomes a stored fact ────────────────────
-    #
-    # Home Assistant keys its device registry on the mac_address an ESPHome
-    # device reports, so this value IS the device's identity in HA — nothing
-    # routes to it and no packet carries it. It was DERIVED from the serial
-    # on every use, which made identity a function, with two consequences.
-    #
-    # The derivation stripped non-hex characters from an alphanumeric serial,
-    # so devices from one batch differing only in the trailing characters
-    # collapsed to the same address and Home Assistant treated two Echoes as
-    # one, overwriting the first (#212, found by @lennart24 in #217):
-    #
-    #     G090LF1180440C9K -> 090F1180440C9 -> 90:F1:18:04:40:C9
-    #     G090LF1180440C9R -> 090F1180440C9 -> 90:F1:18:04:40:C9
-    #
-    # And because it was a function, changing it to fix that would have
-    # changed EVERY device's identity, orphaning every HA device row and the
-    # automations referencing their entities. Storing it is what separates
-    # the two: the fix reaches the devices that need it and nobody else.
-    #
-    # The seeding rule is the whole point of the fixup below. A device whose
-    # current address is unique keeps it, so nothing that works today moves.
-    # Within a colliding group the oldest keeps it — it is the one HA
-    # actually has registered — and the others take the new derivation, since
-    # they are the ones being overwritten right now and cannot get worse.
+    # ── v19 — turn lifecycle state ───────────────────────────────────────────
+    # Phase 0 allocates turn ids before audio starts. Historical rows are
+    # already completed.
     """
-    ALTER TABLE devices ADD COLUMN esphome_mac TEXT;
+    ALTER TABLE turns ADD COLUMN state TEXT NOT NULL DEFAULT 'done';
 
     UPDATE system_config SET value = '19' WHERE key = 'schema_version';
+    """,
+
+    # ── v20 — native turn-engine latency and TTS recording ────────────────
+    # Explicit component durations avoid inferring segments from the retired
+    # ESPHome backend's cumulative timestamps. TTS audio is a second opt-in
+    # artifact beside the existing ASR-bound utterance recording.
+    """
+    ALTER TABLE turns ADD COLUMN stt_latency_ms INTEGER;
+    ALTER TABLE turns ADD COLUMN ha_latency_ms INTEGER;
+    ALTER TABLE turns ADD COLUMN tts_latency_ms INTEGER;
+    ALTER TABLE turns ADD COLUMN tts_audio_file TEXT;
+
+    UPDATE system_config SET value = '20' WHERE key = 'schema_version';
+    """,
+
+    # ── v21 — TTS latency through audible playback ─────────────────────────
+    # v20 stopped at HA's TTS_EOS, which measured synthesis but omitted the
+    # queued/controller/device playback the user was still hearing. Existing
+    # v20 rows can recover that final stage exactly from total - STT - HA.
+    """
+    UPDATE turns
+       SET tts_latency_ms = MAX(0, total_ms - stt_latency_ms - ha_latency_ms)
+     WHERE total_ms IS NOT NULL
+       AND stt_latency_ms IS NOT NULL
+       AND ha_latency_ms IS NOT NULL;
+
+    UPDATE system_config SET value = '21' WHERE key = 'schema_version';
+    """,
+
+    # ── v22 — compatibility with the retired main-line v19 ────────────────
+    # main's v19 used this list slot for an obsolete ESPHome column. A database
+    # upgraded there therefore skips new_impl's turn state migration when it
+    # later advances through v20-v21. Leave the obsolete column untouched, but
+    # restore the turn-engine column if it is absent in the Python fixup below.
+    """
+    UPDATE system_config SET value = '22' WHERE key = 'schema_version';
+    """,
+
+    # ── v23 — remove direct-capture config from AFE-only devices ────────────
+    """
+    UPDATE system_config SET value = '23' WHERE key = 'schema_version';
+    """,
+
+    # ── v24 — remove retired controller audio processing settings ───────────
+    """
+    UPDATE system_config SET value = '24' WHERE key = 'schema_version';
+    """,
+
+    # ── v25 — persist the text Home Assistant sends to TTS ─────────────────
+    """
+    ALTER TABLE turns ADD COLUMN tts_text TEXT;
+
+    UPDATE system_config SET value = '25' WHERE key = 'schema_version';
     """,
 ]
 
@@ -821,45 +800,97 @@ def _fixup_v11(conn) -> None:
             )
 
 
-def _fixup_v19(conn) -> None:
-    """
-    Seed devices.esphome_mac so no working device changes identity.
+def _fixup_v22(conn) -> None:
+    """Add turn state only for databases whose v19 was main's ESPHome v19."""
+    columns = {row["name"] for row in conn.execute("PRAGMA table_info(turns)")}
+    if "state" not in columns:
+        conn.execute("ALTER TABLE turns ADD COLUMN state TEXT NOT NULL DEFAULT 'done'")
 
-    Preserving the CURRENT address wherever it is unique is the entire
-    reason this is a fixup rather than a plain DEFAULT: Home Assistant has
-    already registered these devices under those values, and a new one
-    orphans the device row along with every automation referencing its
-    entities.
 
-    Ordering inside a colliding group is by first_seen then device_id —
-    deterministic, so a re-run after a failed migration reaches the same
-    answer rather than reshuffling which device keeps its identity.
-    """
-    rows = conn.execute(
-        "SELECT device_id, first_seen FROM devices ORDER BY first_seen, device_id"
-    ).fetchall()
+_OBSOLETE_AFE_CONFIG_KEYS = frozenset({
+    "adcMicpga", "adcDigitalGain", "micGainDb", "beamAngle",
+    "beamformingEnabled", "aecEnabled", "aecDelayMs", "aecTailMs",
+    "agcEnabled", "vadChannel",
+})
 
-    by_legacy: dict[str, list[str]] = {}
-    for row in rows:
-        by_legacy.setdefault(_legacy_serialno_to_mac(row["device_id"]), []).append(
-            row["device_id"])
 
-    for legacy, ids in by_legacy.items():
-        # First in the group keeps what HA already knows; the rest were being
-        # overwritten by it, so they take the new derivation.
-        conn.execute("UPDATE devices SET esphome_mac = ? WHERE device_id = ?",
-                     (legacy, ids[0]))
-        for device_id in ids[1:]:
-            conn.execute("UPDATE devices SET esphome_mac = ? WHERE device_id = ?",
-                         (esphome_mac_for(device_id), device_id))
-            log.warning(
-                f"[db] {device_id} shared an ESPHome identity with {ids[0]} "
-                f"({legacy}) — assigned {esphome_mac_for(device_id)}. Home "
-                f"Assistant will discover it as a new device; the other keeps "
-                f"its entities."
+def _strip_obsolete_afe_config(config) -> dict:
+    """Keep only supported keys when removing legacy direct-capture settings."""
+    return {key: value for key, value in config.items() if key not in _OBSOLETE_AFE_CONFIG_KEYS}
+
+
+def _fixup_v23(conn) -> None:
+    """Remove retired direct-capture keys from persisted fleet and device config."""
+    row = conn.execute(
+        "SELECT value FROM system_config WHERE key = 'global_device_config'"
+    ).fetchone()
+    if row:
+        try:
+            config = json.loads(row["value"] or "{}") or {}
+        except (json.JSONDecodeError, TypeError):
+            config = None
+        if config is not None:
+            pruned = _strip_obsolete_afe_config(config)
+            if len(pruned) != len(config):
+                conn.execute(
+                    "UPDATE system_config SET value = ? WHERE key = 'global_device_config'",
+                    (json.dumps(pruned),),
+                )
+
+    for row in conn.execute("SELECT device_id, config FROM devices"):
+        try:
+            config = json.loads(row["config"] or "{}") or {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+        pruned = _strip_obsolete_afe_config(config)
+        if len(pruned) != len(config):
+            conn.execute(
+                "UPDATE devices SET config = ? WHERE device_id = ?",
+                (json.dumps(pruned), row["device_id"]),
             )
 
-_MIGRATION_FIXUPS = {11: _fixup_v11, 19: _fixup_v19}
+
+_RETIRED_AUDIO_CONFIG_KEYS = frozenset({
+    "ttsGainDb", "bassShelfHz", "subsonicHz", "limiterThreshold", "nsAsr",
+})
+
+
+def _fixup_v24(conn) -> None:
+    """Remove controller audio settings persisted by older releases."""
+    def prune(config):
+        return {key: value for key, value in config.items()
+                if key not in _RETIRED_AUDIO_CONFIG_KEYS}
+
+    row = conn.execute(
+        "SELECT value FROM system_config WHERE key = 'global_device_config'"
+    ).fetchone()
+    if row:
+        try:
+            config = json.loads(row["value"] or "{}") or {}
+        except (json.JSONDecodeError, TypeError):
+            config = None
+        if config is not None:
+            pruned = prune(config)
+            if pruned != config:
+                conn.execute(
+                    "UPDATE system_config SET value = ? WHERE key = 'global_device_config'",
+                    (json.dumps(pruned),),
+                )
+
+    for row in conn.execute("SELECT device_id, config FROM devices"):
+        try:
+            config = json.loads(row["config"] or "{}") or {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+        pruned = prune(config)
+        if pruned != config:
+            conn.execute(
+                "UPDATE devices SET config = ? WHERE device_id = ?",
+                (json.dumps(pruned), row["device_id"]),
+            )
+
+
+_MIGRATION_FIXUPS = {11: _fixup_v11, 22: _fixup_v22, 23: _fixup_v23, 24: _fixup_v24}
 
 # ─── Connection management ────────────────────────────────────────────────────
 
@@ -1037,81 +1068,6 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
     new_version = current + len(pending)
     log.info(f"Schema migrated to v{new_version}")
-
-
-# ─── ESPHome identity ─────────────────────────────────────────────────────────
-#
-# Home Assistant keys its device registry on the mac_address an ESPHome device
-# reports, so this value IS a device's identity in HA. It is not a network
-# address in any functional sense: nothing routes to it and no packet carries
-# it. We supply one because the protocol requires it — HA's config flow aborts
-# its zeroconf step with "mdns_missing_mac" when the TXT record lacks it, and
-# never produces a discovery card at all.
-#
-# The prefix is fixed and the rest is a hash of the serial.
-#
-# 0x02 in the first octet is the LOCALLY ADMINISTERED bit — the MAC equivalent
-# of a private address range, declaring "not from an IEEE OUI, do not expect
-# global uniqueness". Bit 0 is a different flag entirely (unicast vs
-# multicast) and must stay clear; a raw hash sets it half the time, producing
-# an address that is not a valid unicast MAC. Choosing a fixed prefix that
-# satisfies both by CONSTRUCTION is why this is not a mask applied to a hash:
-# there is no bit for a later change to forget. Docker (02:42) and QEMU
-# (52:54:00) do the same thing for the same reason.
-#
-# 32 bits of hash rather than 48 is the cost, and it is affordable because
-# uniqueness is only ever needed within ONE Home Assistant registry — a
-# household fleet. At 100 devices the collision probability is 1.15e-6.
-ESPHOME_MAC_PREFIX = (0x02, 0xEC)
-
-
-def esphome_mac_for(device_id: str) -> str:
-    """The address a device WOULD be given. Deterministic; see the note above."""
-    digest = hashlib.md5(device_id.encode("utf-8")).digest()
-    octets = list(ESPHOME_MAC_PREFIX) + list(digest[:4])
-    return ":".join(f"{b:02X}" for b in octets)
-
-
-def _legacy_serialno_to_mac(device_id: str) -> str:
-    """
-    The pre-v19 derivation, kept ONLY so the migration can recognise the
-    identity Home Assistant already holds for a device.
-
-    It stripped non-hex characters from an alphanumeric serial, which is the
-    bug: devices differing only in the discarded characters collide. Never
-    call this for a new device.
-    """
-    hex_chars = "".join(c for c in device_id if c in "0123456789ABCDEFabcdef")
-    hex_chars = hex_chars[-12:].upper().zfill(12)
-    return ":".join(hex_chars[i:i + 2] for i in range(0, 12, 2))
-
-
-def get_esphome_mac(device_id: str) -> str:
-    """
-    The stored ESPHome identity for a device, assigning one if it has none.
-
-    Assign-once, like get_esphome_port/assign_esphome_port beside it, and for
-    the same reason: Home Assistant keys its registry on the value, so it must
-    never change under a device that is already registered. A device row that
-    predates v19 was seeded by that migration; one created afterwards is
-    assigned here on first use.
-    """
-    row = _q1("SELECT esphome_mac FROM devices WHERE device_id = ?", (device_id,))
-    if row is not None and row["esphome_mac"]:
-        return row["esphome_mac"]
-    mac = esphome_mac_for(device_id)
-    with _tx() as conn:
-        # Only where it is still unset: a concurrent caller may have won, and
-        # the first answer must stand.
-        conn.execute(
-            "UPDATE devices SET esphome_mac = ? "
-            "WHERE device_id = ? AND (esphome_mac IS NULL OR esphome_mac = '')",
-            (mac, device_id),
-        )
-    row = _q1("SELECT esphome_mac FROM devices WHERE device_id = ?", (device_id,))
-    # No device row yet (servers can be built before registration) — the value
-    # is still correct and will be stored the first time there is a row.
-    return (row["esphome_mac"] if row and row["esphome_mac"] else mac)
 
 
 # ─── Device registry ──────────────────────────────────────────────────────────
@@ -1531,203 +1487,24 @@ def delete_device(device_id: str) -> None:
             log.info(f"[db] Removed {removed} recording(s) for {device_id}")
     except Exception as e:
         log.warning(f"[db] Recording cleanup failed for {device_id}: {e}")
+    try:
+        removed = em_training_captures.delete_device(device_id)
+        if removed:
+            log.info(f"[db] Removed {removed} wake-capture(s) for {device_id}")
+    except Exception as e:
+        log.warning(f"[db] Wake-capture cleanup failed for {device_id}: {e}")
     log.info(f"[db] Device deleted: {device_id}")
 
 
-# ─── ESPHome port allocation ──────────────────────────────────────────────────
-
-def get_esphome_port(device_id: str) -> Optional[int]:
-    """
-    Return the ESPHome API port assigned to this device, or None if unassigned.
-
-    A None return means the device has never been assigned a port in esphome
-    mode — call assign_esphome_port() to allocate one.
-    """
-    row = _q1("SELECT esphome_api_port FROM devices WHERE device_id = ?", (device_id,))
-    if row is None:
-        return None
-    return row["esphome_api_port"]  # may be None (unassigned)
-
-
-# Ports are floored to this base at allocation time, so two controllers on one
-# network hand out satellite ports from disjoint ranges. In practice that means
-# the GA and Early Access add-ons: channels share no storage, so each has its
-# own database and its own counter, and both would otherwise start at 16001.
+# ─── ESPHome / BLE proxy port allocation (retired, Phase 4 cutover) ───────────
 #
-# Home Assistant keys an ESPHome config entry on host and port, so after a
-# channel switch its stored entries point into the other channel's range and it
-# reaches whichever device now holds that number. Measured 2026-08-19: every
-# satellite entity unavailable for a day, wake words still firing and turns
-# dying in milliseconds because no HA pipeline was behind them. Disjoint ranges
-# turn that into entries that visibly fail to connect — the same outcome the
-# never-reuse rule below already chooses for a deprovisioned device.
-#
-# A FLOOR rather than a seed, deliberately: the counter only ever moves
-# forwards, so a base can never land on a port already assigned. A fresh
-# database allocates its first port at the base; an established one jumps to it
-# at the next allocation and leaves every fielded device exactly where it is.
-#
-# BLE proxy ports follow at +BLE_PORT_OFFSET, so a base of 16101 gives 17101
-# without a second setting. The 100-port spacing between the channel defaults
-# is what bounds this: a channel would need 100 devices to reach the next one's
-# range.
-ESPHOME_PORT_BASE_DEFAULT = 16001
-
-
-def _esphome_port_base() -> int:
-    """
-    EM_ESPHOME_PORT_BASE, validated, falling back to the default on anything
-    unusable — a controller that refused to start over a stray port number
-    would be a worse outcome than one that allocates where it always did, and
-    the warning names it either way.
-    """
-    raw = os.environ.get("EM_ESPHOME_PORT_BASE", "").strip()
-    if not raw:
-        return ESPHOME_PORT_BASE_DEFAULT
-    try:
-        base = int(raw)
-    except ValueError:
-        log.warning(
-            f"[db] EM_ESPHOME_PORT_BASE={raw!r} is not a number — "
-            f"using {ESPHOME_PORT_BASE_DEFAULT}"
-        )
-        return ESPHOME_PORT_BASE_DEFAULT
-    # Room below for the privileged range and above for the BLE range plus a
-    # fleet's worth of climbing.
-    if not 1024 <= base <= 60000:
-        log.warning(
-            f"[db] EM_ESPHOME_PORT_BASE={base} is outside 1024-60000 — "
-            f"using {ESPHOME_PORT_BASE_DEFAULT}"
-        )
-        return ESPHOME_PORT_BASE_DEFAULT
-    return base
-
-
-# Read once at import, matching DEBUG: the value is consulted per allocation,
-# so re-reading it live would let an edit renumber a fleet mid-run.
-ESPHOME_PORT_BASE = _esphome_port_base()
-
-
-def assign_esphome_port(device_id: str) -> int:
-    """
-    Allocate and persist an ESPHome API port for this device.
-
-    Takes the next available port from next_esphome_port in system_config,
-    floored to ESPHOME_PORT_BASE, increments the counter, persists both
-    atomically, and returns the allocated port.
-
-    Port allocation is monotonically increasing and never reuses freed ports
-    (see ESPHOME_SPEC.md §2.2 for the rationale — sparse range is intentional
-    to prevent silent misrouting if HA still holds a stale config entry for a
-    deprovisioned device's old port number).
-
-    Raises ValueError if the device is not found.
-    Raises RuntimeError if a port is already assigned — caller should use
-    get_esphome_port() first to check.
-    """
-    with _tx() as conn:
-        row = conn.execute(
-            "SELECT esphome_api_port FROM devices WHERE device_id = ?", (device_id,)
-        ).fetchone()
-        if row is None:
-            raise ValueError(f"Device not found: {device_id}")
-        if row["esphome_api_port"] is not None:
-            raise RuntimeError(
-                f"Device {device_id} already has ESPHome port {row['esphome_api_port']} — "
-                f"use get_esphome_port() to retrieve it"
-            )
-
-        next_row = conn.execute(
-            "SELECT value FROM system_config WHERE key = 'next_esphome_port'"
-        ).fetchone()
-        stored = int(next_row["value"])
-        port = max(stored, ESPHOME_PORT_BASE)
-        if port != stored:
-            # Says the base did something. An option that silently has no
-            # effect on an established install is the shape this project
-            # keeps paying for.
-            log.info(
-                f"[db] ESPHome port counter raised {stored} → {port} "
-                f"(EM_ESPHOME_PORT_BASE)"
-            )
-
-        conn.execute(
-            "UPDATE devices SET esphome_api_port = ? WHERE device_id = ?",
-            (port, device_id),
-        )
-        conn.execute(
-            "UPDATE system_config SET value = ? WHERE key = 'next_esphome_port'",
-            (str(port + 1),),
-        )
-
-    log.info(f"[db] ESPHome port assigned: {device_id} → {port}")
-    return port
-
-
-def free_esphome_port(device_id: str) -> None:
-    """
-    Clear the ESPHome API port assignment for a device.
-
-    Called on device deprovisioning. The freed port number is NOT returned
-    to the pool — next_esphome_port only ever increments (see assign_esphome_port).
-    """
-    with _tx() as conn:
-        conn.execute(
-            "UPDATE devices SET esphome_api_port = NULL WHERE device_id = ?",
-            (device_id,),
-        )
-    log.info(f"[db] ESPHome port freed: {device_id}")
-
-
-# ─── BLE proxy port allocation ────────────────────────────────────────────────
-
-# BLE proxy ports are aligned to the voice satellite port, not drawn from a
-# separate pool: ble_proxy_port = esphome_api_port + BLE_PORT_OFFSET. This
-# keeps the two ports for one device visibly paired (16001 voice / 17001 BT)
-# and needs no allocator. The offset comfortably exceeds any realistic device
-# count, so the voice range (16001+) and BT range (17001+) never overlap.
-BLE_PORT_OFFSET = 1000
-
-
-def get_ble_proxy_port(device_id: str) -> Optional[int]:
-    """Return the BLE proxy port for this device, or None if unassigned."""
-    row = _q1("SELECT ble_proxy_port FROM devices WHERE device_id = ?", (device_id,))
-    if row is None:
-        return None
-    return row["ble_proxy_port"]  # may be None (unassigned)
-
-
-def ensure_ble_proxy_port(device_id: str) -> Optional[int]:
-    """
-    Return this device's BLE proxy port (esphome_api_port + BLE_PORT_OFFSET),
-    persisting it on first call. Returns None if the device has no voice port
-    yet (BLE proxy can't exist without the voice satellite it's paired to).
-    """
-    with _tx() as conn:
-        row = conn.execute(
-            "SELECT esphome_api_port, ble_proxy_port FROM devices WHERE device_id = ?",
-            (device_id,),
-        ).fetchone()
-        if row is None or row["esphome_api_port"] is None:
-            return None
-        port = int(row["esphome_api_port"]) + BLE_PORT_OFFSET
-        if row["ble_proxy_port"] != port:
-            conn.execute(
-                "UPDATE devices SET ble_proxy_port = ? WHERE device_id = ?",
-                (port, device_id),
-            )
-            log.info(f"[db] BLE proxy port set: {device_id} → {port}")
-    return port
-
-
-def free_ble_proxy_port(device_id: str) -> None:
-    """Clear the BLE proxy port assignment (deprovisioning)."""
-    with _tx() as conn:
-        conn.execute(
-            "UPDATE devices SET ble_proxy_port = NULL WHERE device_id = ?",
-            (device_id,),
-        )
-    log.info(f"[db] BLE proxy port freed: {device_id}")
+# get_esphome_port/assign_esphome_port/free_esphome_port and their BLE-proxy
+# counterparts (get_ble_proxy_port/ensure_ble_proxy_port/free_ble_proxy_port,
+# BLE_PORT_OFFSET) allocated per-device TCP ports for the ESPHome-impersonation
+# voice satellite and BT proxy — both gone (docs/design/full-duplex-plan.md). Deleted along
+# with their only callers (em_esphome.py, em_ble_proxy.py), not migrated: the
+# esphome_api_port/ble_proxy_port COLUMNS stay in the schema (never dropped —
+# MIGRATIONS is append-only) but are no longer read or written anywhere.
 
 
 # ─── Device logs ──────────────────────────────────────────────────────────────
@@ -1862,6 +1639,11 @@ _TURN_COLUMNS = {
     # after the insert (the name is keyed on the rowid). Always NULL at
     # insert time; listed here so get_turns returns it.
     "audio_file":       "audio_file",
+    "tts_audio_file":   "tts_audio_file",
+    "tts_text":         "tts_text",
+    "stt_latency_ms":   "stt_latency_ms",
+    "ha_latency_ms":    "ha_latency_ms",
+    "tts_latency_ms":   "tts_latency_ms",
 }
 
 
@@ -1908,6 +1690,36 @@ def insert_turn(device_id: str, rec: dict) -> int:
         return cur.lastrowid
 
 
+def create_turn(device_id: str, kind: str = "conversation") -> int:
+    """Create a pending turn and return its stable id before audio starts."""
+    with _tx() as conn:
+        cur = conn.execute(
+            "INSERT INTO turns (device_id, ts, trigger_type, outcome, state) "
+            "VALUES (?, ?, ?, NULL, 'pending')",
+            (device_id, time.time(), kind),
+        )
+        return cur.lastrowid
+
+
+def update_turn(turn_id: int, rec: dict, state: str = "done") -> None:
+    """Apply completion data to a turn allocated by ``create_turn``."""
+    updates = {"ts": _py(rec["ts"])} if "ts" in rec else {}
+    updates.update({
+        column: _py(rec[key])
+        for key, column in _TURN_COLUMNS.items()
+        if key in rec
+    })
+    updates["state"] = state
+    if not updates:
+        return
+    assignments = ", ".join(f"{key} = ?" for key in updates)
+    with _tx() as conn:
+        conn.execute(
+            f"UPDATE turns SET {assignments} WHERE id = ?",
+            [*updates.values(), turn_id],
+        )
+
+
 def set_turn_playback(turn_id: int, periods: int, underruns: int,
                       stats: Optional[dict] = None) -> None:
     """
@@ -1949,6 +1761,66 @@ def set_turn_audio(turn_id: int, audio_file: Optional[str]) -> None:
         )
 
 
+def set_turn_tts_audio(turn_id: int, audio_file: Optional[str]) -> None:
+    """Attach the saved synthesized-response recording to a turn."""
+    with _tx() as conn:
+        conn.execute(
+            "UPDATE turns SET tts_audio_file = ? WHERE id = ?",
+            (audio_file, turn_id),
+        )
+
+
+def reconcile_device_audio(device_id: str) -> None:
+    """Clear audio references whose retained files no longer exist."""
+    if _conn is None:
+        return
+    rows = _q(
+        "SELECT id, audio_file, tts_audio_file FROM turns WHERE device_id = ? "
+        "AND (audio_file IS NOT NULL OR tts_audio_file IS NOT NULL)",
+        (device_id,),
+    )
+    stale: list[tuple[int, Optional[str], Optional[str]]] = []
+    for row in rows:
+        stt = row["audio_file"] if row["audio_file"] and not em_recordings.resolve(
+            device_id, row["audio_file"], _db_path
+        ) else None
+        tts = row["tts_audio_file"] if row["tts_audio_file"] and not em_recordings.resolve(
+            device_id, row["tts_audio_file"], _db_path
+        ) else None
+        if stt or tts:
+            stale.append((row["id"], stt, tts))
+    if not stale:
+        return
+    with _tx() as conn:
+        for turn_id, stt, tts in stale:
+            if stt:
+                conn.execute("UPDATE turns SET audio_file = NULL WHERE id = ?", (turn_id,))
+            if tts:
+                conn.execute("UPDATE turns SET tts_audio_file = NULL WHERE id = ?", (turn_id,))
+
+
+def prune_audio(keep: int = 20) -> dict[str, object]:
+    """Remove old global STT/TTS files and clear their turn-row references."""
+    removed = em_recordings.prune_all(db_path=_db_path, keep=keep)
+    if not removed:
+        return {"files": 0, "removed": [], "remaining": len(em_recordings.list_all(_db_path)),
+                "stt_references": 0, "tts_references": 0}
+
+    placeholders = ", ".join("?" for _ in removed)
+    with _tx() as conn:
+        stt = conn.execute(
+            f"UPDATE turns SET audio_file = NULL WHERE audio_file IN ({placeholders})",
+            removed,
+        ).rowcount
+        tts = conn.execute(
+            f"UPDATE turns SET tts_audio_file = NULL WHERE tts_audio_file IN ({placeholders})",
+            removed,
+        ).rowcount
+    return {"files": len(removed), "removed": removed,
+            "remaining": len(em_recordings.list_all(_db_path)),
+            "stt_references": stt, "tts_references": tts}
+
+
 def set_turn_delivery(turn_id: int, send_ms: int, delivery_ms: int,
                       eq_ms: int) -> None:
     """
@@ -1964,6 +1836,25 @@ def set_turn_delivery(turn_id: int, send_ms: int, delivery_ms: int,
             "WHERE id = ?",
             (send_ms, delivery_ms, eq_ms, turn_id),
         )
+
+
+def get_turn(turn_id: int) -> Optional[dict]:
+    """
+    One turn as a turn_record-shaped dict (plus turn_id) — the same shape
+    get_turns() produces per row. Used to append a just-completed turn to
+    Device.turn_history at the moment it finishes, so the in-memory cache
+    (read for the Activity tab and the playback-stats-attachment lookup in
+    em_controller.handle_control) does not go stale for the rest of the
+    connection — matching get_turns() rather than hand-building a partial
+    dict keeps both hydration paths producing one consistent shape.
+    """
+    row = _q1("SELECT * FROM turns WHERE id = ?", (turn_id,))
+    if row is None:
+        return None
+    rec = {"turn_id": row["id"], "ts": row["ts"]}
+    for key, col in _TURN_COLUMNS.items():
+        rec[key] = row[col]
+    return rec
 
 
 def get_turns(
@@ -2319,6 +2210,15 @@ def get_user_by_ha_id(ha_user_id: str) -> Optional[sqlite3.Row]:
     return _q1("SELECT * FROM users WHERE ha_user_id = ?", (ha_user_id,))
 
 
+def ha_admin_count() -> int:
+    """Count admins who can authenticate through Home Assistant ingress."""
+    row = _q1(
+        "SELECT COUNT(*) AS count FROM users "
+        "WHERE role = 'admin' AND ha_user_id IS NOT NULL"
+    )
+    return int(row["count"])
+
+
 def create_ha_user(ha_user_id: str, username: str, role: str) -> int:
     """
     Insert a user authenticated by Home Assistant and return its id.
@@ -2400,28 +2300,6 @@ def admin_count() -> int:
 def user_count() -> int:
     """Return the total number of users. Used for first-run bootstrap check."""
     row = _q1("SELECT COUNT(*) AS n FROM users")
-    return row["n"] if row else 0
-
-
-def ha_admin_count() -> int:
-    """
-    Admins who can actually sign in through Home Assistant ingress.
-
-    Local password accounts are UNREACHABLE under the add-on — the landing
-    page authenticates through ingress before rendering any form, and there
-    is deliberately no Sign out — so a local admin is an admin nobody can
-    use. Counting rows instead of reachable admins is what stranded #235:
-    a local admin created first made every Home Assistant user read-only,
-    permanently, with hand-editing the database as the only way back.
-
-    Keyed on ha_user_id rather than on the password sentinel, because the
-    sentinel is a detail of how HA rows are stored and this is a question
-    about how someone gets in.
-    """
-    row = _q1(
-        "SELECT COUNT(*) AS n FROM users "
-        "WHERE ha_user_id IS NOT NULL AND role = 'admin'"
-    )
     return row["n"] if row else 0
 
 

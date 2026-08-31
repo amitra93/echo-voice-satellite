@@ -13,6 +13,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 import pytest
 
 import em_barge
+from em_oww_warmup import WarmupGate
 
 BARGE = 0.25
 WAKE = 0.5
@@ -61,6 +62,18 @@ def test_the_first_frame_of_a_run_cannot_fire():
     turn fire on evidence from the previous one.
     """
     assert playback(0.99, prev=0.0).fired is False
+
+
+def test_an_untrusted_predecessor_cannot_complete_the_pair():
+    """The watcher carries scores forward only after the warm-up gate trusts them."""
+    gate = WarmupGate()
+    prev = 0.0
+    for _ in range(16):
+        trusted = gate.feed()
+        assert not (trusted and playback(0.99, prev).fired)
+        prev = 0.99 if trusted else 0.0
+
+    assert playback(0.99, prev).fired is True
 
 
 def test_a_genuine_barge_still_fires_at_realistic_scores():

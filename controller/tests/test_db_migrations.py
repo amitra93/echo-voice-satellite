@@ -9,6 +9,7 @@ two ways it can go wrong: losing data with no undo, and an OLDER controller
 running against a newer schema.
 """
 
+import json
 import os
 import sqlite3
 import tempfile
@@ -147,3 +148,76 @@ def test_the_downgrade_message_names_both_versions(tmp_path, monkeypatch):
     msg = str(e.value)
     assert f"v{latest}" in msg and f"v{latest - 2}" in msg
     assert ".bak" in msg, "should point at the backup it can be restored from"
+
+
+def test_main_line_v19_gets_turn_state_compatibility_fix(tmp_path):
+    """main used v19 for a retired column; new_impl needs turns.state there."""
+    p = _legacy_db(tmp_path, upto=18)
+    conn = sqlite3.connect(p)
+    conn.executescript("""
+        ALTER TABLE devices ADD COLUMN esphome_mac TEXT;
+        UPDATE system_config SET value = '19' WHERE key = 'schema_version';
+    """)
+    conn.commit()
+    conn.close()
+
+    em_db.init(p)
+    columns = {row[1] for row in sqlite3.connect(p).execute("PRAGMA table_info(turns)")}
+    assert "state" in columns
+
+
+def test_v23_removes_only_obsolete_direct_capture_config(tmp_path):
+    p = _legacy_db(tmp_path, upto=22)
+    conn = sqlite3.connect(p)
+    obsolete = {
+        "adcMicpga": 40, "adcDigitalGain": 88, "micGainDb": 24,
+        "beamAngle": -1, "beamformingEnabled": True, "aecEnabled": True,
+        "aecDelayMs": 0, "aecTailMs": 300, "agcEnabled": True,
+        "vadChannel": 0,
+    }
+    global_config = {**obsolete, "afeMicGainDb": 8, "vadThreshold": 0.002}
+    device_config = {**obsolete, "afeMicGainDb": 12, "ledScene": "pride"}
+    conn.execute(
+        "INSERT OR REPLACE INTO system_config (key, value) VALUES ('global_device_config', ?)",
+        (json.dumps(global_config),),
+    )
+    conn.execute(
+        "UPDATE devices SET config = ?, config_sections = ? WHERE device_id = 'D'",
+        (json.dumps(device_config), json.dumps(["microphones", "ring"])),
+    )
+    conn.commit()
+    conn.close()
+
+    em_db.init(p)
+    conn = sqlite3.connect(p)
+    fleet = json.loads(conn.execute(
+        "SELECT value FROM system_config WHERE key = 'global_device_config'"
+    ).fetchone()[0])
+    device, sections = conn.execute(
+        "SELECT config, config_sections FROM devices WHERE device_id = 'D'"
+    ).fetchone()
+    device = json.loads(device)
+
+    assert not (set(fleet) | set(device)) & obsolete.keys()
+    assert fleet == {"afeMicGainDb": 8, "vadThreshold": 0.002}
+    assert device == {"afeMicGainDb": 12, "ledScene": "pride"}
+    assert json.loads(sections) == ["microphones", "ring"]
+
+
+def test_v24_removes_retired_audio_config(tmp_path):
+    p = _legacy_db(tmp_path, upto=23)
+    conn = sqlite3.connect(p)
+    old = {"ttsGainDb": 4, "bassShelfHz": 100, "subsonicHz": 60,
+           "limiterThreshold": -6, "nsAsr": True, "eqBands": [1]}
+    conn.execute("UPDATE system_config SET value = ? WHERE key = 'global_device_config'",
+                 (json.dumps(old),))
+    conn.execute("UPDATE devices SET config = ?", (json.dumps(old),))
+    conn.commit()
+    conn.close()
+
+    em_db.init(p)
+    conn = sqlite3.connect(p)
+    fleet = json.loads(conn.execute(
+        "SELECT value FROM system_config WHERE key = 'global_device_config'").fetchone()[0])
+    device = json.loads(conn.execute("SELECT config FROM devices").fetchone()[0])
+    assert fleet == device == {"eqBands": [1]}

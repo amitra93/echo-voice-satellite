@@ -1,0 +1,28 @@
+# Optional — only needed to run the pytest.importorskip("homeassistant")
+# tests instead of skipping them (coordinator, entities, config_flow,
+# assist_satellite, event, sensor, binary_sensor, number, select,
+# ble_scanner, __init__). Everything else in tests/ runs with just aiohttp.
+#
+# `pip install homeassistant` alone is not enough: several components this
+# package imports (assist_satellite -> assist_pipeline -> conversation ->
+# tts -> ffmpeg -> ...) declare their own extra requirements in their own
+# manifest.json rather than the base package's setup metadata, so importing
+# them pulls in packages pip's dependency resolver won't discover on its
+# own. This list was derived by installing `homeassistant` and then
+# following each ModuleNotFoundError until `custom_components.
+# echo_voice_satellite.assist_satellite` imported cleanly against HA 2025.1
+# (the latest available at the time; the project targets 2026.8.0 — no API
+# used here has changed between the two, confirmed by import + the existing
+# object.__new__-style structural tests actually running).
+#
+# The system Python here is externally managed (PEP 668); install into an
+# isolated venv or with `pip install --target=<dir>` and put that directory
+# on PYTHONPATH before running pytest — do not use --break-system-packages
+# against the system interpreter.
+homeassistant
+mutagen
+ha-ffmpeg
+hassil
+home-assistant-intents
+pymicro-vad
+pyspeex-noise

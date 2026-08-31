@@ -23,6 +23,12 @@ def test_dockerfile_copies_every_controller_module():
     )
 
 
+def test_timer_alarm_sound_is_packaged_in_the_controller_image():
+    dockerfile = (CONTROLLER / "Dockerfile").read_text()
+    assert (CONTROLLER / "sounds" / "timer_finished.flac").is_file()
+    assert "COPY sounds/ ./sounds/" in dockerfile
+
+
 def test_dashboard_bundle_is_cache_busted():
     """
     /dashboard must not hand the browser a bare /static/dashboard.js URL.
@@ -44,6 +50,8 @@ def test_dashboard_bundle_is_cache_busted():
 
     assert "dashboard.js?v=" in handler, \
         "the bundle URL must carry a cache-busting token"
+    assert "dashboard_logic.js?v=" in handler, \
+        "dashboard helper changes must also carry a cache-busting token"
     assert "no-cache" in handler, \
         "dashboard.html itself must be revalidated, or the new URL is never seen"
     # A version-string token would not change between two local "dev" builds;
@@ -67,6 +75,7 @@ def test_dashboard_paths_are_ingress_safe():
     index = (static / "index.html").read_text()
     dashboard = (static / "dashboard.html").read_text()
     jsx = (static / "dashboard.jsx").read_text()
+    logic = (static / "dashboard_logic.js").read_text()
     api = (CONTROLLER / "em_api.py").read_text()
     config = (CONTROLLER / "config.yaml").read_text()
 
@@ -80,11 +89,11 @@ def test_dashboard_paths_are_ingress_safe():
     assert "location.replace('/dashboard')" not in index, \
         "index.html must redirect to a relative dashboard path"
 
-    assert "function ingressPath(path)" in jsx, \
-        "dashboard.jsx must relativize absolute paths for ingress"
-    assert "function ingressWebSocketUrl(path)" in jsx, \
-        "dashboard.jsx must build ingress-relative WebSocket URLs"
-    assert "document.baseURI" in jsx, \
+    assert "function ingressPath(path)" in logic, \
+        "dashboard_logic.js must relativize absolute paths for ingress"
+    assert "function ingressWebSocketUrl(path)" in logic, \
+        "dashboard_logic.js must build ingress-relative WebSocket URLs"
+    assert "document.baseURI" in logic, \
         "the WebSocket URL must resolve against the injected <base href>"
     assert "fetch(ingressPath(path)" in jsx, \
         "the shared API helpers must route through ingressPath"
@@ -508,73 +517,67 @@ def test_the_wake_word_asset_wizard_step_is_mandatory():
         "the push must verify md5 and fail loudly — a truncated file fails later at dlopen"
 
 
-def test_turn_end_reports_real_media_state_not_a_hardcoded_idle():
+def test_start_server_sh_install_is_verified_like_the_binary_is():
     """
-    Issue #53: "the esphome media player reports that it is idle even though
-    the music continues to play on the echo."
+    A device's start_server.sh landed on disk at 0 bytes during a real
+    wizard run (2026-08-18, "Study") — cp/chmod were chained with no output
+    check and nothing read the result back, unlike the binary install a few
+    lines above it in the same function, which already does both. An empty
+    script under Android's `late_start` service exits instantly, so init
+    just respawns it forever: the device never gets past the native boot
+    LED animation (a solid green ring cycling) and never registers, with
+    nothing in the wizard's own log to explain why.
 
-    Every voice turn ended by asserting MediaPlayerState.IDLE regardless of
-    what the media player was doing. The feed announces PLAYING exactly once,
-    when the decoder starts, so this IDLE arrived afterwards and became HA's
-    last word — the entity showed a play arrow over audible music, and nothing
-    ever corrected it.
-
-    _media_state_msg() exists for precisely this ("current media_player state
-    as HA should see it — em_player truth") and was being bypassed.
+    Pins the fix at the same rigor as the binary: fetch checked non-empty,
+    cp/chmod run and checked individually rather than chained, and the
+    installed bytes read back and compared — the exact shape
+    `runInstallOwwAssets`'s md5 check and the binary block above already
+    established in this function, just reached for a script instead of a
+    checksum since md5sum isn't provably present on every device this
+    wizard runs against (proven missing on Study's).
     """
     from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent / "em_esphome.py").read_text()
+    jsx = (Path(__file__).resolve().parent.parent / "static" / "dashboard.jsx").read_text()
 
-    fn = src[src.index("        finally:\n            # Signal HA that the satellite has finished"):]
-    fn = fn[:fn.index("self._turn_active    = False")]
+    fn = jsx[jsx.index("async function runInstallEchoMuse"):]
+    fn = fn[:fn.index("\n  async function ", 1)]
 
-    assert "self._media_state_msg()" in fn, \
-        "the turn must report the real media state at the end"
-    assert "state=MediaPlayerState.IDLE" not in fn, (
-        "a hardcoded IDLE at turn end overwrites the feed's PLAYING and "
-        "leaves HA showing idle over audible music"
+    step = fn[fn.index("Fetching startup script from controller"):]
+    step = step[:step.index("EchoMuse installed.")]
+
+    assert "scriptBytes.length === 0" in step, (
+        "the fetched script must be checked non-empty before it's pushed — "
+        "an empty response from the controller must not sail through an "
+        "install-then-verify check that compares 0 installed against 0 "
+        "expected"
+    )
+    assert "cp /sdcard/start_server.sh" in step and "&& chmod" not in step, (
+        "cp and chmod must run as separate shell calls, not chained with "
+        "&& — a chain hides exactly which one failed, and hid the bug this "
+        "test pins until a device was found stuck on it"
+    )
+    assert "c.pull('/data/local/bin/start_server.sh')" in step, (
+        "the installed script must be read back with the same proven "
+        "c.pull() the binary verification uses, and compared for length — "
+        "no shell tool (wc, md5sum) is safe to assume present on this "
+        "device"
+    )
+    assert "throw new Error" in step, (
+        "a byte-count mismatch must fail the step loudly, not just log a "
+        "warning — the whole point is that a device left with a broken "
+        "start_server.sh looks identical to a healthy one from the wizard's "
+        "perspective otherwise"
     )
 
 
-def test_no_unjustified_hardcoded_media_state():
-    """
-    Forbid the SHAPE, not just the instances.
-
-    A hardcoded MediaPlayerState sent to HA asserts what the player is doing
-    without asking em_player, so it is wrong whenever the guess is wrong — and
-    it wins, because the feed announces PLAYING exactly once, at the start.
-
-    This has now been the same bug twice: the turn-end IDLE (#53, "reports
-    idle even though the music continues to play"), and then IDLE on every
-    device volume report, which told Music Assistant the music had stopped
-    while it was audibly playing. Fixing instances one at a time is how the
-    second one survived the first fix, so this pins the rule.
-
-    Two remain legitimate and are named explicitly:
-      - PLAYING for play_media, documented as optimistic — the feed pushes
-        the authoritative state moments later.
-      - ANNOUNCING, a genuine transition with no em_player equivalent.
-
-    Anything else must go through _media_state_msg(), which reads em_player
-    truth.
-    """
-    from pathlib import Path
-    src = (Path(__file__).resolve().parent.parent / "em_esphome.py").read_text()
-
-    allowed = {"MediaPlayerState.PLAYING", "MediaPlayerState.ANNOUNCING"}
-    found = [
-        line.strip()
-        for line in src.splitlines()
-        if "state=MediaPlayerState." in line
-    ]
-    offenders = [
-        ln for ln in found
-        if not any(a in ln for a in allowed)
-    ]
-    assert not offenders, (
-        f"hardcoded media state(s) {offenders} — use _media_state_msg() so the "
-        f"entity reflects what em_player is actually doing"
-    )
+# test_turn_end_reports_real_media_state_not_a_hardcoded_idle and
+# test_no_unjustified_hardcoded_media_state used to pin em_esphome.py's
+# MediaPlayerState reporting (#53: a hardcoded IDLE at turn end overwrote the
+# feed's PLAYING and showed HA "idle" over audible music). Removed with
+# em_esphome.py (docs/design/full-duplex-plan.md Phase 4 cutover) rather than ported: the
+# new turn engine has no media_player entity yet at all ("No media_player
+# entity yet" — Phase 3's notes), so there is no hardcoded-state call site to
+# guard against. Re-add an equivalent the day a media_player entity exists.
 
 
 def test_every_deliberate_cancel_also_flushes_the_speaker():
@@ -1119,6 +1122,11 @@ def test_recordings_and_transcripts_are_admin_only():
     assert audio.group(1) == "@auth.require_admin", (
         "the utterance audio route must be admin-only")
 
+    prune = re.search(
+        r"(@auth\.require_\w+)\s*\nasync def _post_recordings_prune\b", src)
+    assert prune and prune.group(1) == "@auth.require_admin", (
+        "global audio cleanup must be admin-only")
+
     turns = re.search(
         r"async def _get_device_turns\b.*?\n(?=\n@|\ndef |\nasync def )",
         src, re.S)
@@ -1129,6 +1137,30 @@ def test_recordings_and_transcripts_are_admin_only():
                        src, re.S)
     assert redact and '"stt_text"' in redact.group(0), (
         "_redact_turns_for must remove stt_text")
+
+
+def test_wake_training_captures_are_admin_only():
+    """
+    Wake-capture clips are recognisable speech from inside someone's home —
+    the same bar as saved utterances (test above). Every endpoint that lists,
+    plays, moves, discards or exports them must be admin-only, enforced
+    server-side rather than in the dashboard: a UI-only rule protects nothing
+    from anyone who opens the network tab.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    handlers = [
+        "_get_training_captures",
+        "_get_training_capture_list",
+        "_get_training_capture_audio",
+        "_post_training_capture_label",
+        "_delete_training_capture",
+        "_get_training_capture_export",
+    ]
+    for name in handlers:
+        m = re.search(rf"(@auth\.require_\w+)\s*\nasync def {name}\b", src)
+        assert m, f"{name} not found or has no auth decorator"
+        assert m.group(1) == "@auth.require_admin", (
+            f"{name} must be admin-only — wake captures are raw speech")
 
 
 def test_role_changes_refuse_to_strand_the_install():
@@ -1223,138 +1255,35 @@ def test_debug_env_var_is_not_truthy_for_zero():
     assert '"0"' in match.group(1) and '"1"' in match.group(1), (
         "DEBUG must default to \"0\" and test for \"1\", the convention "
         "REQUIRE_DEVICE_TLS already uses")
-def test_wake_word_phrase_is_sent_and_matches_what_we_advertise():
-    """
-    Home Assistant's voice satellite setup arms an interceptor for the next
-    wake word and reads `wake_word_phrase` off the pipeline start. On None it
-    raises AssistSatelliteError("No wake word phrase provided") and ends the
-    run in milliseconds — so every voice turn worked while the one flow that
-    asks a device to prove it heard a wake word could never complete, and the
-    only way past was Skip (confirmed on hardware 2026-08-16).
-
-    HA then matches that phrase against the STATE of its wake-word select
-    entity, whose options are the display names we advertise
-    (esphome/assist_satellite.py `ww_state.state == wake_word_phrase`). So the
-    phrase and the advertised name must come from ONE function or they drift
-    apart and HA silently matches neither.
-
-    Source-shape assertions: this suite does not import em_esphome, which
-    needs aiohttp and the protobufs.
-    """
-    src = (CONTROLLER / "em_esphome.py").read_text()
-
-    start = re.search(r"api_pb2\.VoiceAssistantRequest\((.*?)\)\)", src, re.S)
-    assert start, "the pipeline-start VoiceAssistantRequest was not found"
-    assert "wake_word_phrase" in start.group(1), (
-        "VoiceAssistantRequest must carry wake_word_phrase — without it HA "
-        "refuses the run and the satellite setup dialog never advances")
-
-    advertised = re.search(r"api_pb2\.VoiceAssistantWakeWord\((.*?)\)", src, re.S)
-    assert advertised, "VoiceAssistantWakeWord advertisement not found"
-    assert "em_oww_models.display_name" in advertised.group(1), (
-        "the advertised wake_word must come from em_oww_models.display_name, "
-        "the same source as the phrase we send")
-
-    assert 'display_name(server.oww_model_id)' in src, (
-        "the phrase must be derived with display_name too — a second spelling "
-        "is how it drifts from what we advertised")
 
 
-def test_button_turns_claim_no_wake_word():
-    """
-    A button turn has no wake word, and saying otherwise tells HA something
-    untrue about how the turn started — it would also satisfy a setup-flow
-    interceptor with a wake word nobody spoke. aioesphomeapi maps "" back to
-    None, so an empty string is the protocol's way to say "none".
-    """
-    src = (CONTROLLER / "em_esphome.py").read_text()
-    gate = re.search(r'wake_word_phrase\s*=\s*\((.*?)else ""', src, re.S)
-    assert gate, "the wake_word_phrase gate was not found"
-    assert 'trigger_label.startswith("wakeword")' in gate.group(1), (
-        "the phrase must be gated on the trigger being a wake word, so button "
-        "turns send \"\"")
-
-
-def test_a_run_ha_never_started_ends_the_turn():
-    """
-    Home Assistant's satellite setup intercepts a wake word by emitting
-    RUN_END and returning, without ever starting a pipeline. The controller
-    held the microphone anyway until its own timers expired — measured at
-    20.0s (streaming hard cap) and 5.2s (no-speech window) — while HA had
-    re-armed for the next wake word 18ms after ending the first. That is why
-    the setup flow's second "say it again" step landed on a device still
-    listening for the first.
-
-    The discriminator is RUN_START, not timing. Measured on hardware, a
-    genuine run is RUN_START (2ms before STT_START) … RUN_END (last, after
-    TTS_END); an interception is RUN_END alone. So a RUN_END with no
-    RUN_START cannot be the premature/duplicate RUN_END the other branch
-    exists for, because that one arrives MID-turn and a mid-turn RUN_END
-    follows the RUN_START that opened it.
-
-    Also: the outcome is `pipeline_refused`, not `no_speech`. The audio was
-    captured and streamed into a run that had already closed, and the outcome
-    is persisted — so `no_speech` would put every HA-side refusal into the
-    activity stats as a silent user.
-    """
-    src = (CONTROLLER / "em_esphome.py").read_text()
-
-    assert "VOICE_ASSISTANT_RUN_START" in src, (
-        "RUN_START must be handled — its absence is what identifies a "
-        "RUN_END that HA emitted without running a pipeline")
-    assert "_run_started" in src and "_ha_never_started" in src, \
-        "no state tracks whether HA ever started the run it just ended"
-    assert '"pipeline_refused"' in src, \
-        "an HA run that never started must not be recorded as no_speech"
-
-    handler = re.search(
-        r"VOICE_ASSISTANT_RUN_END:(.*?)elif event_type", src, re.S)
-    assert handler, "RUN_END handler not found"
-    body = handler.group(1)
-
-    assert "if not self._run_started:" in body, (
-        "RUN_END must check whether a RUN_START was ever seen before "
-        "treating itself as terminal")
-
-    # The premature/duplicate branch must stay gated on INTENT_END — acting
-    # on a mid-turn RUN_END would cut genuine turns short.
-    premature = body.split("if not self._run_started:")[1]
-    assert "self._intent_ended or self._turn_cancelled" in premature, (
-        "a RUN_END that DID follow a RUN_START must stay non-terminal until "
-        "INTENT_END — this is the guard against cutting genuine turns")
-
-
-def test_entity_names_do_not_repeat_the_device_label():
-    """
-    Home Assistant sets `_attr_has_entity_name = True` for every esphome
-    entity and composes "<device name> <entity name>" itself. Our device name
-    is already "<label> Voice Assistant", so putting the label in the entity
-    name too renders it twice:
-
-        'EA Test Device 01 Voice Assistant EA Test Device 01 Ambient Light'
-        'Lounge Voice Assistant Lounge'
-
-    Observed on every device and every entity (2026-08-16). em_ble_proxy had
-    it right all along with a bare "BLE advertisements", which is what makes
-    this a slip rather than a misunderstanding.
-
-    An empty name is HA's convention for the device's primary entity —
-    `self._attr_name = static_info.name or None` in esphome/entity.py — and
-    renders as the device name alone, so the media player is deliberately
-    "" rather than a label.
-    """
-    src = (CONTROLLER / "em_esphome.py").read_text()
-
-    block = re.search(r"ListEntitiesMediaPlayerResponse\((.*?)ListEntitiesDoneResponse",
-                      src, re.S)
-    assert block, "the ListEntities block was not found"
-    body = block.group(1)
-
-    assert "self.label" not in body, (
-        "an entity name must not include the device label — HA already "
-        "prefixes the device name, so it renders twice")
-    assert 'name=""' in body, \
-        "the media player should take the device's own name"
+# Four tests removed here with em_esphome.py (docs/design/full-duplex-plan.md Phase 4
+# cutover), none ported — each pinned a mechanism specific to the ESPHome
+# native-API protocol that the new turn engine + HACS assist_satellite.py
+# does not reimplement, because the problem it solved does not exist the
+# same way anymore:
+#
+#   - test_wake_word_phrase_is_sent_and_matches_what_we_advertise and
+#     test_button_turns_claim_no_wake_word pinned VoiceAssistantRequest's
+#     wake_word_phrase field, which HA's built-in ESPHome voice-satellite
+#     setup wizard matched against a select entity's state — an ESPHome-
+#     protocol-specific onboarding flow with no equivalent for a custom
+#     integration, whose own config_flow (hacs/.../config_flow.py) validates
+#     connectivity to the controller directly instead.
+#   - test_a_run_ha_never_started_ends_the_turn pinned hand-parsed
+#     RUN_START/RUN_END discrimination against raw VoiceAssistantEventResponse
+#     frames. assist_satellite.py does not parse those by hand at all — it
+#     drives HA's pipeline through AssistSatelliteEntity.
+#     async_accept_pipeline_from_satellite, which owns run-boundary
+#     bookkeeping internally.
+#   - test_entity_names_do_not_repeat_the_device_label pinned
+#     ListEntitiesMediaPlayerResponse's name field specifically. The
+#     underlying HA behaviour (_attr_has_entity_name composing "<device>
+#     <entity>") is general, not ESPHome-specific, and every hacs/
+#     custom_components/echo_voice_satellite/*.py entity already uses short,
+#     non-label _attr_name values by construction — see
+#     hacs/tests/test_entity_naming.py for the ported equivalent, asserted
+#     against that source instead.
 
 
 def test_asset_sync_does_not_shadow_its_accumulator():

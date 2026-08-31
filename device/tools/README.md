@@ -85,6 +85,33 @@ pip3 install numpy matplotlib
 
 ---
 
+# afe_probe - Phase-0 Amazon AFE measurement
+
+`afe_probe` is a hardware-only experiment for comparing OpenSL ES `MIC`,
+`VOICE_RECOGNITION`, and `VOICE_COMMUNICATION` recording presets. It also
+plays a known OpenSL tone, writes one mono 16-bit WAV per preset, and reports
+startup latency, maximum inter-period gap, dropped periods, level, and an
+approximate ERLE relative to the `MIC` control recording.
+
+It does not link to or change the server, does not stop mixer/media services,
+and does not alter the default ALSA path. Stop EchoMuse before running it so
+the Android audio framework owns the routes:
+
+```bash
+adb push build/afe_probe /data/local/tmp/afe_probe
+adb shell su -c 'stop echomuse'
+adb shell su -c '/data/local/tmp/afe_probe -seconds 8 -out /sdcard'
+adb pull /sdcard/afe_probe_*.wav .
+```
+
+Build it with `tools/build_tools.sh`; unlike the host-tested tools it needs
+the Android OpenSL headers in `echomuse-compiler` and is built with `-tags
+server`. A result above the approximate 7-9 dB direct-Speex baseline is only a
+go/no-go signal: repeat matched captures and check latency, clipping, mute,
+CPU, thermals, and memory before any production integration.
+
+---
+
 # oww_probe — on-device wake word verification and cost
 
 Answers the two questions the host tests cannot: does the ONNX Runtime

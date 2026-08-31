@@ -2,9 +2,9 @@
 Trusting a private CA, for a Home Assistant served over HTTPS with one.
 
 The failure this fixes is quiet from the user's side: the controller starts
-cleanly, the device wakes, and then every turn ends with no audio because the
-TTS fetch could not verify the certificate. So the tests here are mostly about
-refusing to look like it worked.
+cleanly, but HTTPS media with a private CA cannot play. The tests here are
+mostly about refusing to look like the trust-store setup worked when it did
+not.
 """
 
 import sys, pathlib
@@ -112,8 +112,8 @@ def test_looks_like_pem():
 def test_startup_refuses_rather_than_starting_untrusted():
     """
     em_start exits non-zero on a bad certificate. Starting anyway would give a
-    controller that looks healthy and fails every voice turn on a TLS error
-    nobody connects back to this option.
+    controller that looks healthy while HTTPS media fails on a TLS error nobody
+    connects back to this option.
     """
     src = (pathlib.Path(__file__).resolve().parents[1] / "em_start.py").read_text()
     ca = src[src.index("EM_EXTRA_CA_CERT"):]
