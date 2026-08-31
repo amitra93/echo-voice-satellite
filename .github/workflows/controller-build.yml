@@ -1,29 +1,30 @@
-name: Controller Build (main)
+name: Controller Build
 
-# Builds and publishes the controller image from main, so that the release
-# tag has something to PROMOTE rather than something to rebuild.
+# Two jobs, one workflow, because they answer the same question — "does the
+# controller image build" — for two different audiences:
 #
-# Why this exists, in one sentence: the tag build used to be a rebuild, so
-# the artifact users ran was never the artifact CI examined, and the
-# vulnerability scan ran on an image that was already public.
+#   verify-pr   PR only. Does the Dockerfile/requirements.txt still build?
+#               No push, no registry credentials touched.
+#   build       Push to main (or manual dispatch). Builds AND PUBLISHES,
+#               tagged by commit sha, plus an SBOM and a report-only
+#               vulnerability scan.
 #
-# Three consequences that were all real:
-#   - A failed release build left main pinning an image that would never
-#     exist. controller/config.yaml names the image the Home Assistant
-#     add-on pulls, and the release guard requires that pin to be bumped
-#     BEFORE the tag — so a build failure after the bump is unrecoverable
-#     without a retag.
-#   - There was a ~10 minute window after tagging in which the add-on
-#     pointed at a tag the registry did not have yet. Hit on 2.19.0.
-#   - Scanning after publication is why those steps are report-only. Moving
-#     the scan here does not by itself gate anything, but it puts the
-#     finding in front of someone while fixing it is still cheap.
-#
-# The image is tagged by commit sha only. `latest` is deliberately NOT
-# published here: docker-compose.deploy.yml pulls `latest`, so letting it
-# follow main would silently put every compose user on unreleased code.
+# NOTE ON RELEASES: this workflow no longer has a promotion step behind it —
+# controller-release.yml (which re-tagged a sha-build as vX.Y.Z + `latest`
+# for the Home Assistant add-on and docker-compose.deploy.yml) was removed.
+# Nothing here publishes `latest` or a semver tag; `build` only ever writes
+# `:sha-<short>`. docker-compose.deploy.yml still pulls `:latest`, which
+# this workflow does not maintain — that gap needs a decision (revive a
+# promotion step, or point deploy at a sha tag some other way) before this
+# is a complete replacement for what controller-release.yml did.
 
 on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'controller/Dockerfile'
+      - 'controller/requirements.txt'
+      - '.github/workflows/controller-build.yml'
   push:
     branches: [main]
     paths:
@@ -32,7 +33,53 @@ on:
   workflow_dispatch:
 
 jobs:
+  # ── PR verification: does it still build? ─────────────────────────────
+  #
+  # NOTHING ELSE builds this image on a PR — the unit-test workflow pins
+  # itself to python-version 3.12 regardless of what the Dockerfile says,
+  # so a base-image or dependency bump used to arrive with every check green
+  # and no evidence behind any of them.
+  #
+  # That is not hypothetical. Dependabot #127 (python:3.12-slim -> 3.14-slim)
+  # was green on every check while speexdsp-ns==0.1.2 has no wheel past
+  # cp312 and onnxruntime==1.20.1 none past cp313, so the image could not
+  # have built at all. The first failure would have been on main, in the
+  # job that publishes.
+  #
+  # Deliberately narrower than the `push` trigger below, because a full
+  # image build is minutes:
+  #   - Only Dockerfile/requirements.txt/this workflow file — NOT the whole
+  #     controller/** tree the `push` job watches. Application code cannot
+  #     break the build in a way the unit tests miss; a missing wheel is
+  #     exactly what they cannot see, and it can only come from one of
+  #     those three paths.
+  #   - amd64 only. The break this catches is a missing wheel or an apt
+  #     package that moved, both of which show up on either architecture,
+  #     and arm64 under QEMU costs far more than it adds. The `build` job
+  #     still publishes both.
+  #   - No push, no registry login, no GHCR credentials. This answers
+  #     "does it build", nothing more.
+  verify-pr:
+    name: Verify controller image builds (PR)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Build the controller image
+        uses: docker/build-push-action@v7
+        with:
+          context: controller
+          push: false
+          platforms: linux/amd64
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── Publish from main ───────────────────────────────────────────────────
   build:
+    name: Build and publish controller image
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -43,15 +90,12 @@ jobs:
         uses: actions/checkout@v7
 
       # EM_CONTROLLER_VERSION is baked into the image (ARG -> ENV in the
-      # Dockerfile), so it has to be known at BUILD time — and at build time
-      # the tag does not exist yet. controller/config.yaml's `version:` is
-      # the answer: the release workflow refuses to build unless that field
-      # equals the tag, so whatever is promoted carries the right version.
-      #
-      # The cost is that a main build BETWEEN releases bakes the version it
-      # is heading towards rather than a distinct one. That only shows on a
-      # sha- image pulled deliberately, which is not a supported way to run
-      # the controller — those exist to be promoted.
+      # Dockerfile), so it has to be known at BUILD time. controller/config.yaml's
+      # `version:` is the answer — it is the field the Home Assistant add-on
+      # pin already has to track, so this build reports the version it is
+      # heading towards rather than a distinct one. That only shows on a
+      # sha- image pulled deliberately, which is not the documented way to
+      # run the controller.
       - name: Version from the add-on pin
         id: version
         run: |
@@ -90,14 +134,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      # By digest, for the reason the release workflow documents: there is
-      # no string to get wrong and no chance of scanning something other
-      # than the artifact just built.
-      #
-      # NOT continue-on-error here, unlike the release workflow. Nothing has
-      # been released at this point, so a broken scan step should be visible
-      # on main where fixing it is free — that failure mode is exactly how
-      # the SBOM step stayed broken through several releases.
+      # By digest: there is no string to get wrong and no chance of scanning
+      # something other than the artifact just built.
       - name: Generate SBOM
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -116,8 +154,9 @@ jobs:
 
       # Report-only, deliberately. Gating a merge to main on a new CVE in a
       # base image would block unrelated work on someone else's disclosure
-      # schedule. The scheduled scan is where policy belongs; this is here
-      # so the finding arrives before release rather than after.
+      # schedule. There is no scheduled re-scan of the published image
+      # anymore (security-scan.yml was removed) — this build-time scan is
+      # now the only automated look this image gets.
       - name: Scan image for vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:

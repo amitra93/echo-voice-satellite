@@ -1,20 +1,27 @@
-name: Forge Release (Docker image)
+name: Forge Build
 
-# Publishes the wake-word trainer as a built image, so training a custom wake
-# word does not start with a local build.
+# Builds the wake-word trainer image. Same shape as controller-build.yml:
 #
-# The real reason is reproducibility rather than convenience. Every pin in
-# oww_forge/Dockerfile is load-bearing — piper-sample-generator v2.0.0 for its
-# flat layout, an openWakeWord SHA carrying a local patch, torch 2.7.1 — and a
-# local `docker compose build` re-resolves the floating layers underneath them
-# every time it runs. A published image is the only artifact that preserves
-# what was actually verified. Same argument as the controller's
-# promote-don't-rebuild flow, arrived at from the other direction.
+#   verify-pr    PR only, when oww_forge/Dockerfile changed. CPU/amd64 only,
+#                no push — answers "does it still build", nothing more.
+#   cuda / cpu   Push to main (or manual dispatch). Build AND PUBLISH,
+#                tagged by commit sha.
+#
+# Every pin in oww_forge/Dockerfile is load-bearing — piper-sample-generator
+# v2.0.0 for its flat layout, an openWakeWord SHA carrying a local patch,
+# torch 2.7.1 — and a local `docker compose build` re-resolves the floating
+# layers underneath them every time it runs, so a build check here is the
+# only thing that catches a broken pin before someone sits through a local
+# build to find out. Until this workflow existed, NOTHING built this image
+# on a PR at all — oww_forge/Dockerfile isn't even a Dependabot ecosystem
+# (see dependabot.yml), because its pins are baked into RUN commands rather
+# than a manifest Dependabot can parse, so this is also the only automated
+# signal this Dockerfile gets between releases.
 #
 # TWO VARIANTS, and the split is deliberate:
 #
-#   :X.Y.Z / :latest          CUDA, linux/amd64 ONLY
-#   :X.Y.Z-cpu / :latest-cpu  CPU torch, linux/amd64 + linux/arm64
+#   :sha-<short>          CUDA, linux/amd64 ONLY
+#   :sha-<short>-cpu       CPU torch, linux/amd64 + linux/arm64
 #
 # CUDA is amd64-only because there is no arm64 machine anyone would train on
 # with an NVIDIA GPU attached; building it would spend runner time producing
@@ -28,26 +35,66 @@ name: Forge Release (Docker image)
 # would sit through. Anyone wanting the M-series GPU has to run the trainer
 # outside Docker against torch's MPS backend, which is not what this ships.
 #
-# Tag prefix is `forge-v*`, kept clear of the plain `v*` firmware tags: OTA
-# release polling (em_api._fetch_latest_release) filters those for a `server`
-# asset, and the dashboard's controller notice prefix-matches `controller-v`.
-# Neither sees this one. No GitHub Release is created here, for the same
-# reason the controller creates none.
+# NOTE ON RELEASES: forge-release.yml (forge-v* tags -> `:X.Y.Z`/`:latest` +
+# `:X.Y.Z-cpu`/`:latest-cpu`, no GitHub Release) was removed. This workflow
+# only ever writes a `:sha-<short>` tag — nothing publishes `:latest` or
+# `:latest-cpu` anymore, which is what oww_forge/docker-compose.deploy.yml
+# pulls. That gap needs a decision before this is a complete replacement for
+# what forge-release.yml did.
 
 on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'oww_forge/Dockerfile'
+      - '.github/workflows/forge-build.yml'
   push:
-    tags:
-      - 'forge-v*'
-  # Builds WITHOUT publishing, so the workflow itself can be exercised
-  # against a branch. The expensive failure here is a tag that half-publishes.
+    branches: [main]
+    paths:
+      - 'oww_forge/**'
+      - '.github/workflows/forge-build.yml'
   workflow_dispatch:
 
 env:
   IMAGE: ghcr.io/${{ github.repository_owner }}/echomuse-forge
 
 jobs:
+  # ── PR verification: does it still build? ─────────────────────────────
+  #
+  # Gated at the trigger (see the `on:` block above) to oww_forge/Dockerfile
+  # and this workflow file only — application code under oww_forge/ (forge.py,
+  # forge_web.py, ...) cannot break the image build in a way the unit-test
+  # workflow's forge-tests job misses.
+  #
+  # CPU/amd64 only, on purpose: this answers "does the Dockerfile still
+  # build", and CUDA/arm64 variants install the same wheels from the same
+  # base image for that question — a second architecture or backend under
+  # QEMU/no-GPU would cost runner minutes to restate the answer, the same
+  # reasoning the CUDA job's own disk-reclaim comment gives for skipping
+  # arm64 on GPU builds entirely.
+  verify-pr:
+    name: Verify forge image builds (PR)
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v4
+      - name: Build the forge image (CPU, amd64)
+        uses: docker/build-push-action@v7
+        with:
+          context: oww_forge
+          file: oww_forge/Dockerfile
+          platforms: linux/amd64
+          build-args: GPU=0
+          push: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   # ── CUDA, amd64 ──────────────────────────────────────────────────────────
   cuda:
+    name: Build and publish (CUDA, amd64)
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -72,21 +119,14 @@ jobs:
           sudo docker image prune -af || true
           echo "after:"; df -h / | tail -1
 
-      - name: Version from the tag
+      - name: Version from the commit
         id: v
-        run: |
-          case "${GITHUB_REF_TYPE}:${GITHUB_REF_NAME}" in
-            tag:forge-v*) echo "version=${GITHUB_REF_NAME#forge-v}" >> "$GITHUB_OUTPUT"
-                          echo "publish=true"  >> "$GITHUB_OUTPUT" ;;
-            *)            echo "version=dev"   >> "$GITHUB_OUTPUT"
-                          echo "publish=false" >> "$GITHUB_OUTPUT" ;;
-          esac
+        run: echo "sha=sha-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        if: steps.v.outputs.publish == 'true'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -100,13 +140,12 @@ jobs:
           file: oww_forge/Dockerfile
           platforms: linux/amd64
           build-args: GPU=1
-          push: ${{ steps.v.outputs.publish == 'true' }}
-          tags: |
-            ${{ env.IMAGE }}:${{ steps.v.outputs.version }}
-            ${{ env.IMAGE }}:latest
+          push: true
+          tags: ${{ env.IMAGE }}:${{ steps.v.outputs.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ steps.v.outputs.version }}
             org.opencontainers.image.description=EchoMuse wake-word trainer (CUDA)
 
   # ── CPU, one job per architecture on its OWN runner ──────────────────────
@@ -117,6 +156,8 @@ jobs:
   # afterwards — two jobs cannot both write the same tag without one of them
   # winning and the other silently disappearing from the manifest.
   cpu:
+    name: Build and publish (CPU, ${{ matrix.slug }})
+    if: github.event_name != 'pull_request'
     strategy:
       fail-fast: false
       matrix:
@@ -135,21 +176,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
-      - name: Version from the tag
+      - name: Version from the commit
         id: v
-        run: |
-          case "${GITHUB_REF_TYPE}:${GITHUB_REF_NAME}" in
-            tag:forge-v*) echo "version=${GITHUB_REF_NAME#forge-v}" >> "$GITHUB_OUTPUT"
-                          echo "publish=true"  >> "$GITHUB_OUTPUT" ;;
-            *)            echo "version=dev"   >> "$GITHUB_OUTPUT"
-                          echo "publish=false" >> "$GITHUB_OUTPUT" ;;
-          esac
+        run: echo "sha=sha-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v4
 
       - name: Log in to GHCR
-        if: steps.v.outputs.publish == 'true'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
@@ -164,31 +198,24 @@ jobs:
           file: oww_forge/Dockerfile
           platforms: ${{ matrix.platform }}
           build-args: GPU=0
-          # push lives INSIDE outputs here, not as the `push:` input: setting
-          # both makes buildx take two conflicting instructions about what to
-          # do with the result. On a non-tag run this resolves to push=false,
-          # so the build still exercises the whole path without publishing.
-          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=${{ steps.v.outputs.publish }},name-canonical=true,push=${{ steps.v.outputs.publish }}
+          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.version=${{ steps.v.outputs.version }}
             org.opencontainers.image.description=EchoMuse wake-word trainer (CPU)
 
       # The BARE hex, with the sha256: prefix stripped. upload-artifact
       # rejects a colon in a filename, and it rejects it at UPLOAD — after
       # the image layers have already been pushed — so the failure lands
-      # exactly where a half-published release is created. Which is what
-      # happened on forge-v1.0.0: both CPU images reached the registry and
-      # neither reached a manifest.
+      # exactly where a half-published image is created.
       - name: Export the digest
-        if: steps.v.outputs.publish == 'true'
         run: |
           digest="${{ steps.build.outputs.digest }}"
           mkdir -p /tmp/digests
           touch "/tmp/digests/${digest#sha256:}"
 
       - name: Upload the digest
-        if: steps.v.outputs.publish == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: forge-digest-${{ matrix.slug }}
@@ -198,8 +225,9 @@ jobs:
 
   # ── One multi-arch tag from the two digests ──────────────────────────────
   cpu-manifest:
+    name: Assemble CPU manifest
     needs: cpu
-    if: github.ref_type == 'tag'
+    if: github.event_name != 'pull_request'
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -222,31 +250,28 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Version from the commit
+        id: v
+        run: echo "sha=sha-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+
       # Both architectures must be present. A manifest quietly built from one
       # digest is the failure worth catching here: it publishes, it pulls, and
       # it is simply the wrong architecture for half the people who asked for
       # it — which surfaces as exec format error on their machine, not ours.
       - name: Assemble and push
         run: |
-          version="${GITHUB_REF_NAME#forge-v}"
           cd /tmp/digests
           n=$(ls | wc -l)
           if [ "$n" -ne 2 ]; then
             echo "::error::expected 2 architecture digests, found $n: $(ls | tr '\n' ' ')"
             exit 1
           fi
-          # The files are named by BARE digest hex (upload-artifact rejects
-          # the colon in sha256:), so the prefix is added back here. Producer
-          # and consumer have to move together: stripping it at export and
-          # not restoring it here is what broke forge-v1.0.1, one release
-          # after the colon broke forge-v1.0.0.
           refs=""
           for f in *; do
             refs="$refs ${IMAGE}@sha256:${f}"
           done
           echo "assembling from:$refs"
           docker buildx imagetools create \
-            -t "${IMAGE}:${version}-cpu" \
-            -t "${IMAGE}:latest-cpu" \
+            -t "${IMAGE}:${{ steps.v.outputs.sha }}-cpu" \
             $refs
-          docker buildx imagetools inspect "${IMAGE}:${version}-cpu"
+          docker buildx imagetools inspect "${IMAGE}:${{ steps.v.outputs.sha }}-cpu"
