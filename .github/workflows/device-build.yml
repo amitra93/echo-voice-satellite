@@ -1,0 +1,87 @@
+name: Device Build
+
+# Compiles the firmware binary with the PINNED compiler image — the same
+# one release.yml uses — on every push to main and PR to main that touches
+# device/ (including a GoTinyAlsa submodule bump), and uploads the binary as
+# a workflow artifact.
+#
+# THE ONLY WORKFLOW (besides release.yml) THAT EXERCISES THE COMPILER THE
+# FIRMWARE ACTUALLY SHIPS FROM. Every Go job in unit-test.yaml runs on amd64
+# with GitHub's own toolchain, which device/CLAUDE.md already notes proves
+# nothing about this image: it carries the Go version and NDK pinned by
+# digest against a 2015 platform (FireOS 5 / API 22) we cannot upgrade.
+#
+# Added after #276, where a Dependabot bump raised go.mod's `go` directive
+# past the pinned toolchain's version and left the firmware unbuildable for
+# four days. Nothing failed, because the image was otherwise exercised only
+# by compile.sh and release.yml — so the next thing to notice would have
+# been a release tag failing at the build step, which is the worst moment to
+# find out.
+#
+# It builds and packages an artifact; it does not verify the binary runs —
+# moving the compiler pin still needs a real device in the loop. The
+# artifact exists so a build from a branch or PR can be pushed to a device
+# for a real check without waiting for a tagged release.
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - 'device/**'
+      - 'GoTinyAlsa'  # submodule pointer bump
+      - '.github/workflows/device-build.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'device/**'
+      - 'GoTinyAlsa'
+      - '.github/workflows/device-build.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build firmware (pinned compiler)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true  # GoTinyAlsa replace directive in device/go.mod
+
+      - name: Build compiler image
+        run: docker build -t echomuse-compiler device/compiler/
+
+      # compile.sh embeds the git version string for a real release; here we
+      # just need a buildable binary, so the version tag is a plain dev
+      # timestamp rather than compile.sh's dirty-tree/tag logic — mirroring
+      # what a dirty local tree already produces.
+      - name: Build firmware
+        run: |
+          docker run --rm --entrypoint bash \
+            -e CGO_LDFLAGS="-Wl,--hash-style=both" \
+            -e CGO_CFLAGS="-Wno-deprecated-declarations -Wno-null-dereference" \
+            -v "$PWD/device":/sdk \
+            -v "$PWD/GoTinyAlsa":/GoTinyAlsa \
+            echomuse-compiler \
+            -c "cd /sdk && mkdir -p build && go build \
+              -tags server \
+              -ldflags \"-X github.com/wilbowes/EchoMuse/internal/client.Version=$(date +%Y%m%d-%H%M)-dev \
+                         -X github.com/wilbowes/EchoMuse/internal/client.BuildUnix=$(date +%s)\" \
+              -o build/server \
+              ./cmd/"
+
+      - name: Check it is an ARM binary
+        # A build that silently produced a host binary would pass the step
+        # above and ship something the hardware cannot run.
+        run: |
+          file device/build/server
+          ls -lh device/build/server
+          file device/build/server | grep -q "ARM" || {
+            echo "::error::firmware is not an ARM binary"; exit 1; }
+
+      - name: Upload firmware artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: echomuse-server-${{ github.sha }}
+          path: device/build/server
+          if-no-files-found: error
+          retention-days: 14

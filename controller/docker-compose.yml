@@ -1,34 +1,50 @@
+# Redeploy of the Phase 4 (turn-engine + HACS) implementation, replacing the
+# ESPHome-impersonation-era container that was running before this cutover
+# (docs/design/full-duplex-plan.md). Builds fresh from this working tree rather than
+# pulling the published image, so it picks up em_esphome.py's deletion and
+# everything else in the cutover.
+#
+# Preserves the previously-running container's actual config exactly
+# (ports, SERVER_IP, mDNS name, data directory) so this is a like-for-like
+# code swap, not a reconfiguration — same data dir, so devices/users/TLS
+# certs already on disk survive.
+#
+#   docker compose -f docker-compose.yaml build \
+#     --build-arg EM_CONTROLLER_VERSION="$(git describe --tags --match 'controller-v*')"
+#   docker compose -f docker-compose.new-impl.yaml up -d
+#
+# network_mode: host is required for mDNS device discovery — see
+# docker-compose.deploy.yml's comment.
+#
+# No GPU build arg here (host has no nvidia-smi).
+
 services:
   echomuse-controller:
     build:
       context: .
       args:
-        # CUDA onnxruntime for wake-word inference on this host's GPU.
-        # The published GHCR image (docker-compose.deploy.yml) is CPU-only.
-        GPU: "1"
-    container_name: echomuse-controller
+        GPU: "0"
+        EM_CONTROLLER_VERSION: ${EM_CONTROLLER_VERSION:-dev}
+    container_name: echomuse-v2-controller
     restart: unless-stopped
     network_mode: host
     environment:
       - TZ=America/New_York
+      - MDNS_NAME=echomuse-v2
+      - DB_PATH=/app/data/echomuse.db
+      - DEVICE_APPROVAL=strict
       - DEBUG=1
-    env_file:
-      - .env
+      - SERVER_HOST=0.0.0.0
+      - SERVER_PORT=8767
+      - API_PORT=8768
+      - OWW_THRESHOLD=0.5
+      - SERVER_TLS_PORT=0
+      - SERVER_IP=192.168.0.71
+      - OWW_MODEL=hey_jarvis
+      - REQUIRE_DEVICE_TLS=0
+      - MUSIC_ASSISTANT_URL=192.168.0.3:8927
     volumes:
-      # Persist database across container rebuilds. Relative to this file's
-      # directory (controller/), NOT the shell's cwd — `~EchoMuse/...` here
-      # used to silently resolve to a stale, unrelated directory from an old
-      # checkout location rather than erroring, so `docker compose up` on a
-      # clean host quietly ran against an empty database next to the real
-      # one instead of failing loudly.
-      - ./data:/app/data
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: 1
-              capabilities: [gpu]
+      - /home/amitra/echomuse-v2/controller/data:/app/data
     logging:
       driver: json-file
       options:

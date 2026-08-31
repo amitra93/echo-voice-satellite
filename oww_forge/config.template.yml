@@ -3,6 +3,11 @@
 # You can edit this file after `forge.py new` and before `forge.py build`.
 
 model_name: "@NAME@"
+model_kind: "@MODEL_KIND@"
+
+# Stop models use one calibrated threshold in thinking and playback. This is
+# controller configuration in production; Forge uses it for its stop report.
+stop_threshold: 0.75
 
 # Phrase(s) the model activates on. Multiple entries still train ONE binary
 # model that fires on any of them — use alternate phonetic spellings to cover
