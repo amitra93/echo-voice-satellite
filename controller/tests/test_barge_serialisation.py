@@ -36,6 +36,7 @@ from pathlib import Path
 from em_runbarrier import RunBarrier
 
 CONTROLLER_SRC = (Path(__file__).resolve().parents[1] / "em_controller.py").read_text()
+TURN_ENGINE_SRC = (Path(__file__).resolve().parents[1] / "em_turn_engine.py").read_text()
 
 
 # ── The barrier ──────────────────────────────────────────────────────────────
@@ -164,18 +165,9 @@ def test_two_aborts_before_a_turn_still_protect_one_turn():
 # ── The wiring, pinned against the source ────────────────────────────────────
 
 
-def test_barge_serialises_in_both_phases():
-    """
-    Thinking starts another turn on this connection, so HA's run must be
-    aborted first. Playback must serialise too: RUN_END follows TTS_END, so a
-    barge in the first milliseconds of audio can beat it.
-    """
-    watcher = CONTROLLER_SRC[CONTROLLER_SRC.index("async def _barge_watcher"):]
-    watcher = watcher[: watcher.index("\nasync def ", 10)]
-    assert "abort_ha=True" in watcher, (
-        "barge during thinking must abort HA's pipeline before the "
-        "interrupting turn starts"
-    )
-    assert "abort_ha_run" in watcher, (
-        "barge during playback must serialise against the interrupting turn"
-    )
+def test_barge_uses_device_wake_admission():
+    assert "async def admit_barge" in TURN_ENGINE_SRC
+    assert "wake_request" in CONTROLLER_SRC
+    assert "turn.cancel" in TURN_ENGINE_SRC
+    assert "speaker_flush" in TURN_ENGINE_SRC
+    assert "asyncio.create_task(\n                        _barge_watcher" not in CONTROLLER_SRC

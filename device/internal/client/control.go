@@ -2,6 +2,7 @@ package client
 
 import (
 	"context"
+	cryptorand "crypto/rand"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -13,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -84,6 +86,18 @@ type StateCallback func()
 type ConfigAppliedCallback func(msg config.ConfigMessage)
 type VolumeSetCallback func(level int)
 type MuteToggleCallback func()
+type StopArmCallback func(turnID string, generation uint64, phase string, expiry time.Duration)
+type StopDisarmCallback func(generation uint64)
+type WakeDecisionCallback func(requestID, turnID, source string, activationSeq uint16, expires time.Time)
+
+type pendingWakeRequest struct {
+	id            string
+	source        string
+	activationSeq uint16
+	expires       time.Time
+}
+
+var wakeRequestTTL = 4 * time.Second
 
 // WifiChangeCallback receives a wifi_change request. It must return
 // quickly (the executor runs in its own goroutine) — the control
@@ -105,6 +119,8 @@ type ControlClient struct {
 	configAppliedCallback    ConfigAppliedCallback
 	volumeSetCallback        VolumeSetCallback
 	muteToggleCallback       MuteToggleCallback
+	stopArmCallback          StopArmCallback
+	stopDisarmCallback       StopDisarmCallback
 	speakerFlushCallback     StateCallback
 	musicFlushCallback       StateCallback
 	duckCallback             func(on bool)
@@ -113,6 +129,13 @@ type ControlClient struct {
 	wifiScanCallback         StateCallback
 	testAudioCallback        StateCallback
 	testAudioCleanupCallback StateCallback
+	wakeGrantCallback        WakeDecisionCallback
+	wakeDenyCallback         func(requestID, source, reason string)
+	captureAckCallback       func(captureID string)
+	wakeMu                   sync.Mutex
+	wakeNonce                string
+	wakeCounter              atomic.Uint64
+	pendingWake              pendingWakeRequest
 
 	conn   *websocket.Conn
 	connMu sync.Mutex
@@ -152,6 +175,8 @@ func (c *ControlClient) OnPending(cb StateCallback)               { c.pendingCal
 func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback) { c.configAppliedCallback = cb }
 func (c *ControlClient) OnVolumeSet(cb VolumeSetCallback)         { c.volumeSetCallback = cb }
 func (c *ControlClient) OnMuteToggle(cb MuteToggleCallback)       { c.muteToggleCallback = cb }
+func (c *ControlClient) OnStopArm(cb StopArmCallback)             { c.stopArmCallback = cb }
+func (c *ControlClient) OnStopDisarm(cb StopDisarmCallback)       { c.stopDisarmCallback = cb }
 func (c *ControlClient) OnSpeakerFlush(cb StateCallback)          { c.speakerFlushCallback = cb }
 func (c *ControlClient) OnMusicFlush(cb StateCallback)            { c.musicFlushCallback = cb }
 func (c *ControlClient) OnDuck(cb func(on bool))                  { c.duckCallback = cb }
@@ -160,6 +185,11 @@ func (c *ControlClient) OnWifiCommit(cb StateCallback)            { c.wifiCommit
 func (c *ControlClient) OnWifiScan(cb StateCallback)              { c.wifiScanCallback = cb }
 func (c *ControlClient) OnTestAudio(cb StateCallback)             { c.testAudioCallback = cb }
 func (c *ControlClient) OnTestAudioCleanup(cb StateCallback)      { c.testAudioCleanupCallback = cb }
+func (c *ControlClient) OnWakeGrant(cb WakeDecisionCallback)      { c.wakeGrantCallback = cb }
+func (c *ControlClient) OnWakeDeny(cb func(requestID, source, reason string)) {
+	c.wakeDenyCallback = cb
+}
+func (c *ControlClient) OnCaptureAck(cb func(captureID string)) { c.captureAckCallback = cb }
 
 // IsConnected reports whether the control WebSocket is registered and
 // live — the wifi change executor's "controller reachable" gate.
@@ -405,6 +435,37 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		}
 
 		switch peek.Type {
+		case "wake_grant":
+			var msg struct {
+				RequestID string          `json:"requestId"`
+				TurnID    json.RawMessage `json:"turnId"`
+			}
+			if err := json.Unmarshal(raw, &msg); err == nil {
+				pending, ok := c.consumeWakeDecision(msg.RequestID)
+				if ok && c.wakeGrantCallback != nil {
+					c.wakeGrantCallback(msg.RequestID, strings.Trim(string(msg.TurnID), `"`), pending.source, pending.activationSeq, pending.expires)
+				}
+			}
+
+		case "wake_deny":
+			var msg struct {
+				RequestID string `json:"requestId"`
+				Reason    string `json:"reason"`
+			}
+			if err := json.Unmarshal(raw, &msg); err == nil {
+				if pending, ok := c.consumeWakeDecision(msg.RequestID); ok && c.wakeDenyCallback != nil {
+					c.wakeDenyCallback(msg.RequestID, pending.source, msg.Reason)
+				}
+			}
+
+		case "capture_ack":
+			var msg struct {
+				CaptureID string `json:"captureId"`
+			}
+			if err := json.Unmarshal(raw, &msg); err == nil && c.captureAckCallback != nil {
+				c.captureAckCallback(msg.CaptureID)
+			}
+
 		case "leds":
 			var msg struct {
 				LEDs      json.RawMessage `json:"leds"`
@@ -475,6 +536,25 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 			// back through the existing mute_state channel either way.
 			if c.muteToggleCallback != nil {
 				c.muteToggleCallback()
+			}
+
+		case "stop_arm":
+			var msg struct {
+				TurnID     string `json:"turnId"`
+				Generation uint64 `json:"generation"`
+				Phase      string `json:"phase"`
+				ExpiryMs   int64  `json:"expiryMs"`
+			}
+			if err := json.Unmarshal(raw, &msg); err == nil && c.stopArmCallback != nil {
+				c.stopArmCallback(msg.TurnID, msg.Generation, msg.Phase, time.Duration(msg.ExpiryMs)*time.Millisecond)
+			}
+
+		case "stop_disarm":
+			var msg struct {
+				Generation uint64 `json:"generation"`
+			}
+			if err := json.Unmarshal(raw, &msg); err == nil && c.stopDisarmCallback != nil {
+				c.stopDisarmCallback(msg.Generation)
 			}
 
 		case "config":
@@ -801,7 +881,7 @@ func capabilities() []string {
 	// capability the firmware has, rather than inferring one from a version
 	// string, is the rule the whole registration follows.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons", "test_audio",
-		"oww_shadow", "oww_trigger", "button_hold", "audio_mix", "sendspin_native", "output_chain"}
+		"oww_shadow", "oww_trigger", "wake_request_v1", "stopword", "button_hold", "audio_mix", "sendspin_native", "output_chain"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}
@@ -826,6 +906,11 @@ func (c *ControlClient) SendButton(event buttons.ButtonClickEvent) {
 		"button": map[string]string{
 			"type": string(event.Button.Type),
 		},
+	}
+	if event.ClickType == buttons.DotClick && !event.Down {
+		if pending, created := c.beginWakeRequest("button", 0); created {
+			msg["requestId"] = pending.id
+		}
 	}
 	if err := c.writeJSON(msg); err != nil {
 		log.Printf("[control] SendButton failed: %v", err)
@@ -959,6 +1044,118 @@ func (c *ControlClient) SendOwwWake(score, threshold float32, ageMs int64, activ
 		"ageMs":         ageMs,
 		"activationSeq": activationSeq,
 	})
+}
+
+// SendWakeRequest is the sole wake trigger protocol. A request is correlated
+// so a delayed grant cannot start a later turn.
+func (c *ControlClient) SendWakeRequest(model string, score, threshold float32, ageMs int64, activationSeq uint16) string {
+	pending, created := c.beginWakeRequest("wakeword", activationSeq)
+	if !created {
+		return pending.id
+	}
+	if err := c.writeJSON(map[string]interface{}{
+		"type": "wake_request", "requestId": pending.id, "source": "wakeword",
+		"model": model, "score": score, "threshold": threshold, "ageMs": ageMs,
+		"activationSeq": activationSeq,
+	}); err != nil {
+		log.Printf("[control] wake request failed: %v", err)
+	}
+	return pending.id
+}
+
+func (c *ControlClient) beginWakeRequest(source string, activationSeq uint16) (pendingWakeRequest, bool) {
+	c.wakeMu.Lock()
+	defer c.wakeMu.Unlock()
+	if c.pendingWake.id != "" && time.Now().Before(c.pendingWake.expires) {
+		return c.pendingWake, false
+	}
+	if c.wakeNonce == "" {
+		var nonce [8]byte
+		if _, err := cryptorand.Read(nonce[:]); err != nil {
+			copy(nonce[:], []byte("echomuse"))
+		}
+		c.wakeNonce = fmt.Sprintf("%x", nonce)
+	}
+	id := fmt.Sprintf("%s:%d", c.wakeNonce, c.wakeCounter.Add(1))
+	c.pendingWake = pendingWakeRequest{
+		id: id, source: source, activationSeq: activationSeq,
+		expires: time.Now().Add(wakeRequestTTL),
+	}
+	pending := c.pendingWake
+	time.AfterFunc(time.Until(pending.expires), func() {
+		c.wakeMu.Lock()
+		if c.pendingWake.id != pending.id || time.Now().Before(pending.expires) {
+			c.wakeMu.Unlock()
+			return
+		}
+		c.pendingWake = pendingWakeRequest{}
+		callback := c.wakeDenyCallback
+		c.wakeMu.Unlock()
+		if callback != nil {
+			callback(pending.id, pending.source, "timeout")
+		}
+	})
+	return c.pendingWake, true
+}
+
+func (c *ControlClient) consumeWakeDecision(requestID string) (pendingWakeRequest, bool) {
+	c.wakeMu.Lock()
+	defer c.wakeMu.Unlock()
+	if requestID == "" || requestID != c.pendingWake.id || time.Now().After(c.pendingWake.expires) {
+		return pendingWakeRequest{}, false
+	}
+	pending := c.pendingWake
+	c.pendingWake = pendingWakeRequest{}
+	return pending, true
+}
+
+func (c *ControlClient) SendWakeStarted(requestID, turnID string) {
+	_ = c.writeJSON(map[string]interface{}{"type": "wake_started", "requestId": requestID, "turnId": turnID})
+}
+
+func (c *ControlClient) SendWakeStatus(ready bool, model, checksum, errMsg string) {
+	msg := map[string]interface{}{"type": "wake_status", "ready": ready, "model": model}
+	if checksum != "" {
+		msg["classifierMd5"] = checksum
+	}
+	if errMsg != "" {
+		msg["error"] = errMsg
+	}
+	_ = c.writeJSON(msg)
+}
+
+// SendStopDetected reports the single locally accepted arm. Local audio has
+// already been flushed by the caller; this best-effort message only cancels the
+// matching remote turn and must never delay that flush.
+func (c *ControlClient) SendStopDetected(turnID string, generation uint64, phase string, score, threshold float32, ageMs int64) {
+	_ = c.writeJSON(map[string]interface{}{
+		"type":       "stop_detected",
+		"turnId":     turnID,
+		"generation": generation,
+		"phase":      phase,
+		"score":      score,
+		"threshold":  threshold,
+		"ageMs":      ageMs,
+	})
+}
+
+// SendStopStatus reports local stop runtime readiness after every config apply.
+// A missing model/runtime is explicit rather than being mistaken for a ready
+// device that simply has not detected anything yet.
+func (c *ControlClient) SendStopStatus(ready bool, model, errMsg string) {
+	_ = c.writeJSON(stopStatusMessage(ready, model, errMsg))
+}
+
+func stopStatusMessage(ready bool, model, errMsg string) map[string]interface{} {
+	msg := map[string]interface{}{
+		"type":  "stop_status",
+		"ready": ready,
+		"model": model,
+	}
+	if errMsg != "" {
+		msg["error"] = errMsg
+	}
+	return msg
 }
 
 // SendBleAdverts forwards a batch of BLE advertisements to the controller

@@ -1,7 +1,10 @@
 package shadow
 
 import (
+	"crypto/md5"
+	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +12,15 @@ import (
 
 	"github.com/wilbowes/EchoMuse/internal/wakeword/ort"
 )
+
+func ClassifierMD5(model string) string {
+	b, err := os.ReadFile(filepath.Join(Dir(), ModelStem(model)+".onnx"))
+	if err != nil {
+		return ""
+	}
+	sum := md5.Sum(b)
+	return hex.EncodeToString(sum[:])
+}
 
 // DefaultDir is where the ONNX Runtime library and the models live on the
 // device. Overridable with EM_OWW_DIR, mainly so the same binary can be
@@ -90,8 +102,42 @@ func Open(owwModel string, threshold float32, onCross func(score, threshold floa
 	}
 
 	s := NewScorer(inf, threshold, onCross)
-	s.closer = inf
+	s.closers = []io.Closer{inf}
 	s.info = fmt.Sprintf("onnxruntime %s, model %s, xnnpack=%v",
 		rt.Version(), stem, inf.XNNPACKActive())
+	return s, nil
+}
+
+// OpenWithHead loads one shared feature pipeline plus a second classifier head.
+// It is used when local wake and stop scoring are both enabled: loading a second
+// full scorer would duplicate the expensive mel and embedding sessions.
+func OpenWithHead(owwModel string, threshold float32, onCross func(score, threshold float32, at time.Time, sequence uint16), headModel string, headThreshold float32, enabled func() bool, onHeadCross func(score, threshold float32, at time.Time, sequence uint16)) (*Scorer, error) {
+	dir := Dir()
+	wakeStem, headStem := ModelStem(owwModel), ModelStem(headModel)
+	if wakeStem == "" || headStem == "" {
+		return nil, fmt.Errorf("shadow: wake and stop models must be configured")
+	}
+	models := ort.Models{Melspec: filepath.Join(dir, "melspectrogram.onnx"), Embedding: filepath.Join(dir, "embedding_model.onnx"), Classifier: filepath.Join(dir, wakeStem+".onnx")}
+	for what, p := range map[string]string{"melspectrogram model": models.Melspec, "embedding model": models.Embedding, "wake classifier model": models.Classifier, "stop classifier model": filepath.Join(dir, headStem+".onnx")} {
+		if _, err := os.Stat(p); err != nil {
+			return nil, fmt.Errorf("shadow: %s not installed at %s", what, p)
+		}
+	}
+	rt, err := ort.Open(filepath.Join(dir, "libonnxruntime.so"))
+	if err != nil {
+		return nil, fmt.Errorf("shadow: %w", err)
+	}
+	inf, err := rt.NewInferer(models, ort.DefaultOptions())
+	if err != nil {
+		return nil, fmt.Errorf("shadow: %w", err)
+	}
+	head, err := rt.NewClassifier(filepath.Join(dir, headStem+".onnx"), ort.DefaultOptions())
+	if err != nil {
+		_ = inf.Close()
+		return nil, fmt.Errorf("shadow: %w", err)
+	}
+	s := NewScorerWithHeads(inf, threshold, onCross, Head{Classifier: head, Threshold: headThreshold, Enabled: enabled, OnCross: onHeadCross})
+	s.closers = []io.Closer{inf, head}
+	s.info = fmt.Sprintf("onnxruntime %s, wake %s + stop %s, xnnpack=%v", rt.Version(), wakeStem, headStem, inf.XNNPACKActive())
 	return s, nil
 }

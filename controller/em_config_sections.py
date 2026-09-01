@@ -36,6 +36,10 @@ SECTIONS: dict[str, dict] = {
             "wakeNearMissFloor",
         ],
     },
+    "stopword": {
+        "label": "Stop word",
+        "keys": ["stopModel", "stopThreshold"],
+    },
     "microphones": {
         "label": "Microphones",
         "keys": [

@@ -306,11 +306,37 @@ def init(devices_ref: dict, shell_pending_ref: dict, shell_dashboard_ref: dict) 
         device.timer_alarm_audio_ready = False
         device.timer_alarm_listen_after = 0.0
         if firing:
+            # Timer audio has no Assist pipeline, but is still a real local
+            # voice-plane turn for stop's generation and persistence contract.
+            if (getattr(device, "stopword_capable", False)
+                    and getattr(device, "stop_model_ready", False)):
+                turn_id = await asyncio.get_running_loop().run_in_executor(
+                    None, db.create_turn, device_id, "timer-alert"
+                )
+                device.stop_generation += 1
+                generation = device.stop_generation
+                if device.stop_state.arm(turn_id, generation, "timer",
+                                         asyncio.get_running_loop().time() + 135.0).action == "armed":
+                    device.timer_stop_turn_id = turn_id
+                    await device.send_control({
+                        "type": "stop_arm", "turnId": str(turn_id),
+                        "generation": generation, "phase": "timer", "expiryMs": 135_000,
+                        "threshold": device.stop_threshold,
+                    })
             if device.led_anim_capable:
                 await device.send_led_anim(device.led_scene["timer_anim"])
             else:
                 await device.set_leds(device.led_scene["listening"], listening=True)
         else:
+            if getattr(device, "timer_stop_turn_id", None) is not None:
+                turn_id, device.timer_stop_turn_id = device.timer_stop_turn_id, None
+                arm = device.stop_state.arm_state
+                if arm is not None and arm.turn_id == turn_id:
+                    device.stop_state.disarm(arm.generation)
+                    await device.send_control({"type": "stop_disarm", "generation": arm.generation})
+                await asyncio.get_running_loop().run_in_executor(
+                    None, db.update_turn, turn_id, {"outcome": "ok"},
+                )
             await em_controller.leds_off(device)
         await em_controller._push_device_state(device)
 
@@ -390,6 +416,7 @@ async def create_app() -> web.Application:
     # Custom wake-word models (oww_forge output → data/oww_models/)
     app.router.add_get("/api/oww_models",             _get_oww_models)
     app.router.add_post("/api/oww_models/upload",     _post_oww_model_upload)
+    app.router.add_post("/api/oww_models/stop/upload", _post_stop_model_upload)
     app.router.add_delete("/api/oww_models/{file}",   _delete_oww_model)
     app.router.add_get("/api/devices/{id}/shell",         _ws_shell)
     app.router.add_get("/api/devices/{id}/oww_assets",    _get_oww_assets)
@@ -1310,6 +1337,10 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         live.oww_model = effective["owwModel"]
         # Refresh HA's wake-word dropdown.
         ha_sidechannels.wake_model(device_id, effective["owwModel"])
+    if "stopModel" in effective:
+        live.stop_model = effective["stopModel"]
+    if "stopThreshold" in effective:
+        live.stop_threshold = float(effective["stopThreshold"])
     if pending_model:
         # The device is still on its previous wake word, still scoring
         # locally, still answering. Install, then switch.
@@ -1857,8 +1888,19 @@ async def _get_oww_models(request: web.Request) -> web.Response:
     Custom models discovered in the data volume's oww_models/ dir.
     `path` is the value to store in owwModel config.
     """
+    uploaded_stop = next(
+        (m for m in em_oww_models.scan() if m["file"] == "stop.onnx"), None
+    )
+    builtins = [] if uploaded_stop else em_oww_models.builtin_models()
+    if uploaded_stop:
+        uploaded_stop = {**uploaded_stop, "name": "stop", "kind": "stop",
+                         "source": "upload", "available": True}
     return _ok({
-        "models": em_oww_models.scan(),
+        # Direct uploads remain backwards-compatible wake models. The built-in
+        # stop classifier is listed too, with an explicit immutable role.
+        "models": [*builtins, *([uploaded_stop] if uploaded_stop else []),
+                   *[{**model, "kind": "wake", "source": "upload"}
+                     for model in em_oww_models.scan()]],
         "dir":    str(em_oww_models.models_dir()),
     })
 
@@ -1903,9 +1945,70 @@ async def _post_oww_model_upload(request: web.Request) -> web.Response:
             raise
         log.info(f"[api] Wake model installed: {fname} ({len(data):,} bytes)")
         entry = next((m for m in em_oww_models.scan() if m["file"] == fname), None)
+        if entry is not None:
+            entry.update(kind="wake", source="upload")
         return _ok({"model": entry}, status=201)
     except Exception as e:
         log.error(f"[api] Model upload error: {e}")
+        return _error("upload_failed", str(e), 500)
+
+
+@auth.require_admin
+async def _post_stop_model_upload(request: web.Request) -> web.Response:
+    """Upload the fleet stop classifier and make it the selected stop model.
+
+    Stop models have one stable device filename (``stop.onnx``), while the
+    controller stores the bytes beside the database. Updating the fleet config
+    here makes the same asset appear in onboarding and field-device sync.
+    """
+    try:
+        reader = await request.multipart()
+        field = await reader.next()
+        if field is None or field.name != "model":
+            return _error("invalid_upload", "Expected multipart field 'model'", 400)
+        if not (field.filename or "").lower().endswith(".onnx"):
+            return _error("invalid_filename", "Stop model must be an .onnx file", 400)
+        data = await field.read()
+        if not data:
+            return _error("empty_upload", "Uploaded model is empty", 400)
+        if len(data) > em_oww_models.MAX_MODEL_BYTES:
+            return _error("too_large", "Model exceeds 20 MB limit", 413)
+
+        directory = em_oww_models.models_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        destination = directory / "stop.onnx"
+        fd, tmp_path = tempfile.mkstemp(dir=directory, suffix=".stop.tmp")
+        try:
+            with os.fdopen(fd, "wb") as f:
+                f.write(data)
+            os.replace(tmp_path, destination)
+        except BaseException:
+            with contextlib.suppress(OSError):
+                os.unlink(tmp_path)
+            raise
+
+        config = db.get_global_device_config_raw()
+        config["stopModel"] = str(destination.resolve())
+        await asyncio.get_running_loop().run_in_executor(
+            None, db.set_global_device_config, config
+        )
+        pushed = []
+        for device_id, live in list(_devices.items()):
+            effective = await asyncio.get_running_loop().run_in_executor(
+                None, db.get_effective_device_config, device_id
+            )
+            await _apply_live_config(device_id, live, effective)
+            pushed.append(device_id)
+        entry = {
+            "name": "stop", "file": destination.name,
+            "path": str(destination.resolve()), "kind": "stop",
+            "source": "upload", "available": True,
+            "size": len(data), "pushed": pushed,
+        }
+        log.info("[api] Stop model installed: %s (%d bytes)", destination, len(data))
+        return _ok({"model": entry}, status=201)
+    except Exception as e:
+        log.error("[api] Stop model upload error: %s", e)
         return _error("upload_failed", str(e), 500)
 
 
@@ -3750,7 +3853,7 @@ async def _fetch_latest_release(force: bool = False) -> Optional[dict]:
     """
     global _release_cache, _release_cache_ts
 
-    repo = db.get_config("github_repo", "wilbowes/EchoMuse")
+    repo = db.get_config("github_repo", "amitra93/echo-voice-satellite")
     url  = GITHUB_API_URL.format(repo=repo)
 
     log.info(f"[api] Polling GitHub releases: {url}")
@@ -3864,7 +3967,7 @@ async def _fetch_controller_release(force: bool = False) -> Optional[dict]:
             and (time.monotonic() - _controller_cache_ts) < RELEASE_CACHE_TTL):
         return _controller_cache
 
-    repo = db.get_config("github_repo", "wilbowes/EchoMuse")
+    repo = db.get_config("github_repo", "amitra93/echo-voice-satellite")
     headers = {"Accept": "application/vnd.github+json"}
     timeout = aiohttp.ClientTimeout(total=10)
 
@@ -4017,8 +4120,11 @@ def _oww_wanted_models(device_id: str) -> list[str]:
     switch, not so the controller can push models nobody asked for.
     """
     cfg = db.get_effective_device_config(device_id) or {}
-    model = (cfg.get("owwModel") or "").strip()
-    return [model] if model else []
+    wake = (cfg.get("owwModel") or "").strip()
+    stop = (cfg.get("stopModel") or "").strip()
+    # Ordered: active wake first, mandatory stop second. A duplicate is one
+    # file, but selecting a wake model as a stop model is rejected by callers.
+    return list(dict.fromkeys(model for model in (wake, stop) if model))
 
 
 def _hold_back_oww_model(live, effective: dict):
@@ -4347,7 +4453,7 @@ async def _get_provision_oww_manifest(request: web.Request) -> web.Response:
     destination as the field path — only the transport differs.
     """
     fleet = db.get_global_device_config() or {}
-    models = [m for m in [fleet.get("owwModel") or ""] if m]
+    models = [m for m in [fleet.get("owwModel") or "", fleet.get("stopModel") or ""] if m]
     desired, problems = em_oww_assets.desired_assets(models)
     return _ok({
         "dir": em_oww_assets.DEVICE_DIR,
@@ -4368,7 +4474,7 @@ async def _get_provision_oww_asset(request: web.Request) -> web.Response:
     name = request.match_info["name"]
     fleet = db.get_global_device_config() or {}
     desired, _ = em_oww_assets.desired_assets(
-        [m for m in [fleet.get("owwModel") or ""] if m])
+        [m for m in [fleet.get("owwModel") or "", fleet.get("stopModel") or ""] if m])
     asset = next((a for a in desired if a.name == name), None)
     if asset is None:
         return _error("not_found", f"{name} is not a current asset", 404)
@@ -5015,6 +5121,8 @@ def _merge_device(row) -> dict:
         # without being able to act on it, and offering those "on" produces a
         # device that never answers.
         "owwTriggerCapable": getattr(live, "oww_trigger_capable", False) if live else False,
+        "stopwordCapable": getattr(live, "stopword_capable", False) if live else False,
+        "stopModelReady": getattr(live, "stop_model_ready", False) if live else False,
         "audioMixCapable": getattr(live, "audio_mix_capable", False) if live else False,
         # Gates the tap-as-event toggle — see em_button.decide.
         "buttonHoldCapable": getattr(live, "button_hold_capable", False) if live else False,

@@ -75,6 +75,7 @@ import em_limiter
 import em_mbc
 import em_scenes
 import em_shadow
+import em_stop
 import em_oww_warmup
 import em_barge
 import em_arbiter
@@ -84,6 +85,7 @@ import em_turn_engine as turn_engine
 import em_ha_sidechannels as ha_sidechannels
 import em_oww_models
 import em_training_captures
+import em_capture_upload
 import em_player
 import em_volume
 import em_wake_audio
@@ -308,6 +310,7 @@ class Device:
         self.timer_firing = False
         self.timer_alarm_audio_ready = False
         self.timer_alarm_listen_after = 0.0
+        self.timer_stop_turn_id: int | None = None
 
         # Volume as HA float (0.0–1.0). Initialised from stored config in
         # handle_control() after config is read; updated on volume_state
@@ -323,6 +326,13 @@ class Device:
         # without requiring a device reconnect.
         self.oww_threshold: float = OWW_THRESHOLD
         self.oww_model:     str   = f"{OWW_MODEL}_v0.1"
+        self.stop_model:    str   = "stop"
+        self.stop_threshold: float = 0.75
+        # Updated by stop runtime reports. False is an explicit mandatory
+        # readiness failure; unknown starts false so output cannot claim safety.
+        self.stop_model_ready: bool = False
+        self.stop_state: em_stop.StopState = em_stop.StopState()
+        self.stop_generation: int = 0
         # Multi-device wake arbitration window (ms, 0 = off). Only
         # consulted when 2+ devices are connected — a solo fleet never
         # pays the latency.
@@ -423,7 +433,8 @@ class Device:
         # reprovisioned behind our back — and its writer is the
         # reconcile-on-connect pass designed in #191, which is the first thing
         # that will actually KNOW what a device has.
-        self.oww_model_ready: bool = True
+        self.oww_model_ready: bool = False
+        self.oww_classifier_md5: str | None = None
         self.pending_wake: em_shadow.PendingWake = em_shadow.PendingWake()
         # The device streams continuous PCM during wake listening. Keep enough
         # of it to rewind from the exact device-reported activation sequence
@@ -435,6 +446,9 @@ class Device:
         # still worth answering once the roles are swapped, and this is the
         # only place a controller miss can be seen at all.
         self.ctrl_shadow: em_shadow.ShadowTracker = em_shadow.ShadowTracker()
+        # One provisional device-originated wake may be waiting for HA to accept.
+        self.wake_request_id: str | None = None
+        self.wake_admission_task: asyncio.Task | None = None
 
         # Per-room noise floor estimate (normalized RMS, 0..1), tracked from
         # the continuous wake stream in wake_word_listener. Measurement only —
@@ -447,16 +461,9 @@ class Device:
         # quickly, rises slowly, so speech doesn't drag the floor up.
         self.noise_floor: float = 0.0
 
-        # Barge-in (§3.2): wake word interrupts the thinking phase or TTS
-        # playback. Controller-side feature — with it enabled the mic keeps
-        # streaming through the turn (device AEC subtracts the speaker
-        # output during playback) and _barge_watcher scores the stream from
-        # STT_VAD_END onward (barge_threshold during playback, the normal
-        # wake threshold during thinking); on detection it sets
-        # barge_detected + cancel_event (plus speaker_flush or HA pipeline
-        # cancel, phase-dependent) and the turn loop re-enters a fresh
-        # turn. _barge_model is a dedicated OWW instance (the main wake
-        # listener task is blocked awaiting the turn).
+        # Barge-in (§3.2): the device's local wake scorer submits a
+        # wake_request during thinking or TTS playback. The controller grants
+        # it, cancels the exact HA turn, and the turn loop re-enters fresh.
         self.barge_in_enabled = False
         # False until config is pushed, so a device connecting before then
         # keeps the historical tap-starts-a-turn behaviour.
@@ -469,6 +476,7 @@ class Device:
         )
         self.barge_threshold  = 0.6
         self.barge_detected   = False
+        self.barge_request_id: str | None = None
         self._barge_model     = None
         self._barge_model_key = None
         # Controller-only TTS makeup gain. Applied before the output limiter,
@@ -721,6 +729,11 @@ class Device:
         otherwise.
         """
         return "oww_trigger" in (self.capabilities or [])
+
+    @property
+    def stopword_capable(self) -> bool:
+        """Whether firmware can locally flush and report an armed stop word."""
+        return "stopword" in (self.capabilities or [])
 
     async def send_led_anim(self, anim: dict):
         """
@@ -1225,9 +1238,7 @@ async def _barge_watcher(device: Device, playback_started: asyncio.Event):
                         f"Barge-in during {phase} (score={score:.3f})"
                     )
                     device.barge_detected = True
-                    # Wake detail for the interrupting turn's persistent
-                    # record — popped when the turn loop re-enters
-                    # trigger_voice_turn with trigger "barge-in".
+        # Wake detail for the interrupting turn's persistent record.
                     device.last_wake = {
                         "model":       barge_pred_key,
                         "score":       round(float(score), 4),
@@ -1573,7 +1584,9 @@ async def _run_streaming_post_turn_playback(device: Device, pcm_chunks) -> int:
 
 async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_wakeword: bool = False,
                             initial_audio: tuple[bytes, ...] | None = None,
-                            on_transcript=None, stt_only: bool = False):
+                            on_transcript=None, stt_only: bool = False,
+                            request_id: str | None = None,
+                            admission_valid=None):
     """
     is_wakeword: explicit flag for whether this turn was triggered by wake-
     word detection (as opposed to a button press). Used to decide preroll
@@ -1582,6 +1595,12 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
     trace display, not a control-flow key) so a future change to the label
     format can't silently change behaviour here.
     """
+    # Stop is mandatory protection for every voice response. Do this before
+    # interrupting music or lighting the ring: a visible turn that then cannot
+    # answer safely is worse than refusing it at the boundary.
+    if not device.stopword_capable or not device.stop_model_ready:
+        log.warning("[%s] voice response refused: stop word unavailable", device.device_id)
+        return False
     drained = 0
     while not device.mic_queue.empty():
         try:
@@ -1602,13 +1621,21 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
     # conversation (incl. continuations) and resume it afterwards. The
     # matching resume_interrupted below only fires if this interrupt
     # actually paused something.
-    await em_player.interrupt(device.device_id)
+    if request_id is None:
+        await em_player.interrupt(device.device_id)
     try:
         async with device.voice_lock:
             log.info(f"[{device.device_id}] Voice turn starting (esphome mode)")
-            device.listening = True
-            await leds_listening(device)
-            await _push_device_state(device)
+            if request_id is None:
+                device.listening = True
+                await leds_listening(device)
+                await _push_device_state(device)
+
+            async def on_admitted():
+                await em_player.interrupt(device.device_id)
+                device.listening = True
+                await leds_listening(device)
+                await _push_device_state(device)
 
             stop_spin = asyncio.Event()
             spin_task = None
@@ -1658,16 +1685,8 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                     spin_task = asyncio.create_task(
                         leds_spin_green(device, stop_spin)
                     )
-                # Barge-in watcher starts here, not at playback: STT has
-                # ended (VAD_END), so anything on the mic from now on is
-                # a potential interruption. Spans thinking → playback;
-                # cancelled in the turn loop's finally.
-                if device.barge_in_enabled and (
-                    watcher is None or watcher.done()
-                ):
-                    watcher = asyncio.create_task(
-                        _barge_watcher(device, playback_started)
-                    )
+                # Barge-in is now reported by the device's local wake scorer
+                # through wake_request; no controller inference task runs.
 
             async def post_turn_play_esphome(pcm_chunks):
                 nonlocal spin_task, watcher
@@ -1720,25 +1739,9 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                     pcm_chunks = _meter_at_playback_start(pcm_chunks, _meter_on)
 
                 if device.barge_in_enabled:
-                    # Barge-in (§3.2): keep the mic running through
-                    # playback — the device's AEC subtracts the speaker
-                    # output, which is what makes this safe (enable AEC
-                    # before enabling barge-in; without it the watcher
-                    # scores raw echo and the raised threshold is the
-                    # only defence). The pre-AEC problems the mic_stop
-                    # guarded against are gone: AGC no longer exists on
-                    # the wake stream (v2.7.0) and echo content is
-                    # cancelled at the source (v2.7.3).
-                    #
-                    # The watcher normally exists already (started at
-                    # thinking onset); the phase flag switches it to the
-                    # playback threshold. Defensive create for turns
-                    # that reach TTS without an STT_VAD_END.
+                    # The device keeps its local scorer active through
+                    # playback and submits a new wake_request when it fires.
                     playback_started.set()
-                    if watcher is None or watcher.done():
-                        watcher = asyncio.create_task(
-                            _barge_watcher(device, playback_started)
-                        )
                 else:
                     # Acoustic-feedback guard (barge-in off): stop the mic
                     # BEFORE playback, not just in the post-turn finally.
@@ -1812,7 +1815,13 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                         initial_audio=turn_initial_audio,
                         on_transcript=on_transcript,
                         stt_only=stt_only,
+                        request_id=request_id,
+                        on_admitted=on_admitted if request_id is not None else None,
+                        admission_valid=admission_valid,
                     )
+                    if (request_id is not None
+                            and device.wake_request_id == request_id):
+                        device.wake_request_id = None
                 finally:
                     # Watcher spans thinking→playback and is owned here:
                     # every exit path (normal, barge, error, cancel)
@@ -1834,19 +1843,10 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
                     # with the wake-word preroll discard (there IS a
                     # "…rhasspy" tail to drop this time).
                     device.barge_detected = False
+                    request_id = device.barge_request_id
+                    device.barge_request_id = None
                     device.cancel_event.clear()
                     log.info(f"[{device.device_id}] Barge-in: starting interrupting turn")
-                    await device.mic_start()  # defensive no-op if running
-                    # Re-arm listening state — cleanup_esphome() in the
-                    # finally just turned the ring off, which left the
-                    # device dark while it was actually listening for the
-                    # interrupting command (looked dead — user report
-                    # 2026-07-08). Same re-arm as the continuation branch;
-                    # no voice_queue drain here though, the follow-up
-                    # words spoken after "hey rhasspy" are already in it.
-                    device.listening = True
-                    await leds_listening(device)
-                    await _push_device_state(device)
                     turn_label      = "barge-in"
                     preroll_discard = turn_engine.VOICE_PREROLL_DISCARD
                     turn_initial_audio = ()
@@ -1922,6 +1922,8 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
             )
         device.oww_paused.clear()
         device.oww_paused_since = None
+        if "wake_request_v1" in (device.capabilities or []):
+            await device.mic_start()
         log.info(f"[{device.device_id}] oww_paused cleared")
         # Release the arbitration claim so another device answering a
         # genuinely new utterance isn't suppressed by a stale window.
@@ -2625,6 +2627,10 @@ async def handle_button_event(device: Device, event: dict):
         return
 
     if click_type == 138:   # DotClick
+        request_id = event.get("requestId")
+        async def deny_button(reason: str):
+            if isinstance(request_id, str) and request_id:
+                await device.send_control({"type": "wake_deny", "requestId": request_id, "reason": reason})
         # A HOLD is a separate gesture, forwarded to HA rather than starting a
         # turn. heldMs is measured on the device: timing the down/up messages
         # here would be at the mercy of RTT excursions measured past 1600ms on
@@ -2645,6 +2651,12 @@ async def handle_button_event(device: Device, event: dict):
         # Holds remain HA events and use the normal gesture policy below.
         if (api.timer_alarm_ringing(device.device_id)
                 and held_ms < turn_engine.BUTTON_HOLD_MS):
+            request_id = event.get("requestId")
+            if isinstance(request_id, str) and request_id:
+                await device.send_control({
+                    "type": "wake_deny", "requestId": request_id,
+                    "reason": "timer_dismissed",
+                })
             if await api.dismiss_timer_alarm(device.device_id):
                 log.info(f"[{device.device_id}] Dot button tap dismissed timer alarm")
             return
@@ -2661,11 +2673,13 @@ async def handle_button_event(device: Device, event: dict):
         )
 
         if action == em_button.HOLD:
+            await deny_button("gesture")
             log.info(f"[{device.device_id}] Dot button held {held_ms}ms → HA event")
             ha_sidechannels.button_event(device.device_id, "long", held_ms)
             return
 
         if action == em_button.TAP_EVENT:
+            await deny_button("gesture")
             window_ms = device.button_multi_tap_ms
             if window_ms <= 0:
                 log.info(f"[{device.device_id}] Dot button tap → HA event (single)")
@@ -2680,12 +2694,14 @@ async def handle_button_event(device: Device, event: dict):
             return
 
         if action == em_button.BLOCKED:
+            await deny_button("muted")
             # Only the TURN is blocked. The hold and tap-event above have
             # already been forwarded, muted or not.
             log.info(f"[{device.device_id}] Dot button tap ignored — mic is muted")
             return
 
         if action == em_button.CANCEL:
+            await deny_button("cancelled")
             log.info(f"[{device.device_id}] Dot button — cancelling voice turn")
             device.cancel_event.set()
             turn_engine.cancel_voice_turn(device.device_id, reason="cancelled")
@@ -2700,20 +2716,45 @@ async def handle_button_event(device: Device, event: dict):
             # cancel that did not.
             await device.send_control({"type": "speaker_flush"})
         else:
+            if not isinstance(request_id, str) or not request_id:
+                log.warning("[%s] button turn refused: missing requestId", device.device_id)
+                return
+            if device.wake_request_id is not None:
+                await deny_button("busy")
+                return
+            if not device.stopword_capable or not device.stop_model_ready:
+                await deny_button("not_ready")
+                return
+            if device.data_ws is None:
+                await deny_button("no_data")
+                return
+            device.wake_request_id = request_id
+            button_deadline = asyncio.get_running_loop().time() + 4.0
+
+            def button_admission_valid() -> bool:
+                return (
+                    _devices.get(device.device_id) is device
+                    and not device.muted
+                    and device.data_ws is not None
+                    and device.stopword_capable
+                    and device.stop_model_ready
+                    and asyncio.get_running_loop().time() < button_deadline
+                )
+
             log.info(f"[{device.device_id}] Dot button → voice turn")
             device.cancel_event.clear()
             device.oww_paused.set()
             device.oww_paused_since = asyncio.get_event_loop().time()
             async def _button_voice_turn():
-                # Button is a deliberate act with no dead zone cost — nothing
-                # is being said at the moment of press, so stop/start RTT is
-                # fine. Stop the running ch6 stream, restart with lock_mic:true
-                # so streamMic calls beam.Lock(beamformingEnabled) and the
-                # beamformer selects the best perimeter mic for this turn.
-                # mic_start_turn() no-ops if already running, so stop first.
-                await device.mic_stop()
-                await device.mic_start_turn()
-                await _run_voice_locked(device, trigger_label="button", is_wakeword=False)
+                try:
+                    await _run_voice_locked(
+                        device, trigger_label="button", is_wakeword=False,
+                        request_id=request_id,
+                        admission_valid=button_admission_valid,
+                    )
+                finally:
+                    if device.wake_request_id == request_id:
+                        device.wake_request_id = None
                 log.info(f"[{device.device_id}] Button turn complete — restarting mic")
                 # Post-turn: back to ch6 omni for OWW listening. mic_stop
                 # first: if the turn had no TTS (cancel/error/no-speech), the
@@ -2797,6 +2838,130 @@ async def _link_auth_ok(
             f"Treating as an unregistered device; it will need approval."
         )
     return True
+
+
+async def _handle_wake_request(device: Device, msg: dict) -> None:
+    """Admit one device wake without allowing races across async boundaries."""
+    request_id = msg.get("requestId")
+    if not isinstance(request_id, str) or not request_id:
+        return
+
+    async def deny(reason: str) -> None:
+        await device.send_control({
+            "type": "wake_deny", "requestId": request_id, "reason": reason,
+        })
+        if device.wake_request_id == request_id:
+            device.wake_request_id = None
+
+    if "wake_request_v1" not in (device.capabilities or []):
+        await deny("unsupported")
+        return
+    if device.wake_request_id != request_id:
+        await deny("busy")
+        return
+    if msg.get("source") != "wakeword" or msg.get("model") != device.oww_model:
+        await deny("not_ready")
+        return
+    if device.oww_on_device != em_shadow.MODE_ON or not device.oww_model_ready:
+        await deny("not_ready")
+        return
+    if device.muted:
+        await deny("muted")
+        return
+    if device.data_ws is None:
+        await deny("no_data")
+        return
+    try:
+        score = float(msg["score"])
+        threshold = float(msg["threshold"])
+        age_ms = int(msg["ageMs"])
+        activation_seq = int(msg["activationSeq"])
+    except (KeyError, TypeError, ValueError):
+        await deny("malformed")
+        return
+    if not (0 <= score <= 1 and 0 <= threshold <= 1 and 0 <= age_ms <= 10_000
+            and 0 <= activation_seq <= 0xFFFF and score >= threshold):
+        await deny("malformed")
+        return
+    if age_ms > 4000:
+        await deny("stale")
+        return
+    request_deadline = asyncio.get_running_loop().time() + max(
+        0.0, (4000 - age_ms) / 1000.0
+    )
+
+    def admission_valid() -> bool:
+        return (
+            _devices.get(device.device_id) is device
+            and not device.muted
+            and device.data_ws is not None
+            and device.oww_model_ready
+            and device.stopword_capable
+            and device.stop_model_ready
+            and asyncio.get_running_loop().time() < request_deadline
+        )
+
+    if device.voice_lock.locked():
+        if not device.barge_in_enabled:
+            await deny("barge_disabled")
+            return
+        await turn_engine.admit_barge(
+            device, request_id, score, threshold, activation_seq,
+            admission_valid=admission_valid,
+        )
+        return
+
+    if not device.stopword_capable or not device.stop_model_ready:
+        await deny("not_ready")
+        return
+
+    claimed = False
+    if device.wake_arb_ms > 0 and len(_devices) > 1:
+        winner = _wake_arbiter.claim(device.device_id, device.wake_arb_ms / 1000.0)
+        if winner != device.device_id:
+            await deny("arbitration")
+            device.wake_request_id = None
+            return
+        claimed = True
+
+    device.oww_paused.set()
+    device.oww_paused_since = asyncio.get_running_loop().time()
+    device.last_wake = {
+        "model": device.oww_model, "score": round(score, 4),
+        "threshold": round(threshold, 4), "noise_floor": None,
+        "activation_seq": activation_seq, "age_ms": age_ms,
+    }
+    try:
+        if _devices.get(device.device_id) is not device:
+            await deny("disconnected")
+            return
+        await _run_voice_locked(
+            device, trigger_label=f"wakeword-dev({score:.3f})",
+            is_wakeword=True, initial_audio=(), request_id=request_id,
+            admission_valid=admission_valid,
+        )
+    finally:
+        if claimed:
+            _wake_arbiter.release(device.device_id)
+        if device.wake_request_id == request_id:
+            device.wake_request_id = None
+        device.oww_paused.clear()
+        device.oww_paused_since = None
+
+
+def _wake_status_ready(device: Device, msg: dict) -> bool:
+    """Accept readiness only for the selected classifier bytes."""
+    model = msg.get("model")
+    checksum = msg.get("classifierMd5")
+    if not msg.get("ready") or model != device.oww_model or not isinstance(checksum, str):
+        return False
+    try:
+        import em_oww_assets
+        source = em_oww_assets.classifier_source(model)
+        return source is not None and checksum == em_oww_assets.md5_file(source)
+    except Exception:
+        log.exception("[%s] failed to resolve wake classifier", device.device_id)
+        return False
 
 
 async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
@@ -2937,6 +3102,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         await device.send_control({"type": "config", **config})
         device.oww_threshold = float(config.get("owwThreshold", OWW_THRESHOLD))
         device.oww_model     = config.get("owwModel", f"{OWW_MODEL}_v0.1")
+        device.stop_model    = config.get("stopModel", "stop")
+        device.stop_threshold = float(config.get("stopThreshold", 0.75))
         device.wake_arb_ms   = int(config.get("wakeArbitrationMs", 300))
         device.oww_speex_ns  = bool(config.get("owwSpeexNs", False))
         device.save_utterances = bool(config.get("saveUtterances", False))
@@ -3077,7 +3244,9 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 })
 
         ping_task = asyncio.create_task(ping_loop())
-        oww_task = _supervise_wake_listener(device)
+        oww_task = None
+        if "wake_request_v1" not in capabilities:
+            oww_task = _supervise_wake_listener(device)
         device.oww_task = oww_task
 
         try:
@@ -3380,6 +3549,39 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                         f"(shadow — not triggering)"
                     )
 
+                elif msg_type == "wake_request":
+                    # Device-only wake requests are admitted directly from the
+                    # control plane; they must not wait for an idle PCM frame.
+                    request_id = msg.get("requestId")
+                    if not isinstance(request_id, str) or not request_id:
+                        continue
+                    if device.wake_request_id is not None:
+                        reason = "busy"
+                        await device.send_control({
+                            "type": "wake_deny", "requestId": request_id,
+                            "reason": reason,
+                        })
+                        continue
+                    if device.voice_lock.locked() and not device.barge_in_enabled:
+                        await device.send_control({
+                            "type": "wake_deny", "requestId": request_id,
+                            "reason": "barge_disabled",
+                        })
+                        continue
+                    device.wake_request_id = request_id
+                    task = asyncio.create_task(
+                        _handle_wake_request(device, msg),
+                        name=f"wake-admission-{device_id}",
+                    )
+                    device.wake_admission_task = task
+
+                    def _clear_wake_task(done, d=device, t=task):
+                        if d.wake_admission_task is t:
+                            d.wake_admission_task = None
+                            if d.barge_request_id != d.wake_request_id:
+                                d.wake_request_id = None
+                    task.add_done_callback(_clear_wake_task)
+
                 elif msg_type == "oww_wake":
                     # On-device scoring crossed the bar AND owwOnDevice is
                     # "on", so the device is asking for a turn rather than
@@ -3417,6 +3619,96 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                     else:
                         log.warning(
                             f"[{device_id}] malformed oww_wake dropped: {msg!r}"
+                        )
+
+                elif msg_type == "stop_status":
+                    model = msg.get("model")
+                    ready = msg.get("ready")
+                    device.stop_model_ready = bool(ready) and model == device.stop_model
+                    if device.stop_model_ready:
+                        log.info("[%s] stop word ready: %s", device_id, model)
+                    else:
+                        log.warning("[%s] stop word unavailable: %s", device_id,
+                                    msg.get("error") or "model mismatch")
+
+                elif msg_type == "wake_status":
+                    checksum = msg.get("classifierMd5")
+                    device.oww_model_ready = _wake_status_ready(device, msg)
+                    device.oww_classifier_md5 = checksum if device.oww_model_ready else None
+                    if not device.oww_model_ready:
+                        log.warning("[%s] wake detector unavailable: %s", device_id,
+                                    msg.get("error") or "model/checksum mismatch")
+
+                elif msg_type == "wake_started":
+                    try:
+                        turn_id = int(msg.get("turnId"))
+                    except (TypeError, ValueError):
+                        continue
+                    if not turn_engine.confirm_device_started(
+                        device, msg.get("requestId"), turn_id
+                    ):
+                        log.warning("[%s] stale wake_started ignored", device_id)
+
+                elif msg_type == "stop_detected":
+                    try:
+                        turn_id = int(msg.get("turnId"))
+                        generation = int(msg.get("generation"))
+                        score = float(msg.get("score"))
+                        threshold = float(msg.get("threshold"))
+                        age_ms = int(msg.get("ageMs"))
+                        phase = msg.get("phase")
+                    except (TypeError, ValueError):
+                        await loop.run_in_executor(None, db.bump_wake_counters,
+                                                   device_id, 0, 0.0, 0, 0, 0, 0, 0.0, 0, 0,
+                                                   0, 1)
+                        log.warning("[%s] malformed stop_detected dropped", device_id)
+                        continue
+                    if (not device.stopword_capable or not device.stop_model_ready
+                            or score < threshold or age_ms < 0):
+                        log.warning("[%s] invalid stop_detected dropped", device_id)
+                        continue
+                    decision = device.stop_state.detected(
+                        turn_id, generation, phase, loop.time()
+                    )
+                    if decision.action != "accept":
+                        await loop.run_in_executor(
+                            None, db.bump_wake_counters, device_id,
+                            stops_stale=1,
+                        )
+                        log.info("[%s] stop_detected ignored: %s", device_id, decision.reason)
+                        continue
+                    detection = {
+                        "stop_model": device.stop_model,
+                        "stop_score": score,
+                        "stop_threshold": threshold,
+                        "stop_phase": phase,
+                        "stop_device_age_ms": age_ms,
+                        "stop_cancel_ms": 0,
+                    }
+                    if phase == "timer" and turn_id == device.timer_stop_turn_id:
+                        # Clear before stopping the runner: its asynchronous
+                        # state callback must not overwrite `stopped` with the
+                        # ordinary timer-completion outcome.
+                        device.timer_stop_turn_id = None
+                        accepted = await api.dismiss_timer_alarm(device_id)
+                        if accepted:
+                            await loop.run_in_executor(
+                                None, db.update_turn, turn_id,
+                                {"outcome": "stopped", **detection},
+                            )
+                    else:
+                        accepted = await turn_engine.stop_voice_turn(
+                            device_id, turn_id, detection
+                        )
+                    if accepted:
+                        await loop.run_in_executor(
+                            None, db.bump_wake_counters, device_id,
+                            stops_accepted=1,
+                        )
+                    else:
+                        await loop.run_in_executor(
+                            None, db.bump_wake_counters, device_id,
+                            stops_stale=1,
                         )
 
                 elif msg_type == "ble_adverts":
@@ -3500,7 +3792,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
 
         finally:
             ping_task.cancel()
-            (device.oww_task or oww_task).cancel()
+            if device.oww_task is not None:
+                device.oww_task.cancel()
 
     except asyncio.TimeoutError:
         log.warning(f"[control] Registration timeout from {remote}")
@@ -3517,6 +3810,11 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
             # send_button_event resolves by device_id, so an orphaned timer
             # would fire a phantom tap at the replacement connection.
             device.tap_burst.cancel()
+            admission = device.wake_admission_task
+            if admission is not None and not admission.done():
+                admission.cancel()
+                await asyncio.gather(admission, return_exceptions=True)
+            device.wake_admission_task = None
             if _devices.get(device.device_id) is not device:
                 # A replacement connection has already registered for this
                 # device_id — this socket is stale. Tearing down shared
@@ -3544,6 +3842,36 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
 
 
 # ─── Data plane handler ───────────────────────────────────────────────────────
+
+async def _accept_capture_upload(device: Device, ws, completed) -> bool:
+    """Validate live identity/privacy, durably store, then acknowledge."""
+    metadata = completed.metadata
+    expected_model = em_oww_models.prediction_key(device.oww_model)
+    if (not device.save_wake_captures
+            or metadata.get("model") != expected_model
+            or metadata.get("classifierMd5") != device.oww_classifier_md5
+            or _devices.get(device.device_id) is not device
+            or device.data_ws is not ws):
+        return False
+    name = await asyncio.get_running_loop().run_in_executor(
+        None,
+        lambda: em_training_captures.save_uploaded(
+            expected_model, device.device_id, metadata, completed.pcm
+        ),
+    )
+    if (name is None or not device.save_wake_captures
+            or _devices.get(device.device_id) is not device
+            or device.data_ws is not ws):
+        if name is not None:
+            await asyncio.get_running_loop().run_in_executor(
+                None,
+                lambda: em_training_captures.discard(expected_model, name),
+            )
+        return False
+    await device.send_control({
+        "type": "capture_ack", "captureId": metadata["captureId"],
+    })
+    return True
 
 async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
     device = None
@@ -3584,9 +3912,23 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
 
         _frame_err_last = float("-inf")
         _frame_err_suppressed = 0
+        capture_receiver = em_capture_upload.Receiver()
         async for raw in ws:
             try:
                 if not isinstance(raw, bytes):
+                    continue
+                if raw and raw[0] in {
+                    em_capture_upload.CAPTURE_BEGIN,
+                    em_capture_upload.CAPTURE_PCM,
+                    em_capture_upload.CAPTURE_END,
+                }:
+                    if not device.save_wake_captures:
+                        capture_receiver.reset()
+                        continue
+                    completed = capture_receiver.feed(raw)
+                    if completed is None:
+                        continue
+                    await _accept_capture_upload(device, ws, completed)
                     continue
                 if len(raw) <= MIC_HEADER_LEN:
                     continue

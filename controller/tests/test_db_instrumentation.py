@@ -41,6 +41,18 @@ def test_turns_has_delivery_columns(fresh_db):
         assert c in cols, f"turns.{c} missing"
 
 
+def test_turns_and_counters_have_stop_observability(fresh_db):
+    for c in ("stop_model", "stop_score", "stop_threshold", "stop_phase",
+              "stop_device_age_ms", "stop_flush_ms", "stop_cancel_ms",
+              "stop_hacs_ack_ms"):
+        assert c in _cols("turns"), f"turns.{c} missing"
+    db.bump_wake_counters("stop-dev", stops_accepted=1, stops_stale=2,
+                          stop_model_drops=3, stop_model_errors=4)
+    row = db.get_wake_counters("stop-dev", 0)[0]
+    assert tuple(row[k] for k in ("stops_accepted", "stops_stale",
+                                   "stop_model_drops", "stop_model_errors")) == (1, 2, 3, 4)
+
+
 def test_device_metrics_has_link_columns(fresh_db):
     cols = _cols("device_metrics")
     for c in ("link_speed_last", "link_speed_min", "wifi_freq_last",

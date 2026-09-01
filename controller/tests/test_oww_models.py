@@ -78,6 +78,13 @@ def test_in_use_by_matches_path_refs_only(tmp_path):
     assert owm.in_use_by(str(model), configs) == ["device-a"]
 
 
+def test_builtin_stop_model_has_a_stop_only_role():
+    assert owm.kind_for("stop") == "stop"
+    assert owm.accepts("stop", "stop")
+    assert not owm.accepts("stop", "wake")
+    assert owm.kind_for("hey_jarvis_v0.1") == "wake"
+
+
 # ── display_name ──────────────────────────────────────────────────────────
 
 def test_display_name_strips_the_version_suffix():

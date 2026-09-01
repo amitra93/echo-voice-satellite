@@ -55,7 +55,7 @@ always-on machine.
 <summary><b>As a Home Assistant add-on</b></summary>
 
 Settings → Add-ons → Add-on Store → ⋮ → **Repositories**, paste
-`https://github.com/wilbowes/EchoMuse`, then install **EchoMuse** from the
+`https://github.com/amitra93/echo-voice-satellite`, then install **EchoMuse** from the
 store. The README has a one-click badge for adding the repository.
 
 The dashboard appears as a **sidebar panel** — it is reached through Home
@@ -83,8 +83,8 @@ Using the prebuilt image (nothing to compile):
 
 ```bash
 mkdir echomuse && cd echomuse
-curl -O https://raw.githubusercontent.com/wilbowes/EchoMuse/main/controller/docker-compose.deploy.yml
-curl -o .env https://raw.githubusercontent.com/wilbowes/EchoMuse/main/controller/.env.example
+curl -O https://raw.githubusercontent.com/amitra93/echo-voice-satellite/main/controller/docker-compose.deploy.yml
+curl -o .env https://raw.githubusercontent.com/amitra93/echo-voice-satellite/main/controller/.env.example
 # Optional: set SERVER_IP in .env to this computer's LAN IP. Left empty it is
 # detected, and the address in use is printed at startup.
 docker compose -f docker-compose.deploy.yml up -d
@@ -96,8 +96,8 @@ To upgrade later: `docker compose -f docker-compose.deploy.yml pull && docker co
 <summary>Alternative: build from source (needed for NVIDIA GPU wake-word inference)</summary>
 
 ```bash
-git clone https://github.com/wilbowes/EchoMuse.git
-cd EchoMuse/controller
+git clone https://github.com/amitra93/echo-voice-satellite.git
+cd echo-voice-satellite/controller
 cp .env.example .env
 # Optional: set SERVER_IP to this computer's LAN IP. Left empty it is detected.
 docker compose up -d --build

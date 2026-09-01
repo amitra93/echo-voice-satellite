@@ -212,6 +212,7 @@ def _wakewords_state() -> list:
             resolved_training_mix = {}
         words.append({
             "name": name,
+            "kind": cfg.get("model_kind", "wake"),
             "phrases": cfg.get("target_phrase", []),
             "confusables": cfg.get("custom_negative_phrases", []),
             "google_tts_languages": cfg.get("google_tts_languages", "en-US,en-GB,en-AU,en-IN,en-PH,en-SG,en-ZA"),
@@ -288,7 +289,10 @@ async def api_mdc_api_key(request):
 
 async def api_wakeword_create(request):
     body = await request.json()
-    phrase = (body.get("phrase") or "").strip()
+    kind = body.get("kind", "wake")
+    if kind not in forge.MODEL_KINDS:
+        raise web.HTTPBadRequest(text="kind must be wake or stop")
+    phrase = (body.get("phrase") or (forge.STOP_DEFAULT_PHRASE if kind == "stop" else "")).strip()
     if not phrase:
         raise web.HTTPBadRequest(text="phrase is required")
     ns = SimpleNamespace(
@@ -297,12 +301,13 @@ async def api_wakeword_create(request):
         samples=int(body.get("samples") or 30000),
         samples_val=int(body.get("samples_val") or 2000),
         steps=int(body.get("steps") or 50000),
-        confusables=(body.get("confusables") or "").strip(),
+        confusables=(body.get("confusables") or (forge.STOP_DEFAULT_CONFUSABLES if kind == "stop" else "")).strip(),
         google_tts_languages=(body.get("google_tts_languages") or "en-US,en-GB,en-AU,en-IN,en-PH,en-SG,en-ZA").strip(),
         google_tts_voices=(body.get("google_tts_voices") or "").strip(),
         google_tts_samples_per_voice=int(body.get("google_tts_samples_per_voice") or 250),
         google_tts_qps=float(body.get("google_tts_qps") or 2),
         force=False,
+        kind=kind,
     )
     try:
         forge.cmd_new(ns)

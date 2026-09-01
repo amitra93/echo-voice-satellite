@@ -1,28 +1,33 @@
 name: "EchoMuse"
-# Tracks the published controller image tag, which controller-release.yml
-# derives from the controller-v* tag (controller-v2.18.0 -> 2.18.0). Bump
-# both together: Supervisor pulls `image:version`, so a version with no
-# matching tag on GHCR fails to install.
+# Tracks the published controller image tag. Supervisor pulls `image:version`,
+# so a version with no matching tag on GHCR fails to install.
+#
+# STALE AS OF THE controller-release.yml REMOVAL: the workflow that used to
+# publish this exact semver tag (promoting a controller-build.yml sha-image to
+# `vX.Y.Z` + `latest`) is gone, and controller-build.yml only ever publishes
+# `:sha-<short>` tags now. Nothing currently publishes a `:2.20.1` image, so
+# Supervisor will fail to pull this add-on until that gap is resolved (revive
+# a promotion step, or point this field at a sha tag some other way).
 version: "2.20.1"
 # Pull the published multi-arch image rather than building on the user's
 # machine. Without this Supervisor builds from this directory's Dockerfile,
 # which downloads a few hundred MB on whatever the user runs Home Assistant
 # on and cannot pass the EM_CONTROLLER_VERSION build arg — so the controller
-# reports "dev" and the update notice goes quiet. controller-release.yml
-# already publishes linux/amd64 and linux/arm64, matching the arch list below.
+# reports "dev" and the update notice goes quiet. controller-build.yml
+# publishes linux/amd64 and linux/arm64, matching the arch list below.
 #
 # The build does NOT compile anything, contrary to what this comment claimed
 # until 2026-08-14: ffmpeg is apt, and onnxruntime, speexdsp-ns, scipy and
 # scikit-learn all resolve to prebuilt wheels on this base image — see
-# controller-release.yml, which relies on exactly that for its arm64 build.
+# controller-build.yml, which relies on exactly that for its arm64 build.
 # The distinction matters because a local build is the only way to test
 # add-on changes before they reach main (Supervisor clones the default
 # branch), and "it compiles onnxruntime" made that loop look far more
 # expensive than it is. tools/make_dev_addon.sh packages one.
-image: "ghcr.io/wilbowes/echomuse-controller"
+image: "ghcr.io/amitra93/echomuse-controller"
 slug: "controller"
 description: "Local, open-source voice assistant controller for rooted Echo Dot 2nd Gen devices — wake word, fleet dashboard, and a native Home Assistant (HACS) voice-satellite integration."
-url: "https://github.com/wilbowes/EchoMuse"
+url: "https://github.com/amitra93/echo-voice-satellite"
 init: false
 arch:
   - aarch64

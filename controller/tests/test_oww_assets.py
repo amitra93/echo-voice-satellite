@@ -325,3 +325,19 @@ def test_missing_selected_classifier_requires_matching_md5():
     actual = {asset.name: (asset.md5, NOW) for asset in _base()}
     actual["selected.onnx"] = ("old", NOW)
     assert A.missing_selected_classifier(desired, actual) == "selected.onnx"
+
+
+def test_two_selected_models_leave_two_rollback_slots():
+    desired = _base() + [
+        A.Asset("wake.onnx", __import__("pathlib").Path("/wake"), "wake", 1,
+                "classifier", selected=True),
+        A.Asset("stop.onnx", __import__("pathlib").Path("/stop"), "stop", 1,
+                "classifier", selected=True),
+    ]
+    actual = {a.name: (a.md5, NOW) for a in desired}
+    actual.update({f"old{i}.onnx": (str(i), NOW - i) for i in range(3)})
+    plan = A.plan_sync(desired, actual)
+    assert plan.prune == ["old2.onnx"]
+    assert A.missing_required_classifiers(desired, actual) == []
+    del actual["stop.onnx"]
+    assert A.missing_required_classifiers(desired, actual) == ["stop.onnx"]

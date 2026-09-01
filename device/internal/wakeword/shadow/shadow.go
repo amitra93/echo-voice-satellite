@@ -102,6 +102,8 @@ type Scorer struct {
 	speakerActive  func() bool
 	refract        time.Duration
 	onCross        func(score, threshold float32, at time.Time, sequence uint16)
+	onScore        func(ScoreEvent)
+	head           []Head
 
 	ch   chan scoredFrame
 	done chan struct{}
@@ -118,7 +120,7 @@ type Scorer struct {
 
 	// closer releases the inference engine, when one owns resources (the ORT
 	// sessions). Nil for an injected Inferer, e.g. in tests.
-	closer io.Closer
+	closers []io.Closer
 	// info describes the loaded engine for logging: runtime version, model,
 	// whether XNNPACK attached. Set once at construction, never mutated.
 	info string
@@ -145,6 +147,27 @@ type Scorer struct {
 	resetReq bool
 }
 
+type ScoreEvent struct {
+	Score          float32
+	Threshold      float32
+	At             time.Time
+	Sequence       uint16
+	Crossed        bool
+	BargeThreshold bool
+}
+
+// Head is an optional classifier fed from Scorer's Detector. Its classifier
+// sees the exact same 16x96 embedding window as the primary wake head; Enabled
+// is checked on the worker, so an unarmed stop head incurs no classifier cost.
+type Head struct {
+	Classifier wakeword.Classifier
+	Threshold  float32
+	Enabled    func() bool
+	OnCross    func(score, threshold float32, at time.Time, sequence uint16)
+
+	lastCross time.Time
+}
+
 // scoredFrame keeps the data-plane position associated with the audio handed
 // to inference. The scorer runs asynchronously, so time.Now at a crossing is
 // not a reliable substitute for this sequence number.
@@ -163,11 +186,18 @@ type scoredFrame struct {
 // speaker was streaming at the instant the frame was SCORED, and by the time a
 // callback asks, playback may have ended.
 func NewScorer(inf wakeword.Inferer, threshold float32, onCross func(score, threshold float32, at time.Time, sequence uint16)) *Scorer {
+	return NewScorerWithHeads(inf, threshold, onCross)
+}
+
+// NewScorerWithHeads creates one non-blocking worker and one shared feature
+// pipeline. Every optional head is classified against the same embeddings.
+func NewScorerWithHeads(inf wakeword.Inferer, threshold float32, onCross func(score, threshold float32, at time.Time, sequence uint16), heads ...Head) *Scorer {
 	s := &Scorer{
 		det:       wakeword.New(inf),
 		threshold: threshold,
 		refract:   DefaultRefractory,
 		onCross:   onCross,
+		head:      heads,
 		ch:        make(chan scoredFrame, queueFrames),
 		done:      make(chan struct{}),
 		quit:      make(chan struct{}),
@@ -197,6 +227,14 @@ func (s *Scorer) SetBargeThreshold(t float32, active func() bool) {
 	s.mu.Lock()
 	s.bargeThreshold = t
 	s.speakerActive = active
+	s.mu.Unlock()
+}
+
+// SetScoreCallback observes every trusted primary score on the scorer worker.
+// The callback must not block; capture selection only copies bounded RAM.
+func (s *Scorer) SetScoreCallback(callback func(ScoreEvent)) {
+	s.mu.Lock()
+	s.onScore = callback
 	s.mu.Unlock()
 }
 
@@ -321,8 +359,8 @@ func (s *Scorer) Close() {
 		close(s.quit)
 		<-s.done
 		// After the goroutine has exited, so no inference is in flight.
-		if s.closer != nil {
-			_ = s.closer.Close()
+		for _, closer := range s.closers {
+			_ = closer.Close()
 		}
 	})
 }
@@ -387,10 +425,40 @@ func (s *Scorer) run() {
 			s.stats.Crossings++
 			s.lastCross = now
 		}
+		onScore := s.onScore
+		bargeThreshold := s.bargeThreshold > 0 && threshold == s.bargeThreshold
 		s.mu.Unlock()
 
+		if onScore != nil {
+			onScore(ScoreEvent{
+				Score: score, Threshold: threshold, At: now,
+				Sequence: frame.sequence, Crossed: crossed,
+				BargeThreshold: bargeThreshold,
+			})
+		}
 		if crossed && s.onCross != nil {
 			s.onCross(score, threshold, now, frame.sequence)
+		}
+		// Optional heads share the already-computed feature ring. They remain
+		// completely off while disabled, which is how stop detection avoids
+		// permanent classifier work between armed turns.
+		for i := range s.head {
+			h := &s.head[i]
+			if h.Enabled != nil && !h.Enabled() {
+				continue
+			}
+			headScore, err := s.det.ScoreWith(h.Classifier)
+			if err != nil {
+				s.recordErr(err)
+				continue
+			}
+			if headScore < h.Threshold || now.Sub(h.lastCross) < s.refract {
+				continue
+			}
+			h.lastCross = now
+			if h.OnCross != nil {
+				h.OnCross(headScore, h.Threshold, now, frame.sequence)
+			}
 		}
 	}
 }

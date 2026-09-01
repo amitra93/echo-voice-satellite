@@ -54,6 +54,13 @@ def test_filename_rejects_unsafe_inputs():
     assert tc.filename("", 1, "act", 0.5) is None
 
 
+def test_stop_capture_kinds_round_trip_through_filename():
+    for kind in ("stop_act", "stop_miss", "false_stop", "playback_negative"):
+        name = tc.filename("dev", 1, kind, 0.5)
+        assert name is not None
+        assert tc.parse_filename(name)["kind"] == kind
+
+
 def test_parse_filename_rejects_junk():
     assert tc.parse_filename("G090LF11.wav") is None
     assert tc.parse_filename("G090LF11_1_act.wav") is None
@@ -259,6 +266,19 @@ def test_export_zip_includes_a_provenance_manifest(tmp_path):
     clip = manifest["clips"][0]
     assert clip["bucket"] == "positive" and clip["kind"] == "miss"
     assert abs(clip["score"] - 0.32) < 1e-9
+
+
+def test_export_zip_preserves_stop_capture_provenance(tmp_path):
+    db = _db(tmp_path)
+    name = tc.save("stop", "dev1", _pcm(20), "playback_negative", 0.32,
+                   db_path=db, ts_ms=5)
+    tc.label("stop", name, "negative", db)
+    with zipfile.ZipFile(io.BytesIO(tc.export_zip("stop", db))) as z:
+        manifest = json.loads(z.read("manifest.json"))
+    assert manifest["clips"] == [
+        {"bucket": "negative", "name": name, "kind": "playback_negative",
+         "score": 0.32, "device_id": "dev1", "ts_ms": 5, "trim": None},
+    ]
 
 
 def test_export_zip_can_delete_exported_labelled_captures(tmp_path):

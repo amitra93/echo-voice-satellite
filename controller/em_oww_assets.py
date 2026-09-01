@@ -147,6 +147,9 @@ def classifier_source(oww_model: str,
     name = (oww_model or "").strip()
     if not name:
         return None
+    if name == em_oww_models.BUILTIN_STOP_MODEL:
+        p = em_oww_models.BUILTIN_STOP_PATH
+        return p if p.is_file() else None
     if name.endswith(".onnx"):
         p = Path(name)
         if not p.is_absolute() and models_dir is not None:
@@ -166,6 +169,9 @@ class Asset:
     md5: str
     size: int
     kind: str  # "runtime" | "shared" | "classifier"
+    # Selected wake/stop classifiers consume one of the four protected slots.
+    # Stock classifiers included only for future wake selection do not.
+    selected: bool = False
 
 
 @dataclass
@@ -243,6 +249,11 @@ def desired_assets(models: list[str],
     wanted = list(models)
     if include_stock:
         wanted += [m for m in STOCK_MODELS if m not in wanted]
+    selected_stems = {
+        em_oww_models.prediction_key(model)
+        for model in models
+        if model
+    }
     for model in wanted:
         stem = em_oww_models.prediction_key(model)
         if not stem or stem in seen:
@@ -253,7 +264,8 @@ def desired_assets(models: list[str],
             problems.append(f"wake model '{model}' has no .onnx the device could use")
             continue
         assets.append(Asset(f"{stem}.onnx", src, md5_file(src),
-                            src.stat().st_size, "classifier"))
+                            src.stat().st_size, "classifier",
+                            stem in selected_stems))
 
     return assets, problems
 
@@ -313,7 +325,9 @@ def plan_sync(desired: list[Asset],
         reverse=True,
     )
 
-    # `slots` budgets the LEFTOVERS, not every classifier on the device.
+    # Selected wake and stop classifiers consume protected slots. The selected
+    # pair leaves two of the four slots for rollback/A-B models; stock models
+    # included for ordinary wake selection remain outside this custom budget.
     #
     # It used to be a budget for all of them (`slots - len(desired)`), which
     # was right while only the selected model was ever desired. Now that the
@@ -322,8 +336,10 @@ def plan_sync(desired: list[Asset],
     # model a user had been given. Stock models are required by definition and
     # already excluded from `extras` via `required`; what is left to decide is
     # purely how many previously-used CUSTOM classifiers to keep.
-    p.keep.extend(extras[:slots])
-    p.prune.extend(extras[slots:])
+    selected = sum(a.selected for a in desired if a.kind == "classifier")
+    leftover_slots = max(0, slots - selected)
+    p.keep.extend(extras[:leftover_slots])
+    p.prune.extend(extras[leftover_slots:])
 
     return p
 
@@ -353,6 +369,13 @@ def missing_selected_classifier(desired: list[Asset],
         return None
     have = actual.get(sel.name)
     return None if (have is not None and have[0] == sel.md5) else sel.name
+
+
+def missing_required_classifiers(desired: list[Asset],
+                                actual: dict[str, tuple[str, int]]) -> list[str]:
+    """Every selected classifier absent or mismatched from a known inventory."""
+    return [a.name for a in desired if a.kind == "classifier" and a.selected
+            and (a.name not in actual or actual[a.name][0] != a.md5)]
 
 
 def parse_free_mb(df_line: str) -> int | None:

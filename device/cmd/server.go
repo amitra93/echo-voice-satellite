@@ -32,6 +32,7 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/outchain"
 	"github.com/wilbowes/EchoMuse/internal/sendspin"
 	"github.com/wilbowes/EchoMuse/internal/server"
+	"github.com/wilbowes/EchoMuse/internal/stopword"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
 	"github.com/wilbowes/EchoMuse/internal/wifi"
 	pkgbuttons "github.com/wilbowes/EchoMuse/pkg/buttons"
@@ -151,6 +152,35 @@ func main() {
 		},
 		func() { dataClient.StopMic() },
 	)
+	controlClient.OnWakeGrant(func(requestID, turnID, source string, activationSeq uint16, expires time.Time) {
+		if s.IsMuted() {
+			log.Printf("[wake] grant %s ignored — device is muted", requestID)
+			return
+		}
+		if source == "wakeword" && dataClient.ShadowScorer() == nil {
+			log.Printf("[wake] grant %s ignored — detector unavailable", requestID)
+			return
+		}
+		if !dataClient.GrantMic(requestID, activationSeq, source == "wakeword", expires) {
+			log.Printf("[wake] grant %s ignored — activation preroll unavailable", requestID)
+			dataClient.DenyCapture(requestID)
+			return
+		}
+		dataClient.GrantCapture(requestID)
+		if raw := config.Get().Snapshot().ListeningAnim; len(raw) > 0 {
+			var spec server.AnimSpec
+			if err := json.Unmarshal(raw, &spec); err == nil && spec.Pattern != "" {
+				s.StartAnim(spec)
+			}
+		}
+		controlClient.SendWakeStarted(requestID, turnID)
+	})
+	controlClient.OnWakeDeny(func(requestID, source, _ string) {
+		if source == "wakeword" {
+			dataClient.DenyCapture(requestID)
+		}
+	})
+	controlClient.OnCaptureAck(func(captureID string) { dataClient.AckCapture(captureID) })
 
 	// Device-rendered ring animations (led_anim) — the animation engine
 	// runs on the device's own ticker, immune to controller/WiFi jitter.
@@ -305,10 +335,39 @@ func main() {
 		applyBleConfig(bleScanner)
 		applyOutputChainConfig(pcmSpeaker)
 		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
+		snap := config.Get().Snapshot()
+		dataClient.ConfigureWakeCaptures(
+			snap.SaveWakeCaptures != nil && *snap.SaveWakeCaptures,
+			snap.WakeCaptureSec,
+			func() float64 {
+				if snap.WakeNearMissFloor != nil {
+					return *snap.WakeNearMissFloor
+				}
+				return 0.05
+			}(),
+			snap.OwwModel,
+			shadow.ClassifierMD5(snap.OwwModel),
+		)
+		applyStopConfig(dataClient)
+		reportStopStatus(dataClient, controlClient)
 		if msg.SendspinServer != "" {
 			sendspinManager.Configure(msg.SendspinServer)
 		}
 	})
+
+	dataClient.OnStopDetected(func(arm stopword.Arm, score, threshold float32, at time.Time) {
+		// The local flush is authoritative; the controller notification below
+		// is intentionally best effort and must not delay silence.
+		pcmSpeaker.Flush()
+		s.StartAnim(server.AnimSpec{Pattern: "pulse", Colors: [][3]uint8{{0, 180, 80}}, PeriodMs: 180, TTLSec: 1})
+		ageMs := time.Since(at).Milliseconds()
+		log.Printf("[stopword] accepted generation %d score %.3f", arm.Generation, score)
+		controlClient.SendStopDetected(arm.TurnID, arm.Generation, arm.Phase, score, threshold, ageMs)
+	})
+	controlClient.OnStopArm(func(turnID string, generation uint64, phase string, expiry time.Duration) {
+		dataClient.ArmStop(turnID, generation, phase, expiry)
+	})
+	controlClient.OnStopDisarm(dataClient.DisarmStop)
 
 	// Speaker flush — barge-in: cut buffered TTS the moment the controller
 	// hears the wake word during playback.
@@ -869,19 +928,78 @@ func applyOutputChainConfig(spk *speaker.PcmSpeaker) {
 // changed" is the difference between a stable shadow run and one that is
 // perpetually warming up.
 var shadowState struct {
-	mode    string
+	mode      string
+	model     string
+	stopModel string
+	lastErr   string
+}
+
+var stopState struct {
 	model   string
 	lastErr string
+}
+
+// applyStopConfig loads the separate stop classifier without enabling any
+// inference. DataClient only feeds it while a generation-tagged stop_arm is
+// live, preserving the idle CPU budget and keeping wake behavior independent.
+func applyStopConfig(dc *client.DataClient) {
+	snap := config.Get().Snapshot()
+	if snap.StopModel == "" {
+		if dc.StopScorer() != nil {
+			dc.SetStopScorer(nil)
+		}
+		stopState.model, stopState.lastErr = "", ""
+		dc.SetSharedStop(false)
+		return
+	}
+	// A combined scorer is installed by applyShadowConfig when local wake
+	// scoring is enabled. Never replace it with a second feature pipeline.
+	if dc.SharedStop() {
+		stopState.model, stopState.lastErr = snap.StopModel, ""
+		return
+	}
+	if sc := dc.StopScorer(); sc != nil && stopState.model == snap.StopModel {
+		sc.SetThreshold(float32(snap.StopThreshold))
+		return
+	}
+	sc, err := shadow.Open(snap.StopModel, float32(snap.StopThreshold), func(score, threshold float32, at time.Time, _ uint16) {
+		dc.HandleStopCrossing(score, threshold, at)
+	})
+	if err != nil {
+		if msg := err.Error(); msg != stopState.lastErr {
+			stopState.lastErr = msg
+			log.Printf("[stopword] not started: %v", err)
+		}
+		dc.SetStopScorer(nil)
+		stopState.model = snap.StopModel
+		return
+	}
+	dc.SetStopScorer(sc)
+	dc.SetSharedStop(false)
+	stopState.model, stopState.lastErr = snap.StopModel, ""
+	log.Printf("[stopword] local scoring ready (%s, threshold %.2f)", sc.Info(), snap.StopThreshold)
+}
+
+// reportStopStatus runs after both scorer reconciliation paths. With local wake
+// enabled, the stop head belongs to ShadowScorer; otherwise it is standalone.
+func reportStopStatus(dc *client.DataClient, cc *client.ControlClient) {
+	snap := config.Get().Snapshot()
+	ready := dc.SharedStop() || dc.StopScorer() != nil
+	errMsg := stopState.lastErr
+	if !ready && snap.StopModel != "" && errMsg == "" {
+		errMsg = shadowState.lastErr
+	}
+	if !ready && snap.StopModel != "" && errMsg == "" {
+		errMsg = "stop scorer unavailable"
+	}
+	cc.SendStopStatus(ready, snap.StopModel, errMsg)
 }
 
 // applyShadowConfig starts, stops or re-points on-device wake word scoring from
 // the current effective config.
 //
-// Failure to load is an ordinary condition, not an error state: the runtime and
-// models are installed out of band, so "not installed" is what every device
-// reports until someone puts them there. It is logged once per distinct reason
-// rather than on every config push, and the device carries on with
-// controller-side wake word exactly as before.
+// Failure to load makes local wake detection unavailable. It is logged once per
+// distinct reason and reported explicitly; there is no controller-side fallback.
 func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 	spk *speaker.PcmSpeaker, srv *server.Server) {
 	snap := config.Get().Snapshot()
@@ -893,13 +1011,16 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 			dc.SetShadowScorer(nil)
 			log.Printf("[shadow] on-device wake word disabled")
 		}
-		shadowState.mode, shadowState.model, shadowState.lastErr = mode, model, ""
+		shadowState.mode, shadowState.model, shadowState.stopModel, shadowState.lastErr = mode, model, "", ""
+		dc.SetSharedStop(false)
+		cc.SendWakeStatus(false, model, "", "local wake detection disabled")
 		return
 	}
 
 	// Already running for this model: thresholds and the mode change live.
-	if sc := dc.ShadowScorer(); sc != nil && shadowState.model == model {
+	if sc := dc.ShadowScorer(); sc != nil && shadowState.model == model && shadowState.stopModel == snap.StopModel {
 		sc.SetThreshold(threshold)
+		sc.SetScoreCallback(dc.ObserveWakeScore)
 		if snap.BargeInEnabled != nil && *snap.BargeInEnabled && spk != nil {
 			sc.SetBargeThreshold(float32(snap.BargeInThreshold), spk.IsStreaming)
 		} else {
@@ -909,6 +1030,7 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 			shadowState.mode = mode
 			log.Printf("[shadow] mode now %q (%s)", mode, actsOnCrossings(mode))
 		}
+		cc.SendWakeStatus(true, model, shadow.ClassifierMD5(model), "")
 		return
 	}
 
@@ -916,16 +1038,28 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 	// between "shadow" and "on" costs nothing: the scorer is identical in
 	// both and rebuilding it would reload a 12MB runtime and open a fresh
 	// ~1.28s not-ready window every time someone changed their mind.
-	sc, err := shadow.Open(model, threshold, func(score, crossed float32, at time.Time, sequence uint16) {
-		onWakeCrossing(cc, srv, score, crossed, at, sequence)
-	})
+	var sc *shadow.Scorer
+	var err error
+	if snap.StopModel != "" {
+		sc, err = shadow.OpenWithHead(model, threshold, func(score, crossed float32, at time.Time, sequence uint16) {
+			onWakeCrossing(dc, cc, srv, score, crossed, at, sequence)
+		}, snap.StopModel, float32(snap.StopThreshold), dc.StopArmed, func(score, crossed float32, at time.Time, _ uint16) {
+			dc.HandleStopCrossing(score, crossed, at)
+		})
+	} else {
+		sc, err = shadow.Open(model, threshold, func(score, crossed float32, at time.Time, sequence uint16) {
+			onWakeCrossing(dc, cc, srv, score, crossed, at, sequence)
+		})
+	}
 	if err != nil {
 		if msg := err.Error(); msg != shadowState.lastErr {
 			shadowState.lastErr = msg
 			log.Printf("[shadow] not started: %v", err)
 		}
 		dc.SetShadowScorer(nil)
-		shadowState.mode, shadowState.model = mode, model
+		shadowState.mode, shadowState.model, shadowState.stopModel = mode, model, snap.StopModel
+		dc.SetSharedStop(false)
+		cc.SendWakeStatus(false, model, "", err.Error())
 		return
 	}
 	// Mirror the controller's barge-in behaviour: while the speaker is
@@ -934,8 +1068,16 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 	if snap.BargeInEnabled != nil && *snap.BargeInEnabled && spk != nil {
 		sc.SetBargeThreshold(float32(snap.BargeInThreshold), spk.IsStreaming)
 	}
+	sc.SetScoreCallback(dc.ObserveWakeScore)
 	dc.SetShadowScorer(sc)
-	shadowState.mode, shadowState.model, shadowState.lastErr = mode, model, ""
+	if snap.StopModel != "" {
+		dc.SetStopScorer(nil)
+		dc.SetSharedStop(true)
+	} else {
+		dc.SetSharedStop(false)
+	}
+	shadowState.mode, shadowState.model, shadowState.stopModel, shadowState.lastErr = mode, model, snap.StopModel, ""
+	cc.SendWakeStatus(true, model, shadow.ClassifierMD5(model), "")
 	log.Printf("[shadow] on-device wake word scoring (%s, threshold %.2f) — %s",
 		sc.Info(), threshold, actsOnCrossings(mode))
 }
@@ -950,8 +1092,8 @@ func actsOnCrossings(mode string) string {
 	return "reporting only, not triggering"
 }
 
-// onWakeCrossing is what a threshold crossing does, decided fresh each time
-// from the current config rather than at scorer-construction time.
+// onWakeCrossing sends an admission request. It never changes LEDs or starts
+// audio; those actions happen only after a matching controller grant.
 //
 // Mute is checked HERE, on the device, and that placement is deliberate. Mute
 // is device-sovereign: the device already refuses every mic_start while muted
@@ -965,41 +1107,18 @@ func actsOnCrossings(mode string) string {
 // during playback. The controller records it against the turn, and recording
 // the nominal threshold instead is what once made every barge-in look like a
 // wake that had fired below its own bar.
-func onWakeCrossing(cc *client.ControlClient, srv *server.Server,
+func onWakeCrossing(dc *client.DataClient, cc *client.ControlClient, srv *server.Server,
 	score, crossed float32, at time.Time, activationSeq uint16) {
 	ageMs := time.Since(at).Milliseconds()
 	if config.Get().Snapshot().OwwOnDevice != config.OnDeviceOn {
-		cc.SendOwwShadowCross(score, ageMs)
 		return
 	}
 	if srv != nil && srv.IsMuted() {
-		// Still reported, because a crossing while muted is real data about
-		// the detector and shadow mode would have recorded it. It just does
-		// not become a turn.
-		cc.SendOwwShadowCross(score, ageMs)
 		log.Printf("[shadow] wake %.3f suppressed — muted", score)
 		return
 	}
-	// #263: light the listening ring NOW, from the one place that already
-	// knows the wake happened. The crossing used to travel to the controller
-	// and wait for leds_listening to come back — measured at +522ms before
-	// the animation moved, on a link whose control-plane tail reaches 2s
-	// (#139). The controller's own frame lands within an RTT and takes over
-	// via StartAnim's generation counter; same pattern as the volume arc,
-	// where the device draws immediately and the authoritative state follows.
-	// No new arbitration: the LED priority system already handles a newer
-	// frame superseding a local one. Only devices that have received a
-	// listening spec (config push) can do this; everyone else keeps the old
-	// behaviour exactly.
-	if srv != nil {
-		if raw := config.Get().Snapshot().ListeningAnim; len(raw) > 0 {
-			var spec server.AnimSpec
-			if err := json.Unmarshal(raw, &spec); err == nil && spec.Pattern != "" {
-				srv.StartAnim(spec)
-			}
-		}
-	}
-	cc.SendOwwWake(score, crossed, ageMs, activationSeq)
+	requestID := cc.SendWakeRequest(config.Get().Snapshot().OwwModel, score, crossed, ageMs, activationSeq)
+	dc.BindActivationRequest(activationSeq, requestID)
 }
 
 func applyBleConfig(scanner *bluetooth.Scanner) {

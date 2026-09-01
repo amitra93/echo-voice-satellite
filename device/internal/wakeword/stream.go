@@ -95,6 +95,13 @@ type Inferer interface {
 	Classify(feats []float32) (float32, error)
 }
 
+// Classifier is a classifier head over the shared 16x96 embedding window.
+// Separating it from Inferer lets one Detector compute mel/embedding features
+// once and fan those features out to multiple phrase-specific heads.
+type Classifier interface {
+	Classify(feats []float32) (float32, error)
+}
+
 // Detector holds the streaming state for one audio source.
 //
 // Not safe for concurrent use: the device drives it from the single mic
@@ -106,8 +113,8 @@ type Detector struct {
 	remainder []int16 // samples not yet forming a whole ChunkSamples
 	accum     int     // samples buffered since the last melspec run
 
-	mel    []float32 // melFrames x MelBins, row-major
-	feat   []float32 // featFrames x FeatDim, row-major
+	mel     []float32 // melFrames x MelBins, row-major
+	feat    []float32 // featFrames x FeatDim, row-major
 	scratch []float32 // reused Embed input, avoids a per-chunk allocation
 }
 
@@ -218,11 +225,20 @@ func (d *Detector) Push(samples []int16) (n int, err error) {
 // Score runs the classifier over the most recent FeatWindow embeddings.
 // Returns ErrNotReady until enough have accumulated.
 func (d *Detector) Score() (float32, error) {
+	return d.ScoreWith(d.inf)
+}
+
+// ScoreWith runs a classifier head over the Detector's most recent shared
+// feature window. It never advances or mutates the streaming feature pipeline.
+func (d *Detector) ScoreWith(classifier Classifier) (float32, error) {
 	if !d.Ready() {
 		return 0, ErrNotReady
 	}
+	if classifier == nil {
+		return 0, errors.New("wakeword: nil classifier")
+	}
 	feats := d.feat[len(d.feat)-FeatWindow*FeatDim:]
-	s, err := d.inf.Classify(feats)
+	s, err := classifier.Classify(feats)
 	if err != nil {
 		return 0, fmt.Errorf("wakeword: classify: %w", err)
 	}

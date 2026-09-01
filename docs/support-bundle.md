@@ -2,7 +2,7 @@
 
 When something misbehaves and it isn't obvious why, a support bundle collects
 the diagnostics in one file you can attach to a
-[GitHub issue](https://github.com/wilbowes/EchoMuse/issues).
+[GitHub issue](https://github.com/amitra93/echo-voice-satellite/issues).
 
 **Settings → Support → Collect bundle**, then Download, or
 `GET /api/support/bundle` if you prefer the API. Admin only.

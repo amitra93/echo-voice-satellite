@@ -10,13 +10,9 @@ Known gaps, deliberately not closed by the Phase 4 cutover (mechanical
 repoint + delete of the ESPHome-impersonation backend) — each is a real,
 scoped follow-up rather than a silent omission:
 
-- **Barge-in does not yet abort a running HA pipeline.** `_barge_watcher`
-  (`em_controller.py`) still calls `abort_ha_run` on a barge-in exactly as it
-  called the ESPHome-mode equivalent, but that call does not reach a pipeline
-  HA has already started — `turn.cancel` reaches this module's turn state,
-  not HA's `AssistSatelliteEntity`. `em_runbarrier`'s serialisation logic is
-  kept for when this is wired through (see CLAUDE.md's "Barge-in
-  serialisation is currently unused, not removed").
+- **Barge-in is device-originated.** A local device wake request is granted
+  against the active turn and emits `turn.cancel` to HACS before the
+  interrupting turn starts.
 - **No SNR-relative no-speech backstop via `em_turnclock`.** The old
   ESPHome-mode turn used `em_turnclock` to end a turn against each room's
   measured noise floor rather than a fixed timer; this module does not yet
@@ -83,6 +79,8 @@ BUTTON_HOLD_MS = 750        # device-measured heldMs threshold for a HOLD gestur
 # (a healthy turn reaches /endpoint in a few seconds) while still recovering
 # a genuinely stuck turn in a bounded time instead of hours.
 ENDPOINT_WAIT_TIMEOUT_S = 30.0
+TURN_ACCEPT_TIMEOUT_S = 3.0
+WAKE_STARTED_TIMEOUT_S = 1.0
 
 # String sentinels queued into device.voice_queue in place of audio bytes —
 # distinct values (not just "any string") because _send_mic below tells them
@@ -103,6 +101,10 @@ class Turn:
     post_turn_play: object
     kind: str = "conversation"
     socket_ready: asyncio.Event = field(default_factory=asyncio.Event)
+    accepted: asyncio.Event = field(default_factory=asyncio.Event)
+    rejected: asyncio.Event = field(default_factory=asyncio.Event)
+    device_started: asyncio.Event = field(default_factory=asyncio.Event)
+    request_id: str | None = None
     endpoint: asyncio.Event = field(default_factory=asyncio.Event)
     cancelled: asyncio.Event = field(default_factory=asyncio.Event)
     # The cause of an early end is diagnostic; cancellation itself still gates
@@ -137,6 +139,9 @@ class Turn:
     stt_only: bool = False
     mic_audio: bytearray = field(default_factory=bytearray)
     tts_audio: bytearray = field(default_factory=bytearray)
+    stop_generation: int | None = None
+    stop_phase: str | None = None
+    stop_detection: dict = field(default_factory=dict)
 
 
 class TurnEngine:
@@ -247,6 +252,11 @@ async def create_turn(request: web.Request) -> web.Response:
     device = em_api._devices.get(device_id)
     if device is None:
         return web.json_response({"error": "device_offline"}, status=409)
+    # Test/third-party lightweight device doubles predate stop readiness; live
+    # Device always defines both attributes and is therefore fail-closed.
+    if not (getattr(device, "stopword_capable", True)
+            and getattr(device, "stop_model_ready", True)):
+        return web.json_response({"error": "stopword_unavailable"}, status=409)
     try:
         body = await request.json()
     except Exception:
@@ -273,6 +283,37 @@ async def create_turn(request: web.Request) -> web.Response:
     return web.json_response({"turn_id": turn_id, "kind": kind}, status=201)
 
 
+async def _arm_stop(turn: Turn, phase: str) -> None:
+    """Arm one device-local interrupt generation for this active turn."""
+    device = turn.device
+    if not (getattr(device, "stopword_capable", False)
+            and getattr(device, "stop_model_ready", False)):
+        return
+    device.stop_generation += 1
+    generation = device.stop_generation
+    # The controller and device each reject stale generations. The device's
+    # deadline remains a dead-man if this controller stalls or disconnects.
+    expires = time.monotonic() + 135.0
+    decision = device.stop_state.arm(turn.turn_id, generation, phase, expires)
+    if decision.action != "armed":
+        return
+    turn.stop_generation = generation
+    turn.stop_phase = phase
+    await device.send_control({
+        "type": "stop_arm", "turnId": str(turn.turn_id),
+        "generation": generation, "phase": phase, "expiryMs": 135_000,
+        "threshold": getattr(device, "stop_threshold", 0.75),
+    })
+
+
+async def _disarm_stop(turn: Turn) -> None:
+    if turn.stop_generation is None:
+        return
+    generation, turn.stop_generation = turn.stop_generation, None
+    turn.device.stop_state.disarm(generation)
+    await turn.device.send_control({"type": "stop_disarm", "generation": generation})
+
+
 async def turn_action(request: web.Request) -> web.Response:
     try:
         turn_id = int(request.match_info["tid"])
@@ -287,10 +328,18 @@ async def turn_action(request: web.Request) -> web.Response:
         turn.endpoint_mono = turn.endpoint_mono or time.monotonic()
         turn.endpoint.set()
         await _call(turn.on_thinking)
+        await _arm_stop(turn, "thinking")
         await _push_event({
             "type": "turn.state", "device_id": turn.device.device_id,
             "turn_id": turn_id, "state": "processing",
         })
+    elif action == "accept":
+        if not turn.rejected.is_set():
+            turn.accepted.set()
+    elif action == "reject":
+        if not turn.accepted.is_set():
+            turn.rejected.set()
+            _end_turn(turn, "backend_unavailable")
     elif action == "cancel":
         _end_turn(turn, "cancelled")
     elif action == "tts/end":
@@ -299,6 +348,7 @@ async def turn_action(request: web.Request) -> web.Response:
         turn.tts_queue.put_nowait(None)
     elif action == "tts/start":
         turn.tts_started_mono = turn.tts_started_mono or time.monotonic()
+        await _arm_stop(turn, "playback")
     elif action == "transcript":
         try:
             body = await request.json()
@@ -503,6 +553,7 @@ def _turn_record(turn: Turn, outcome: str) -> dict:
         "tts_latency_ms": round((end - turn.tts_started_mono) * 1000)
         if turn.tts_started_mono else None,
         "tts_bytes": len(turn.tts_audio) if turn.tts_audio else None,
+        **turn.stop_detection,
     }
 
 
@@ -545,6 +596,25 @@ async def _remember_turn(device, turn_id: int) -> None:
         device.turn_history.append(rec)
 
 
+async def _finish_unstarted_turn(turn: Turn, wake_columns: dict, outcome: str) -> None:
+    """Persist and announce a provisional turn that never admitted device audio."""
+    _end_turn(turn, outcome)
+    await _push_event({
+        "type": "turn.cancel", "device_id": turn.device.device_id,
+        "turn_id": turn.turn_id, "reason": outcome,
+    })
+    await asyncio.get_running_loop().run_in_executor(
+        None, db.update_turn, turn.turn_id,
+        {**_turn_record(turn, outcome), **wake_columns},
+    )
+    await _remember_turn(turn.device, turn.turn_id)
+    await _push_event({
+        "type": "turn.terminal", "device_id": turn.device.device_id,
+        "turn_id": turn.turn_id, "outcome": outcome,
+    })
+    await _disarm_stop(turn)
+
+
 async def _finish_created_turn(turn: Turn) -> None:
     try:
         result = await _run_turn(turn)
@@ -563,6 +633,7 @@ async def _finish_created_turn(turn: Turn) -> None:
         "type": "turn.terminal", "device_id": turn.device.device_id,
         "turn_id": turn.turn_id, "outcome": outcome,
     })
+    await _disarm_stop(turn)
     ENGINE.turns.pop(turn.turn_id, None)
     ENGINE.audio_sockets.pop(turn.turn_id, None)
 
@@ -576,6 +647,9 @@ async def trigger_voice_turn(
     initial_audio: tuple[bytes, ...] = (),
     on_transcript=None,
     stt_only: bool = False,
+    request_id: str | None = None,
+    on_admitted=None,
+    admission_valid=None,
 ) -> bool:
     """Offer a controller-triggered turn to the connected HACS integration."""
     # Pop, not read: a continuation turn loops back into trigger_voice_turn
@@ -583,9 +657,17 @@ async def trigger_voice_turn(
     # (mirrors em_esphome.trigger_voice_turn's same pop).
     wake_info = device.last_wake or {}
     device.last_wake = None
-    turn_id = await asyncio.get_running_loop().run_in_executor(
-        None, db.create_turn, device.device_id, trigger_label
-    )
+    create_task = asyncio.create_task(asyncio.to_thread(
+        db.create_turn, device.device_id, trigger_label
+    ))
+    try:
+        turn_id = await asyncio.shield(create_task)
+    except asyncio.CancelledError:
+        turn_id = await create_task
+        await asyncio.to_thread(
+            db.update_turn, turn_id, {"outcome": "disconnected"}
+        )
+        raise
     turn = Turn(
         turn_id, device, on_thinking, post_turn_play,
         preroll_remaining=preroll_discard,
@@ -593,21 +675,78 @@ async def trigger_voice_turn(
         initial_audio=initial_audio,
         on_transcript=on_transcript,
         stt_only=stt_only,
+        request_id=request_id,
     )
     ENGINE.turns[turn_id] = turn
-    await _push_event({
+    offer = {
         "type": "wake.offer",
         "device_id": device.device_id,
         "turn_id": turn_id,
         "trigger": trigger_label,
-    })
+    }
+    if request_id is not None:
+        offer["request_id"] = request_id
     wake_columns = {
         "wake_model":     wake_info.get("model"),
         "wake_score":     wake_info.get("score"),
         "wake_threshold": wake_info.get("threshold"),
         "noise_floor":    wake_info.get("noise_floor"),
     }
+    terminalized = False
     try:
+        await _push_event(offer)
+    except asyncio.CancelledError:
+        await asyncio.shield(_finish_unstarted_turn(
+            turn, wake_columns, "disconnected"
+        ))
+        ENGINE.turns.pop(turn_id, None)
+        ENGINE.audio_sockets.pop(turn_id, None)
+        raise
+    try:
+        if request_id is not None:
+            accepted = asyncio.ensure_future(asyncio.gather(
+                turn.accepted.wait(), turn.socket_ready.wait()
+            ))
+            rejected = asyncio.create_task(turn.rejected.wait())
+            done, pending = await asyncio.wait(
+                (accepted, rejected), timeout=TURN_ACCEPT_TIMEOUT_S,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+            if not done or turn.rejected.is_set() or not turn.accepted.is_set():
+                await device.send_control({
+                    "type": "wake_deny", "requestId": request_id,
+                    "reason": "backend_unavailable",
+                })
+                await _finish_unstarted_turn(turn, wake_columns, "backend_unavailable")
+                terminalized = True
+                return False
+            if admission_valid is not None and not admission_valid():
+                await device.send_control({
+                    "type": "wake_deny", "requestId": request_id,
+                    "reason": "disconnected",
+                })
+                await _finish_unstarted_turn(turn, wake_columns, "disconnected")
+                terminalized = True
+                return False
+            await device.send_control({
+                "type": "wake_grant", "requestId": request_id,
+                "turnId": turn_id,
+            })
+            try:
+                await asyncio.wait_for(
+                    turn.device_started.wait(), WAKE_STARTED_TIMEOUT_S
+                )
+            except asyncio.TimeoutError:
+                await _finish_unstarted_turn(
+                    turn, wake_columns, "device_not_started"
+                )
+                terminalized = True
+                return False
+            if on_admitted is not None:
+                await on_admitted()
         result = await _run_turn(turn)
         outcome = _outcome_for(turn, result)
         await asyncio.get_running_loop().run_in_executor(
@@ -622,7 +761,19 @@ async def trigger_voice_turn(
             "turn_id": turn_id,
             "outcome": outcome,
         })
+        terminalized = True
+        await _disarm_stop(turn)
         return turn.continue_conversation
+    except asyncio.CancelledError:
+        if not terminalized:
+            cleanup = asyncio.create_task(_finish_unstarted_turn(
+                turn, wake_columns, "disconnected"
+            ))
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                await cleanup
+        raise
     except asyncio.TimeoutError:
         await asyncio.get_running_loop().run_in_executor(
             None, db.update_turn, turn_id,
@@ -634,6 +785,7 @@ async def trigger_voice_turn(
             "type": "turn.terminal", "device_id": device.device_id,
             "turn_id": turn_id, "outcome": "audio_timeout",
         })
+        await _disarm_stop(turn)
         return False
     finally:
         ENGINE.turns.pop(turn_id, None)
@@ -658,12 +810,75 @@ def cancel_voice_turn(
             _end_turn(turn, reason)
 
 
+def confirm_device_started(device, request_id: str, turn_id: int) -> bool:
+    turn = ENGINE.turns.get(turn_id)
+    if (turn is None or turn.device is not device
+            or turn.request_id != request_id or turn.cancelled.is_set()):
+        return False
+    turn.device_started.set()
+    return True
+
+
+async def stop_voice_turn(device_id: str, turn_id: int, detection: dict | None = None) -> bool:
+    """Cancel exactly one turn and ask its HACS owner to abort Assist/TTS."""
+    turn = ENGINE.turns.get(turn_id)
+    if turn is None or turn.device.device_id != device_id:
+        return False
+    if detection:
+        turn.stop_detection = detection
+    _end_turn(turn, "stopped")
+    await _push_event({
+        "type": "turn.cancel", "device_id": device_id, "turn_id": turn_id,
+        "reason": "stop",
+    })
+    return True
+
+
 def abort_ha_run(device_id: str) -> None:
     # This cannot yet abort AssistSatelliteEntity's running pipeline. Preserve
     # that limitation while recording why the locally interrupted turn ended.
     for turn in ENGINE.turns.values():
         if turn.device.device_id == device_id:
             _end_turn(turn, "barged", cancel=False)
+
+
+async def admit_barge(device, request_id: str, score: float, threshold: float,
+                      activation_seq: int, admission_valid=None) -> bool:
+    """Grant a device barge request and cancel its exact active HA turn."""
+    active = next(
+        (turn for turn in ENGINE.turns.values()
+         if turn.device is device and not turn.cancelled.is_set()),
+        None,
+    )
+    if active is None:
+        await device.send_control({
+            "type": "wake_deny", "requestId": request_id, "reason": "busy",
+        })
+        return False
+    if admission_valid is not None and not admission_valid():
+        await device.send_control({
+            "type": "wake_deny", "requestId": request_id,
+            "reason": "disconnected",
+        })
+        return False
+    _end_turn(active, "barged")
+    await _push_event({
+        "type": "turn.cancel", "device_id": device.device_id,
+        "turn_id": active.turn_id, "reason": "barge",
+    })
+    if getattr(device, "speaking", False):
+        await device.send_control({"type": "speaker_flush"})
+    device.barge_detected = True
+    device.barge_request_id = request_id
+    device.cancel_event.set()
+    device.last_wake = {
+        "model": device.oww_model,
+        "score": round(score, 4),
+        "threshold": round(threshold, 4),
+        "noise_floor": None,
+        "activation_seq": activation_seq,
+    }
+    return True
 
 
 def start_device_test_turn(device) -> asyncio.Task:

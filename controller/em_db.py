@@ -114,6 +114,12 @@ DEFAULT_DEVICE_CONFIG = {
     # room, like the LED meter curve, not a firmware push per attempt.
     "duckDb": -18.0,
     "owwModel":         "hey_jarvis_v0.1",
+    # Mandatory local interruption model. The fixed image asset is seeded as
+    # the fleet default; this remains overrideable per Wake word section.
+    "stopModel":        "stop",
+    # Conservative until real post-AFE field captures establish the calibrated
+    # value. One threshold applies to thinking and playback by design.
+    "stopThreshold":    0.75,
     # Multi-device wake SUPPRESSION window (ms), not a wait. The first
     # device to detect answers immediately; any other device detecting
     # within this window stands down. 0 disables. Costs no latency to
@@ -280,7 +286,7 @@ MIGRATIONS: list[str] = [
     INSERT OR IGNORE INTO system_config VALUES ('device_approval',       'strict');
     INSERT OR IGNORE INTO system_config VALUES ('session_expiry_days',   '30');
     INSERT OR IGNORE INTO system_config VALUES ('update_check_interval', '3600');
-    INSERT OR IGNORE INTO system_config VALUES ('github_repo',           'wilbowes/EchoMuse');
+    INSERT OR IGNORE INTO system_config VALUES ('github_repo',           'amitra93/echo-voice-satellite');
     INSERT OR IGNORE INTO system_config VALUES ('latest_version',        NULL);
     INSERT OR IGNORE INTO system_config VALUES ('latest_binary_url',     NULL);
     INSERT OR IGNORE INTO system_config VALUES ('last_update_check',     NULL);
@@ -775,6 +781,25 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '25' WHERE key = 'schema_version';
     """,
+
+    # ── v26 — mandatory local stop-word observability ──────────────────────
+    """
+    ALTER TABLE turns ADD COLUMN stop_model TEXT;
+    ALTER TABLE turns ADD COLUMN stop_score REAL;
+    ALTER TABLE turns ADD COLUMN stop_threshold REAL;
+    ALTER TABLE turns ADD COLUMN stop_phase TEXT;
+    ALTER TABLE turns ADD COLUMN stop_device_age_ms INTEGER;
+    ALTER TABLE turns ADD COLUMN stop_flush_ms INTEGER;
+    ALTER TABLE turns ADD COLUMN stop_cancel_ms INTEGER;
+    ALTER TABLE turns ADD COLUMN stop_hacs_ack_ms INTEGER;
+
+    ALTER TABLE wake_counters ADD COLUMN stops_accepted INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE wake_counters ADD COLUMN stops_stale INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE wake_counters ADD COLUMN stop_model_drops INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE wake_counters ADD COLUMN stop_model_errors INTEGER NOT NULL DEFAULT 0;
+
+    UPDATE system_config SET value = '26' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -850,8 +875,18 @@ def _fixup_v23(conn) -> None:
             )
 
 
+# NOT "ttsGainDb" — that one came back as a live playback-side control (TTS
+# output gain, part of the "playback" config section; see em_controller.py's
+# device.tts_gain_db and the dashboard's EQ panel), after this migration was
+# written to retire it alongside the capture-side AFE settings it happened to
+# ship next to. Only the capture/mic-processing keys the 2026-08-28
+# AFE-supersession note (JOURNAL.md) actually describes as gone stay listed
+# here. Left in the set, this fixup silently stripped ttsGainDb's default
+# straight back out of every database migrating through v24 — including a
+# brand new one, since v3 seeds global_device_config from DEFAULT_DEVICE_CONFIG
+# and v24 then immediately undid it on the very same fresh install.
 _RETIRED_AUDIO_CONFIG_KEYS = frozenset({
-    "ttsGainDb", "bassShelfHz", "subsonicHz", "limiterThreshold", "nsAsr",
+    "bassShelfHz", "subsonicHz", "limiterThreshold", "nsAsr",
 })
 
 
@@ -1644,6 +1679,14 @@ _TURN_COLUMNS = {
     "stt_latency_ms":   "stt_latency_ms",
     "ha_latency_ms":    "ha_latency_ms",
     "tts_latency_ms":   "tts_latency_ms",
+    "stop_model":       "stop_model",
+    "stop_score":       "stop_score",
+    "stop_threshold":   "stop_threshold",
+    "stop_phase":       "stop_phase",
+    "stop_device_age_ms": "stop_device_age_ms",
+    "stop_flush_ms":    "stop_flush_ms",
+    "stop_cancel_ms":   "stop_cancel_ms",
+    "stop_hacs_ack_ms": "stop_hacs_ack_ms",
 }
 
 
@@ -1898,6 +1941,10 @@ def bump_wake_counters(
     dev_max_score: float = 0.0,
     dev_max_infer_ms: int = 0,
     dev_max_gap_ms: int = 0,
+    stops_accepted: int = 0,
+    stops_stale: int = 0,
+    stop_model_drops: int = 0,
+    stop_model_errors: int = 0,
 ) -> None:
     """
     Accumulate into the current hour's wake_counters row (upsert).
@@ -1912,8 +1959,9 @@ def bump_wake_counters(
             """
             INSERT INTO wake_counters (device_id, hour_ts, near_misses, near_miss_max,
                                        underruns, dev_frames, dev_drops, dev_crossings,
-                                       dev_max_score, dev_max_infer_ms, dev_max_gap_ms)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                        dev_max_score, dev_max_infer_ms, dev_max_gap_ms,
+                                        stops_accepted, stops_stale, stop_model_drops, stop_model_errors)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT (device_id, hour_ts) DO UPDATE SET
                 near_misses   = near_misses + excluded.near_misses,
                 near_miss_max = MAX(near_miss_max, excluded.near_miss_max),
@@ -1923,11 +1971,16 @@ def bump_wake_counters(
                 dev_crossings = dev_crossings + excluded.dev_crossings,
                 dev_max_score = MAX(dev_max_score, excluded.dev_max_score),
                 dev_max_infer_ms = MAX(dev_max_infer_ms, excluded.dev_max_infer_ms),
-                dev_max_gap_ms   = MAX(dev_max_gap_ms, excluded.dev_max_gap_ms)
+                dev_max_gap_ms   = MAX(dev_max_gap_ms, excluded.dev_max_gap_ms),
+                stops_accepted = stops_accepted + excluded.stops_accepted,
+                stops_stale = stops_stale + excluded.stops_stale,
+                stop_model_drops = stop_model_drops + excluded.stop_model_drops,
+                stop_model_errors = stop_model_errors + excluded.stop_model_errors
             """,
             (device_id, hour_ts, _py(near_misses), _py(near_miss_max), _py(underruns),
-             _py(dev_frames), _py(dev_drops), _py(dev_crossings), _py(dev_max_score),
-             _py(dev_max_infer_ms), _py(dev_max_gap_ms)),
+              _py(dev_frames), _py(dev_drops), _py(dev_crossings), _py(dev_max_score),
+              _py(dev_max_infer_ms), _py(dev_max_gap_ms), _py(stops_accepted),
+              _py(stops_stale), _py(stop_model_drops), _py(stop_model_errors)),
         )
         conn.execute(
             "DELETE FROM wake_counters WHERE hour_ts < ?",

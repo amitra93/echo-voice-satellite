@@ -109,7 +109,11 @@ def _make_satellite(client=None, muted=False):
     entity.hass = _FakeHass()
     entity._active_turn_id = None
     entity._active_channel = None
+    entity._active_turn_token = object()
     entity._tts_task = None
+    entity._tts_turn_token = None
+    entity._pipeline_task = None
+    entity._offer_lock = asyncio.Lock()
     entity._transcript_sent = False
     entity._endpoint_sent = False
     entity._continue_conversation = False
@@ -355,6 +359,7 @@ def test_handle_wake_offer_attaches_audio_and_spawns_pipeline(monkeypatch):
     assert entity._active_turn_id == 9
     assert entity._active_channel is client.attached_channel
     assert ("attach_audio", 9) in client.calls
+    assert any(call[:3] == ("turn_action", 9, "accept") for call in client.calls)
     assert len(started) == 1
 
 
@@ -366,6 +371,18 @@ def test_handle_wake_offer_swallows_attach_failure_without_setting_active_turn()
     asyncio.run(entity._handle_wake_offer({"turn_id": 9, "device_id": "A"}))
 
     assert entity._active_turn_id is None
+
+
+def test_handle_wake_offer_rejects_a_second_turn_while_one_is_active():
+    client = _FakeClient()
+    entity, _client, _coordinator = _make_satellite(client)
+    entity._active_turn_id = 5
+
+    asyncio.run(entity._handle_wake_offer({"turn_id": 9, "device_id": "A"}))
+
+    assert ("turn_action", 9, "reject", None) in client.calls
+    assert not any(call[:2] == ("attach_audio", 9) for call in client.calls)
+    assert entity._active_turn_id == 5
     assert entity._active_channel is None
 
 
@@ -393,13 +410,15 @@ def test_run_wake_pipeline_no_transcript_endpoints_before_tts_end(monkeypatch):
     """Speech-start timeout has no STT_END, so finally must end the mic side."""
     entity, client, _coord = _make_satellite()
     entity._active_turn_id = 9
+    channel = _FakeAudioChannel()
+    entity._active_channel = channel
 
     async def fake_accept(self, mic_frames):
         return None  # pipeline ran and produced nothing spoken
 
     monkeypatch.setattr(AssistSatelliteEntity, "async_accept_pipeline_from_satellite", fake_accept)
 
-    asyncio.run(entity._run_wake_pipeline(_FakeAudioChannel()))
+    asyncio.run(entity._run_wake_pipeline(channel))
 
     assert client.calls == [
         ("turn_action", 9, "endpoint", None),
@@ -410,6 +429,8 @@ def test_run_wake_pipeline_no_transcript_endpoints_before_tts_end(monkeypatch):
 def test_run_wake_pipeline_awaits_the_tts_task_instead_of_sending_tts_end(monkeypatch):
     entity, client, _coord = _make_satellite()
     entity._active_turn_id = 9
+    channel = _FakeAudioChannel()
+    entity._active_channel = channel
     tts_ran = []
 
     async def fake_tts():
@@ -417,11 +438,12 @@ def test_run_wake_pipeline_awaits_the_tts_task_instead_of_sending_tts_end(monkey
 
     async def fake_accept(self, mic_frames):
         entity._tts_task = asyncio.ensure_future(fake_tts())
+        entity._tts_turn_token = entity._active_turn_token
         return None
 
     monkeypatch.setattr(AssistSatelliteEntity, "async_accept_pipeline_from_satellite", fake_accept)
 
-    asyncio.run(entity._run_wake_pipeline(_FakeAudioChannel()))
+    asyncio.run(entity._run_wake_pipeline(channel))
 
     assert tts_ran == [True]
     assert ("turn_action", 9, "tts/end", None) not in client.calls
@@ -430,13 +452,15 @@ def test_run_wake_pipeline_awaits_the_tts_task_instead_of_sending_tts_end(monkey
 def test_run_wake_pipeline_still_sends_tts_end_when_the_pipeline_raises(monkeypatch):
     entity, client, _coord = _make_satellite()
     entity._active_turn_id = 9
+    channel = _FakeAudioChannel()
+    entity._active_channel = channel
 
     async def fake_accept(self, mic_frames):
         raise RuntimeError("pipeline blew up")
 
     monkeypatch.setattr(AssistSatelliteEntity, "async_accept_pipeline_from_satellite", fake_accept)
 
-    asyncio.run(entity._run_wake_pipeline(_FakeAudioChannel()))  # must not raise
+    asyncio.run(entity._run_wake_pipeline(channel))  # must not raise
 
     assert ("turn_action", 9, "endpoint", None) in client.calls
     assert ("turn_action", 9, "tts/end", None) in client.calls
@@ -518,7 +542,10 @@ def test_tts_end_spawns_exactly_one_tts_task_even_if_seen_twice(monkeypatch):
     entity._active_turn_id = 1
     entity._active_channel = object()
     spawned = []
-    monkeypatch.setattr(entity, "_stream_pipeline_tts", lambda token, tid, ch: spawned.append(token) or _noop())
+    monkeypatch.setattr(
+        entity, "_stream_pipeline_tts",
+        lambda token, tid, turn_token, ch: spawned.append(token) or _noop(),
+    )
 
     event = PipelineEvent(type=PipelineEventType.TTS_END, data={"tts_output": {"token": "tok-1"}})
     asyncio.run(entity._async_pipeline_event(event))
@@ -573,6 +600,9 @@ class _FakeResultStream:
 
 def test_stream_pipeline_tts_happy_path(monkeypatch):
     entity, client, _coord = _make_satellite()
+    channel = object()
+    entity._active_turn_id = 1
+    entity._active_channel = channel
     streamed = []
 
     async def fake_stream(result, channel):
@@ -582,7 +612,6 @@ def test_stream_pipeline_tts_happy_path(monkeypatch):
     monkeypatch.setattr(module, "stream_result_to_audio", fake_stream)
     monkeypatch.setattr(module.tts, "async_get_stream", lambda hass, token: _FakeResultStream(), raising=False)
 
-    channel = object()
     asyncio.run(entity._stream_pipeline_tts("tok", 1, channel))
 
     assert ("turn_action", 1, "tts/start", None) in client.calls
@@ -592,15 +621,21 @@ def test_stream_pipeline_tts_happy_path(monkeypatch):
 
 def test_stream_pipeline_tts_sends_tts_end_when_ha_gives_no_result_stream(monkeypatch):
     entity, client, _coord = _make_satellite()
+    channel = object()
+    entity._active_turn_id = 1
+    entity._active_channel = channel
     monkeypatch.setattr(module.tts, "async_get_stream", lambda hass, token: None, raising=False)
 
-    asyncio.run(entity._stream_pipeline_tts("tok", 1, object()))
+    asyncio.run(entity._stream_pipeline_tts("tok", 1, channel))
 
     assert ("turn_action", 1, "tts/end", None) in client.calls
 
 
 def test_stream_pipeline_tts_ends_turn_when_provider_stream_fails(monkeypatch):
     entity, client, _coord = _make_satellite()
+    channel = object()
+    entity._active_turn_id = 1
+    entity._active_channel = channel
     monkeypatch.setattr(module.tts, "async_get_stream", lambda hass, token: _FakeResultStream(), raising=False)
 
     async def quota_error(result, channel):
@@ -608,7 +643,7 @@ def test_stream_pipeline_tts_ends_turn_when_provider_stream_fails(monkeypatch):
 
     monkeypatch.setattr(module, "stream_result_to_audio", quota_error)
 
-    asyncio.run(entity._stream_pipeline_tts("tok", 1, object()))
+    asyncio.run(entity._stream_pipeline_tts("tok", 1, channel))
 
     assert ("turn_action", 1, "tts/start", None) in client.calls
     assert ("turn_action", 1, "tts/end", None) in client.calls
@@ -616,6 +651,9 @@ def test_stream_pipeline_tts_ends_turn_when_provider_stream_fails(monkeypatch):
 
 def test_stream_pipeline_tts_reraises_cancelled_error(monkeypatch):
     entity, client, _coord = _make_satellite()
+    channel = object()
+    entity._active_turn_id = 1
+    entity._active_channel = channel
     monkeypatch.setattr(module.tts, "async_get_stream", lambda hass, token: _FakeResultStream(), raising=False)
 
     async def cancels(result, channel):
@@ -624,7 +662,7 @@ def test_stream_pipeline_tts_reraises_cancelled_error(monkeypatch):
     monkeypatch.setattr(module, "stream_result_to_audio", cancels)
 
     with pytest.raises(asyncio.CancelledError):
-        asyncio.run(entity._stream_pipeline_tts("tok", 1, object()))
+        asyncio.run(entity._stream_pipeline_tts("tok", 1, channel))
 
 
 # ── async_announce ────────────────────────────────────────────────────────

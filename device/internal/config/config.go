@@ -75,6 +75,13 @@ type Device struct {
 	// It is also what keeps barge-in working unchanged, since that is
 	// scored controller-side over the turn's own audio.
 	OwwOnDevice string
+	// StopModel and StopThreshold configure the locally-scored mandatory stop
+	// classifier. The controller arms it separately per response.
+	StopModel         string
+	StopThreshold     float64
+	SaveWakeCaptures  bool
+	WakeCaptureSec    float64
+	WakeNearMissFloor float64
 
 	// AfeMicGainDb is a fixed digital gain applied to Amazon AFE's already
 	// processed S16 capture before it is sent to the controller. 0 = unity.
@@ -128,6 +135,11 @@ func (d *Device) loadDefaults() {
 	d.OwwThreshold = envFloat("OWW_THRESHOLD", 0.5)
 	d.OwwModel = envStr("OWW_MODEL", "hey_jarvis_v0.1")
 	d.OwwOnDevice = normaliseOnDevice(envStr("OWW_ON_DEVICE", OnDeviceOff))
+	d.StopModel = envStr("STOP_MODEL", "")
+	d.StopThreshold = envFloat("STOP_THRESHOLD", 0.5)
+	d.SaveWakeCaptures = envBool("SAVE_WAKE_CAPTURES", false)
+	d.WakeCaptureSec = clampFloat(envFloat("WAKE_CAPTURE_SEC", 2.0), 0.08, 5.0)
+	d.WakeNearMissFloor = clampFloat(envFloat("WAKE_NEAR_MISS_FLOOR", 0.05), 0, 1)
 	d.BargeInThreshold = envFloat("BARGE_IN_THRESHOLD", 0.05)
 	d.DuckDb = envFloat("DUCK_DB", -18)
 	d.AfeMicGainDb = clampAfeMicGainDb(envInt("AFE_MIC_GAIN_DB", 0))
@@ -164,6 +176,21 @@ func (d *Device) Apply(msg ConfigMessage) {
 	}
 	if msg.OwwOnDevice != "" {
 		d.OwwOnDevice = normaliseOnDevice(msg.OwwOnDevice)
+	}
+	if msg.StopModel != "" {
+		d.StopModel = msg.StopModel
+	}
+	if msg.StopThreshold > 0 {
+		d.StopThreshold = msg.StopThreshold
+	}
+	if msg.SaveWakeCaptures != nil {
+		d.SaveWakeCaptures = *msg.SaveWakeCaptures
+	}
+	if msg.WakeCaptureSec > 0 {
+		d.WakeCaptureSec = clampFloat(msg.WakeCaptureSec, 0.08, 5.0)
+	}
+	if msg.WakeNearMissFloor != nil {
+		d.WakeNearMissFloor = clampFloat(*msg.WakeNearMissFloor, 0, 1)
 	}
 	if msg.BargeInEnabled != nil {
 		d.BargeInEnabled = *msg.BargeInEnabled
@@ -235,64 +262,76 @@ func (d *Device) Snapshot() ConfigMessage {
 	limiterThreshold := d.LimiterThreshold
 	limiterRelease := d.LimiterRelease
 	bargeInEnabled := d.BargeInEnabled
+	saveWakeCaptures := d.SaveWakeCaptures
+	wakeNearMissFloor := d.WakeNearMissFloor
 	afeMicGainDb := d.AfeMicGainDb
 	bleProxyEnabled := false
 	if d.BleProxyEnabled != nil {
 		bleProxyEnabled = *d.BleProxyEnabled
 	}
 	return ConfigMessage{
-		VadThreshold:     d.VadThreshold,
-		VadSpeechMs:      d.VadSpeechMs,
-		VadSilenceMs:     d.VadSilenceMs,
-		OwwThreshold:     d.OwwThreshold,
-		OwwModel:         d.OwwModel,
-		OwwOnDevice:      d.OwwOnDevice,
-		BargeInEnabled:   &bargeInEnabled,
-		BargeInThreshold: d.BargeInThreshold,
-		StartupVolume:    d.StartupVolume,
-		EqBands:          eqBands,
-		EqLoudness:       &eqLoudness,
-		BassShelfHz:      &bassShelfHz,
-		SubsonicHz:       &subsonicHz,
-		BassGuardEnabled: &bassGuardEnabled,
-		BassGuardDb:      &bassGuardDb,
-		LimiterEnabled:   &limiterEnabled,
-		LimiterThreshold: &limiterThreshold,
-		LimiterRelease:   &limiterRelease,
-		SendspinServer:   d.SendspinServer,
-		AfeMicGainDb:     &afeMicGainDb,
-		BleProxyEnabled:  &bleProxyEnabled,
-		ListeningAnim:    d.ListeningAnim,
+		VadThreshold:      d.VadThreshold,
+		VadSpeechMs:       d.VadSpeechMs,
+		VadSilenceMs:      d.VadSilenceMs,
+		OwwThreshold:      d.OwwThreshold,
+		OwwModel:          d.OwwModel,
+		OwwOnDevice:       d.OwwOnDevice,
+		StopModel:         d.StopModel,
+		StopThreshold:     d.StopThreshold,
+		SaveWakeCaptures:  &saveWakeCaptures,
+		WakeCaptureSec:    d.WakeCaptureSec,
+		WakeNearMissFloor: &wakeNearMissFloor,
+		BargeInEnabled:    &bargeInEnabled,
+		BargeInThreshold:  d.BargeInThreshold,
+		StartupVolume:     d.StartupVolume,
+		EqBands:           eqBands,
+		EqLoudness:        &eqLoudness,
+		BassShelfHz:       &bassShelfHz,
+		SubsonicHz:        &subsonicHz,
+		BassGuardEnabled:  &bassGuardEnabled,
+		BassGuardDb:       &bassGuardDb,
+		LimiterEnabled:    &limiterEnabled,
+		LimiterThreshold:  &limiterThreshold,
+		LimiterRelease:    &limiterRelease,
+		SendspinServer:    d.SendspinServer,
+		AfeMicGainDb:      &afeMicGainDb,
+		BleProxyEnabled:   &bleProxyEnabled,
+		ListeningAnim:     d.ListeningAnim,
 	}
 }
 
 // ConfigMessage mirrors the JSON shape of the config control message
 // sent by the controller. JSON tags must match em_controller.py exactly.
 type ConfigMessage struct {
-	Type             string    `json:"type,omitempty"`
-	AfeMicGainDb     *int      `json:"afeMicGainDb,omitempty"`
-	StartupVolume    int       `json:"startupVolume,omitempty"`
-	EqBands          []float64 `json:"eqBands,omitempty"`
-	EqLoudness       *bool     `json:"eqLoudness,omitempty"`
-	BassShelfHz      *float64  `json:"bassShelfHz,omitempty"`
-	SubsonicHz       *float64  `json:"subsonicHz,omitempty"`
-	BassGuardEnabled *bool     `json:"bassGuardEnabled,omitempty"`
-	BassGuardDb      *float64  `json:"bassGuardDb,omitempty"`
-	LimiterEnabled   *bool     `json:"limiterEnabled,omitempty"`
-	LimiterThreshold *float64  `json:"limiterThreshold,omitempty"`
-	LimiterRelease   *float64  `json:"limiterRelease,omitempty"`
-	SendspinServer   string    `json:"sendspinServer,omitempty"`
-	VadThreshold     float64   `json:"vadThreshold,omitempty"`
-	VadSpeechMs      int       `json:"vadSpeechMs,omitempty"`
-	VadSilenceMs     int       `json:"vadSilenceMs,omitempty"`
-	OwwThreshold     float64   `json:"owwThreshold,omitempty"`
-	OwwModel         string    `json:"owwModel,omitempty"`
-	OwwOnDevice      string    `json:"owwOnDevice,omitempty"`
-	BargeInEnabled   *bool     `json:"bargeInEnabled,omitempty"`
-	BargeInThreshold float64   `json:"bargeInThreshold,omitempty"`
-	DuckDb           *float64  `json:"duckDb,omitempty"`
-	HasBeamforming   bool      `json:"hasBeamforming,omitempty"`
-	BleProxyEnabled  *bool     `json:"bleProxyEnabled,omitempty"`
+	Type              string    `json:"type,omitempty"`
+	AfeMicGainDb      *int      `json:"afeMicGainDb,omitempty"`
+	StartupVolume     int       `json:"startupVolume,omitempty"`
+	EqBands           []float64 `json:"eqBands,omitempty"`
+	EqLoudness        *bool     `json:"eqLoudness,omitempty"`
+	BassShelfHz       *float64  `json:"bassShelfHz,omitempty"`
+	SubsonicHz        *float64  `json:"subsonicHz,omitempty"`
+	BassGuardEnabled  *bool     `json:"bassGuardEnabled,omitempty"`
+	BassGuardDb       *float64  `json:"bassGuardDb,omitempty"`
+	LimiterEnabled    *bool     `json:"limiterEnabled,omitempty"`
+	LimiterThreshold  *float64  `json:"limiterThreshold,omitempty"`
+	LimiterRelease    *float64  `json:"limiterRelease,omitempty"`
+	SendspinServer    string    `json:"sendspinServer,omitempty"`
+	VadThreshold      float64   `json:"vadThreshold,omitempty"`
+	VadSpeechMs       int       `json:"vadSpeechMs,omitempty"`
+	VadSilenceMs      int       `json:"vadSilenceMs,omitempty"`
+	OwwThreshold      float64   `json:"owwThreshold,omitempty"`
+	OwwModel          string    `json:"owwModel,omitempty"`
+	OwwOnDevice       string    `json:"owwOnDevice,omitempty"`
+	StopModel         string    `json:"stopModel,omitempty"`
+	StopThreshold     float64   `json:"stopThreshold,omitempty"`
+	SaveWakeCaptures  *bool     `json:"saveWakeCaptures,omitempty"`
+	WakeCaptureSec    float64   `json:"wakeCaptureSec,omitempty"`
+	WakeNearMissFloor *float64  `json:"wakeNearMissFloor,omitempty"`
+	BargeInEnabled    *bool     `json:"bargeInEnabled,omitempty"`
+	BargeInThreshold  float64   `json:"bargeInThreshold,omitempty"`
+	DuckDb            *float64  `json:"duckDb,omitempty"`
+	HasBeamforming    bool      `json:"hasBeamforming,omitempty"`
+	BleProxyEnabled   *bool     `json:"bleProxyEnabled,omitempty"`
 
 	// ListeningAnim: raw led_anim spec for the listening ring (#263).
 	// Carried as raw JSON so this package does not depend on the
@@ -310,6 +349,16 @@ func clampAfeMicGainDb(db int) int {
 		return 24
 	}
 	return db
+}
+
+func clampFloat(value, low, high float64) float64 {
+	if value < low {
+		return low
+	}
+	if value > high {
+		return high
+	}
+	return value
 }
 
 // On-device wake word modes.

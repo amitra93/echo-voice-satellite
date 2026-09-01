@@ -60,7 +60,14 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
         self.client = coordinator.client
         self._active_turn_id: int | None = None
         self._active_channel = None
+        # Identity changes even if an old turn id is somehow reused. Every
+        # asynchronous callback retains this token and must prove ownership
+        # before it can touch the controller rendezvous.
+        self._active_turn_token: object | None = None
         self._tts_task: asyncio.Task | None = None
+        self._tts_turn_token: object | None = None
+        self._pipeline_task: asyncio.Task | None = None
+        self._offer_lock = asyncio.Lock()
         self._transcript_sent = False
         self._endpoint_sent = False
         self._continue_conversation = False
@@ -70,6 +77,26 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
 
     async def async_will_remove_from_hass(self) -> None:
         self._event_remove()
+        turn_id = self._active_turn_id
+        channel = self._active_channel
+        tasks = [task for task in (self._pipeline_task, self._tts_task)
+                 if task is not None]
+        for task in tasks:
+            task.cancel()
+        self._active_turn_id = None
+        self._active_channel = None
+        self._active_turn_token = None
+        self._pipeline_task = None
+        self._tts_task = None
+        self._tts_turn_token = None
+        if turn_id is not None:
+            with contextlib.suppress(ControllerError):
+                await self.client.async_turn_action(turn_id, "reject")
+        if channel is not None:
+            with contextlib.suppress(Exception):
+                await channel.close()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         await super().async_will_remove_from_hass()
 
     async def async_added_to_hass(self) -> None:
@@ -126,37 +153,104 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
             asyncio.create_task(
                 self._handle_wake_offer(offer), name=f"echo-wake-offer-{self.device_id}"
             )
-        elif event.get("type") == "turn.terminal" and event.get("turn_id") == self._active_turn_id:
-            if self._tts_task is not None:
-                self._tts_task.cancel()
-                self._tts_task = None
-            self.tts_response_finished()
-            if self._active_channel is not None:
-                await self._active_channel.close()
-                self._active_channel = None
+        elif (
+            event.get("type") in {"turn.cancel", "turn.terminal"}
+            and event.get("device_id") == self.device_id
+            and event.get("turn_id") == self._active_turn_id
+        ):
+            # Stop is targeted: never let a stale cancellation for an earlier
+            # turn interrupt the current one on this device.
+            turn_id = self._active_turn_id
+            channel = self._active_channel
+            pipeline_task = self._pipeline_task
+            tts_task = self._tts_task
+            # Clear ownership before cancelling tasks. Their finally blocks and
+            # queued pipeline events can then never resolve a newer turn.
             self._active_turn_id = None
+            self._active_channel = None
+            self._active_turn_token = None
+            self._pipeline_task = None
+            self._tts_task = None
+            self._tts_turn_token = None
+            if pipeline_task is not None:
+                pipeline_task.cancel()
+            if tts_task is not None:
+                tts_task.cancel()
+            if event.get("type") == "turn.cancel":
+                with contextlib.suppress(ControllerError):
+                    await self.client.async_turn_action(turn_id, "tts/end")
+            self.tts_response_finished()
+            if channel is not None:
+                with contextlib.suppress(Exception):
+                    await channel.close()
+            current = asyncio.current_task()
+            await asyncio.gather(
+                *(task for task in (pipeline_task, tts_task) if task is not None and task is not current),
+                return_exceptions=True,
+            )
 
 
     async def _handle_wake_offer(self, offer: dict[str, Any]) -> None:
         turn_id = offer.get("turn_id")
-        try:
-            channel = await self.client.async_attach_audio(turn_id)
-        except ControllerError:
-            _LOGGER.exception("Failed to attach audio channel for turn %s", turn_id)
-            return
-        self._active_turn_id = turn_id
-        self._active_channel = channel
-        self._transcript_sent = False
-        self._endpoint_sent = False
-        self._continue_conversation = False
-        self._tts_task = None
-        asyncio.create_task(
-            self._run_wake_pipeline(
-                channel, timer_speech=offer.get("trigger") == "timer-speech"
-            ), name=f"echo-wake-{self.device_id}"
+        async with self._offer_lock:
+            if self._active_turn_id is not None:
+                with contextlib.suppress(ControllerError):
+                    await self.client.async_turn_action(turn_id, "reject")
+                return
+            try:
+                channel = await self.client.async_attach_audio(turn_id)
+            except ControllerError:
+                _LOGGER.exception("Failed to attach audio channel for turn %s", turn_id)
+                with contextlib.suppress(ControllerError):
+                    await self.client.async_turn_action(turn_id, "reject")
+                return
+            self._active_turn_id = turn_id
+            self._active_channel = channel
+            token = object()
+            self._active_turn_token = token
+            self._transcript_sent = False
+            self._endpoint_sent = False
+            self._continue_conversation = False
+            self._tts_task = None
+            try:
+                # The controller does not grant the device until HA has accepted
+                # this provisional offer. This keeps the device ring and mic dark
+                # when the integration cannot own the turn.
+                await self.client.async_turn_action(turn_id, "accept")
+            except ControllerError:
+                _LOGGER.exception("Failed to accept turn %s", turn_id)
+                self._active_turn_id = None
+                self._active_channel = None
+                self._active_turn_token = None
+                with contextlib.suppress(ControllerError):
+                    await self.client.async_turn_action(turn_id, "reject")
+                with contextlib.suppress(Exception):
+                    await channel.close()
+                return
+            self._pipeline_task = asyncio.create_task(
+                self._run_wake_pipeline(
+                    channel, turn_id, token, timer_speech=offer.get("trigger") == "timer-speech"
+                ), name=f"echo-wake-{self.device_id}"
+            )
+
+    def _owns_turn(self, turn_id: int, token: object, channel) -> bool:
+        return (
+            self._active_turn_id == turn_id
+            and self._active_turn_token is token
+            and self._active_channel is channel
         )
 
-    async def _run_wake_pipeline(self, channel, timer_speech: bool = False) -> None:
+    async def _run_wake_pipeline(
+        self, channel, turn_id: int | None = None, token: object | None = None,
+        timer_speech: bool = False,
+    ) -> None:
+        # Optional arguments retain the direct unit-test call shape; production
+        # always passes the values captured when the offer was accepted.
+        if turn_id is None:
+            turn_id = self._active_turn_id
+            token = self._active_turn_token
+        if turn_id is None or token is None or not self._owns_turn(turn_id, token, channel):
+            return
         try:
             if timer_speech:
                 await super().async_accept_pipeline_from_satellite(
@@ -164,22 +258,28 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
                 )
             else:
                 await super().async_accept_pipeline_from_satellite(channel.mic_frames())
+        except asyncio.CancelledError:
+            raise
         except Exception:
             _LOGGER.exception("Pipeline failed for %s", self.device_id)
         finally:
-            if self._tts_task is not None:
+            if self._pipeline_task is asyncio.current_task():
+                self._pipeline_task = None
+            if not self._owns_turn(turn_id, token, channel):
+                return
+            if self._tts_task is not None and self._tts_turn_token is token:
                 await asyncio.gather(self._tts_task, return_exceptions=True)
-            elif self._active_turn_id is not None:
+            elif self._owns_turn(turn_id, token, channel):
                 # A speech-start timeout ends the pipeline without STT_END, so
                 # no normal endpoint action reached the controller. Resolve the
                 # mic side before resolving the empty TTS side.
                 try:
                     if not self._endpoint_sent:
                         await self.client.async_turn_action(
-                            self._active_turn_id, "endpoint"
+                            turn_id, "endpoint"
                         )
                         self._endpoint_sent = True
-                    await self.client.async_turn_action(self._active_turn_id, "tts/end")
+                    await self.client.async_turn_action(turn_id, "tts/end")
                 except ControllerError:
                     pass
 
@@ -221,6 +321,10 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
         channel = await self.client.async_attach_audio(turn_id)
         self._active_turn_id = turn_id
         self._active_channel = channel
+        token = object()
+        self._active_turn_token = token
+        self._tts_task = asyncio.current_task()
+        self._tts_turn_token = token
         try:
             await self.client.async_turn_action(turn_id, "tts/start")
             result = tts.async_get_stream(self.hass, announcement.tts_token)
@@ -231,20 +335,32 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
         except (ControllerError, TTSIncompatible) as exc:
             raise ValueError(str(exc)) from exc
         finally:
-            if self._active_turn_id == turn_id:
+            if self._tts_task is asyncio.current_task():
+                self._tts_task = None
+                self._tts_turn_token = None
+            if self._owns_turn(turn_id, token, channel):
                 # turn.terminal (pushed once the engine's playback finishes)
                 # will close the channel; if it never arrives, don't leak one.
                 pass
 
     def on_pipeline_event(self, event: PipelineEvent) -> None:
-        if self._active_turn_id is not None:
-            self.hass.async_create_task(self._async_pipeline_event(event))
+        if self._active_turn_id is not None and self._active_turn_token is not None:
+            # PipelineEvent has no turn id. Bind it while HA invokes this
+            # callback, rather than when its asynchronous forwarding runs.
+            self.hass.async_create_task(self._async_pipeline_event(
+                event, self._active_turn_id, self._active_turn_token, self._active_channel
+            ))
         self.async_write_ha_state()
 
-    async def _async_pipeline_event(self, event: PipelineEvent) -> None:
-        turn_id = self._active_turn_id
-        channel = self._active_channel
-        if turn_id is None or channel is None:
+    async def _async_pipeline_event(
+        self, event: PipelineEvent, turn_id: int | None = None,
+        token: object | None = None, channel=None,
+    ) -> None:
+        if turn_id is None:
+            turn_id = self._active_turn_id
+            token = self._active_turn_token
+            channel = self._active_channel
+        if turn_id is None or token is None or channel is None or not self._owns_turn(turn_id, token, channel):
             return
         event_type = event.type
         try:
@@ -252,16 +368,22 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
                 if not self._transcript_sent:
                     text = (event.data or {}).get("stt_output", {}).get("text")
                     if isinstance(text, str) and text:
+                        if not self._owns_turn(turn_id, token, channel):
+                            return
                         await self.client.async_turn_action(
                             turn_id, "transcript", {"text": text, "is_final": True}
                         )
                         self._transcript_sent = True
+                if not self._owns_turn(turn_id, token, channel):
+                    return
                 await self.client.async_turn_action(turn_id, "endpoint")
                 self._endpoint_sent = True
             elif event_type == PipelineEventType.INTENT_END:
                 response = (event.data or {}).get("intent_output", {}).get("response", {})
                 speech = response.get("speech", {}).get("plain", {}).get("speech")
                 if isinstance(speech, str) and speech:
+                    if not self._owns_turn(turn_id, token, channel):
+                        return
                     await self.client.async_turn_action(
                         turn_id, "tts-text", {"text": speech}
                     )
@@ -269,31 +391,45 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
                     (event.data or {}).get("intent_output", {}).get("continue_conversation")
                 )
                 self._continue_conversation = continue_conversation
+                if not self._owns_turn(turn_id, token, channel):
+                    return
                 await self.client.async_turn_action(
                     turn_id, "pipeline-event",
                     {"event": "intent_end", "continue_conversation": continue_conversation},
                 )
             elif event_type == PipelineEventType.TTS_END:
-                token = (event.data or {}).get("tts_output", {}).get("token")
-                if token and self._tts_task is None:
+                tts_token = (event.data or {}).get("tts_output", {}).get("token")
+                if tts_token and self._tts_task is None and self._owns_turn(turn_id, token, channel):
+                    self._tts_turn_token = token
                     self._tts_task = asyncio.create_task(
-                        self._stream_pipeline_tts(token, turn_id, channel)
+                        self._stream_pipeline_tts(tts_token, turn_id, token, channel)
                     )
             elif event_type == PipelineEventType.ERROR:
+                if not self._owns_turn(turn_id, token, channel):
+                    return
                 await self.client.async_turn_action(
                     turn_id, "pipeline-event", {"event": "error"}
                 )
         except ControllerError:
             _LOGGER.exception("Turn action failed for turn %s (%s)", turn_id, event_type)
 
-    async def _stream_pipeline_tts(self, token: str, turn_id: int, channel) -> None:
+    async def _stream_pipeline_tts(
+        self, token: str, turn_id: int, turn_token: object | None = None, channel=None
+    ) -> None:
+        if channel is None:
+            # Compatibility with callers/tests using the previous signature.
+            channel = turn_token
+            turn_token = self._active_turn_token
+        if turn_token is None or not self._owns_turn(turn_id, turn_token, channel):
+            return
         try:
             await self.client.async_turn_action(turn_id, "tts/start")
             result = tts.async_get_stream(self.hass, token)
             if result is None:
                 raise TTSIncompatible("Home Assistant did not provide the TTS result stream")
             await stream_result_to_audio(result, channel)
-            await self.client.async_turn_action(turn_id, "tts/end")
+            if self._owns_turn(turn_id, turn_token, channel):
+                await self.client.async_turn_action(turn_id, "tts/end")
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -303,7 +439,12 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
             # signal; without it its audio-timeout spinner lasts two minutes.
             _LOGGER.exception("TTS stream failed for turn %s", turn_id)
             with contextlib.suppress(ControllerError):
-                await self.client.async_turn_action(turn_id, "tts/end")
+                if self._owns_turn(turn_id, turn_token, channel):
+                    await self.client.async_turn_action(turn_id, "tts/end")
+        finally:
+            if self._tts_task is asyncio.current_task():
+                self._tts_task = None
+                self._tts_turn_token = None
 
     def tts_response_finished(self) -> None:
         # The base implementation is what actually transitions the entity's

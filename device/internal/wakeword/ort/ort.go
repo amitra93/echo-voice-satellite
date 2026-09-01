@@ -158,6 +158,48 @@ type Inferer struct {
 	xnnpack bool
 }
 
+// Classifier is an additional phrase-specific classifier head. It deliberately
+// owns only its classifier session; melspectrogram and embedding sessions stay
+// on the primary Inferer and are shared by every head.
+type Classifier struct{ cls *model }
+
+func (r *Runtime) NewClassifier(path string, o Options) (*Classifier, error) {
+	if o.Threads < 1 {
+		return nil, fmt.Errorf("ort: Threads must be at least 1, got %d", o.Threads)
+	}
+	m, err := r.load(path, "classifier", o)
+	if err != nil {
+		return nil, err
+	}
+	return &Classifier{cls: m}, nil
+}
+
+func (c *Classifier) Close() error {
+	if c.cls != nil {
+		C.em_model_free(&c.cls.m)
+		c.cls = nil
+	}
+	return nil
+}
+
+func (c *Classifier) Classify(feats []float32) (float32, error) {
+	if c.cls == nil {
+		return 0, ErrClosed
+	}
+	if want := wakeword.FeatWindow * wakeword.FeatDim; len(feats) != want {
+		return 0, fmt.Errorf("ort: classify wants %d values, got %d", want, len(feats))
+	}
+	shape := [3]C.int64_t{1, wakeword.FeatWindow, wakeword.FeatDim}
+	out, err := runModel(c.cls, feats, shape[:])
+	if err != nil {
+		return 0, err
+	}
+	if len(out) != 1 {
+		return 0, fmt.Errorf("ort: classify produced %d values, want 1", len(out))
+	}
+	return out[0], nil
+}
+
 // NewInferer opens the three sessions. The caller owns the result and must
 // Close it; a partially-constructed Inferer is torn down on error rather than
 // leaking sessions.
@@ -258,7 +300,7 @@ func (i *Inferer) Classify(feats []float32) (float32, error) {
 		return 0, fmt.Errorf("ort: classify wants %d values, got %d", want, len(feats))
 	}
 	shape := [3]C.int64_t{1, wakeword.FeatWindow, wakeword.FeatDim}
-	out, err := i.run(i.cls, feats, shape[:])
+	out, err := runModel(i.cls, feats, shape[:])
 	if err != nil {
 		return 0, err
 	}
@@ -274,6 +316,10 @@ func (i *Inferer) Classify(feats []float32) (float32, error) {
 // buffer before returning, so no C allocation outlives this function and the
 // steady state does not allocate.
 func (i *Inferer) run(m *model, in []float32, shape []C.int64_t) ([]float32, error) {
+	return runModel(m, in, shape)
+}
+
+func runModel(m *model, in []float32, shape []C.int64_t) ([]float32, error) {
 	var (
 		outPtr *C.float
 		outN   C.size_t
@@ -313,3 +359,4 @@ func cBool(b bool) C.int {
 // Compile-time proof that this package satisfies the interface the streaming
 // pipeline is written against.
 var _ wakeword.Inferer = (*Inferer)(nil)
+var _ wakeword.Classifier = (*Classifier)(nil)

@@ -120,9 +120,11 @@ func TestApplySetsProvidedFields(t *testing.T) {
 	d := &Device{initialised: true}
 	mg := 12
 	d.Apply(ConfigMessage{
-		VadThreshold: 0.02,
-		OwwModel:     "new_model",
-		AfeMicGainDb: &mg,
+		VadThreshold:  0.02,
+		OwwModel:      "new_model",
+		StopModel:     "stop_v1",
+		StopThreshold: 0.77,
+		AfeMicGainDb:  &mg,
 	})
 	if d.VadThreshold != 0.02 {
 		t.Errorf("VadThreshold = %v, want 0.02", d.VadThreshold)
@@ -130,8 +132,29 @@ func TestApplySetsProvidedFields(t *testing.T) {
 	if d.OwwModel != "new_model" {
 		t.Errorf("OwwModel = %q, want new_model", d.OwwModel)
 	}
+	if d.StopModel != "stop_v1" || d.StopThreshold != 0.77 {
+		t.Errorf("stop config = %q / %v", d.StopModel, d.StopThreshold)
+	}
 	if d.AfeMicGainDb != 12 {
 		t.Errorf("AfeMicGainDb = %d, want 12 (clamped-in-range passthrough)", d.AfeMicGainDb)
+	}
+}
+
+func TestWakeCaptureConfigSupportsFalseZeroFloorAndClampsDuration(t *testing.T) {
+	d := &Device{
+		initialised: true, SaveWakeCaptures: true,
+		WakeCaptureSec: 2, WakeNearMissFloor: 0.2,
+	}
+	d.Apply(ConfigMessage{
+		SaveWakeCaptures: boolPtr(false), WakeCaptureSec: 99,
+		WakeNearMissFloor: floatPtr(0),
+	})
+	snapshot := d.Snapshot()
+	if snapshot.SaveWakeCaptures == nil || *snapshot.SaveWakeCaptures {
+		t.Fatal("explicit capture disable was lost")
+	}
+	if snapshot.WakeCaptureSec != 5 || snapshot.WakeNearMissFloor == nil || *snapshot.WakeNearMissFloor != 0 {
+		t.Fatalf("capture snapshot = %#v", snapshot)
 	}
 }
 

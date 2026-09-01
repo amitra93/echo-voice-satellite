@@ -22,6 +22,14 @@ from pathlib import Path
 
 MODELS_SUBDIR = "oww_models"
 
+# A stop classifier is supplied by the controller image, rather than the
+# persisted upload directory. Its ID is stable config/API surface; the file is
+# intentionally checked at planning time so an incomplete image is visible as
+# an unavailable mandatory safety feature, never silently omitted.
+BUILTIN_STOP_MODEL = "stop"
+BUILTIN_STOP_PATH = Path("/app/models/stopword/stop.onnx")
+MODEL_KINDS = frozenset({"wake", "stop"})
+
 # Stems must be shell- and URL-safe: openwakeword derives the prediction
 # dict key from the filename, and the dashboard shows it as the label.
 _STEM_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -116,6 +124,28 @@ def scan(directory: Path | None = None) -> list[dict]:
     return out
 
 
+def builtin_models() -> list[dict]:
+    """Controller-image model records, independent of whether bytes exist."""
+    return [{
+        "name": BUILTIN_STOP_MODEL,
+        "file": BUILTIN_STOP_PATH.name,
+        "path": str(BUILTIN_STOP_PATH),
+        "kind": "stop",
+        "source": "builtin",
+        "available": BUILTIN_STOP_PATH.is_file(),
+    }]
+
+
+def kind_for(model: str) -> str:
+    """The authoritative role for built-ins; direct uploads remain wake models."""
+    return "stop" if model == BUILTIN_STOP_MODEL else "wake"
+
+
+def accepts(model: str, kind: str) -> bool:
+    """Whether a model may be selected for a wake or stop configuration key."""
+    return kind in MODEL_KINDS and kind_for(model) == kind
+
+
 def in_use_by(model_path: str, configs: dict[str, dict]) -> list[str]:
     """
     Which config scopes reference this model path? `configs` maps a
@@ -126,9 +156,11 @@ def in_use_by(model_path: str, configs: dict[str, dict]) -> list[str]:
     target = str(Path(model_path).resolve())
     users = []
     for scope, cfg in configs.items():
-        ref = (cfg or {}).get("owwModel") or ""
-        if not ref.endswith(".onnx"):
-            continue  # stock model name, not a file path
-        if str(Path(ref).resolve()) == target:
-            users.append(scope)
+        for key in ("owwModel", "stopModel"):
+            ref = (cfg or {}).get(key) or ""
+            if not ref.endswith(".onnx"):
+                continue  # stock/built-in model name, not a file path
+            if str(Path(ref).resolve()) == target:
+                users.append(scope)
+                break
     return users

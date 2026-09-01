@@ -10,6 +10,7 @@ and placement logic is what is under test, not the resampler.
 """
 
 import io
+import json
 import sys
 import tempfile
 import unittest
@@ -30,6 +31,15 @@ def _make_zip(n_pos: int, n_neg: int) -> bytes:
             z.writestr(f"positive/p_{i:04d}.wav", b"RIFFfake")
         for i in range(n_neg):
             z.writestr(f"negative/n_{i:04d}.wav", b"RIFFfake")
+    return buf.getvalue()
+
+
+def _make_stop_zip() -> bytes:
+    buf = io.BytesIO()
+    name = "dev_1_stop_act_0900.wav"
+    with zipfile.ZipFile(buf, "w") as z:
+        z.writestr(f"positive/{name}", b"RIFFfake")
+        z.writestr("manifest.json", json.dumps({"clips": [{"name": name, "kind": "stop_act"}]}))
     return buf.getvalue()
 
 
@@ -87,6 +97,14 @@ class ImportDatasetTests(unittest.TestCase):
         names += [p.name for p in (self._base / "positive_test").glob("*.wav")]
         self.assertTrue(all(n.startswith("custom_") for n in names))
         self.assertTrue(names)
+
+    def test_stop_capture_import_keeps_its_scenario_for_evaluation(self):
+        zpath = self._tmp / "stop.zip"
+        zpath.write_bytes(_make_stop_zip())
+        forge.import_labeled_dataset("hey_test", zpath)
+        names = [p.name for p in (self._base / "positive_train").glob("*.wav")]
+        names += [p.name for p in (self._base / "positive_test").glob("*.wav")]
+        self.assertTrue(any(name.startswith("custom_stop_act_") for name in names))
 
     def test_non_audio_and_stray_dirs_are_skipped(self):
         buf = io.BytesIO()

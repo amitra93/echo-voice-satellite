@@ -42,6 +42,7 @@ import logging
 import math
 import os
 import re
+import threading
 import time
 import zipfile
 import wave
@@ -56,13 +57,16 @@ CAPTURES_SUBDIR = "training_captures"
 # The three triage states a capture can be in. Order is display order.
 BUCKETS = ("untriaged", "positive", "negative")
 
-# What triggered the capture. "act" = the wake threshold was cleared; "miss" =
-# a near-miss (score above the near-miss floor but below threshold).
-KINDS = ("act", "miss")
+# What triggered the capture. The wake kinds remain compatible with existing
+# filenames. Stop kinds preserve the post-AFE scenario in the export manifest;
+# the admin's positive/negative label remains the training polarity.
+KINDS = ("act", "miss", "stop_act", "stop_miss", "false_stop", "playback_negative")
 
 # Trim edits live beside the WAV rather than changing the source capture. This
 # keeps undo/relabel non-destructive while exports still contain edited audio.
 TRIM_SUFFIX = ".trim.json"
+META_SUFFIX = ".meta.json"
+_UPLOAD_LOCK = threading.RLock()
 
 # The near-miss floor em_controller already uses for its near-miss counter.
 # Anything at or below this is noise and is not worth a clip.
@@ -135,7 +139,8 @@ _MODEL_RE = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
 # shell-safe and sortable). Validated on the way back out of the filesystem.
 _NAME_RE = re.compile(
     r"^(?P<device>[A-Za-z0-9_.-]{1,64})_(?P<ts>\d{1,19})_"
-    r"(?P<kind>act|miss)_(?P<score>\d{1,5})\.wav$"
+    r"(?P<kind>act|miss|stop_act|stop_miss|false_stop|playback_negative)_"
+    r"(?P<score>\d{1,5})\.wav$"
 )
 
 
@@ -234,12 +239,111 @@ def save(model: str, device_id: str, pcm: bytes, kind: str, score: float,
     return name
 
 
+def _meta_path(path: Path) -> Path:
+    return path.with_name(path.name + META_SUFFIX)
+
+
+def _read_meta(path: Path) -> dict | None:
+    try:
+        data = json.loads(_meta_path(path).read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def _fsync_file(path: Path, data: bytes) -> None:
+    with path.open("wb") as handle:
+        handle.write(data)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def _find_uploaded(model: str, device_id: str, capture_id: str,
+                   db_path: str | None = None) -> Path | None:
+    for bucket in BUCKETS:
+        directory = _bucket_dir(model, bucket, db_path)
+        if directory is None or not directory.is_dir():
+            continue
+        for sidecar in directory.glob(f"*.wav{META_SUFFIX}"):
+            wav = sidecar.with_name(sidecar.name[:-len(META_SUFFIX)])
+            meta = _read_meta(wav)
+            if (wav.is_file() and meta is not None
+                    and meta.get("device_id") == device_id
+                    and meta.get("captureId") == capture_id):
+                return wav
+    return None
+
+
+def save_uploaded(model: str, device_id: str, metadata: dict, pcm: bytes,
+                  db_path: str | None = None, cap: int = UNTRIAGED_CAP) -> str | None:
+    """Durably commit an uploaded capture; exact duplicates return its name."""
+    safe = em_recordings.safe_device_id(device_id)
+    capture_id = metadata.get("captureId")
+    kind = metadata.get("kind")
+    score = metadata.get("score")
+    directory = _bucket_dir(model, "untriaged", db_path)
+    if safe is None or not isinstance(capture_id, str) or kind not in {"act", "miss"}:
+        return None
+    if directory is None or not pcm:
+        return None
+    with _UPLOAD_LOCK:
+        existing = _find_uploaded(model, safe, capture_id, db_path)
+        if existing is not None:
+            existing_meta = _read_meta(existing)
+            return existing.name if existing_meta == {**metadata, "device_id": safe} else None
+        ts_ms = int(time.time() * 1000)
+        name = filename(safe, ts_ms, kind, score)
+        if name is None:
+            return None
+        directory.mkdir(parents=True, exist_ok=True)
+        path = directory / name
+        while path.exists():
+            ts_ms += 1
+            name = filename(safe, ts_ms, kind, score)
+            path = directory / name
+        committed_meta = {**metadata, "device_id": safe}
+        wav_tmp = path.with_name(path.name + ".part")
+        meta = _meta_path(path)
+        meta_tmp = meta.with_name(meta.name + ".part")
+        try:
+            _fsync_file(wav_tmp, em_recordings.encode_wav(pcm, SAMPLE_RATE))
+            _fsync_file(
+                meta_tmp,
+                json.dumps(committed_meta, sort_keys=True, separators=(",", ":")).encode(),
+            )
+            meta_tmp.replace(meta)
+            # WAV is the commit marker: readers cannot observe uploaded speech
+            # until its provenance sidecar is already durable and in place.
+            wav_tmp.replace(path)
+            directory_fd = os.open(directory, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except OSError as exc:
+            wav_tmp.unlink(missing_ok=True)
+            meta_tmp.unlink(missing_ok=True)
+            path.unlink(missing_ok=True)
+            meta.unlink(missing_ok=True)
+            log.warning("[training] uploaded capture commit failed: %s", exc)
+            return None
+        prune_untriaged(model, db_path=db_path, cap=cap)
+        return name
+
+
 def _list_names(directory: Path | None) -> list[dict]:
     """Parsed, valid capture entries in a directory, newest first."""
     if directory is None or not directory.is_dir():
         return []
     entries = [parse_filename(child.name) for child in directory.iterdir()]
-    parsed = [e for e in entries if e is not None]
+    parsed = []
+    for entry in entries:
+        if entry is None:
+            continue
+        meta = _read_meta(directory / entry["name"])
+        if meta is not None:
+            entry = {**entry, "upload": meta}
+        parsed.append(entry)
     parsed.sort(key=lambda e: e["ts_ms"], reverse=True)
     return parsed
 
@@ -382,16 +486,23 @@ def label(model: str, name: str, target: str, db_path: str | None = None,
     dest_dir.mkdir(parents=True, exist_ok=True)
     trim_src = _trim_path(src)
     trim_dest = _trim_path(dest)
+    meta_src = _meta_path(src)
+    meta_dest = _meta_path(dest)
+    moved: list[tuple[Path, Path]] = []
     try:
-        src.replace(dest)
-        if trim_src.is_file():
-            trim_src.replace(trim_dest)
+        for source, target in (
+            (src, dest), (trim_src, trim_dest), (meta_src, meta_dest),
+        ):
+            if source.is_file():
+                source.replace(target)
+                moved.append((source, target))
     except OSError as e:
-        # Keep the capture and its edit metadata together if the second rename
+        # Keep the capture and both metadata sidecars together if any rename
         # fails (for example, on a full or read-only volume).
-        if dest.is_file() and not src.exists():
+        for source, target in reversed(moved):
             try:
-                dest.replace(src)
+                if target.is_file() and not source.exists():
+                    target.replace(source)
             except OSError:
                 pass
         log.warning(f"[training] Could not move {name} → {target}: {e}")
@@ -407,6 +518,7 @@ def discard(model: str, name: str, db_path: str | None = None) -> bool:
     try:
         path.unlink()
         _trim_path(path).unlink(missing_ok=True)
+        _meta_path(path).unlink(missing_ok=True)
     except OSError as e:
         log.warning(f"[training] Could not discard {name}: {e}")
         return False
@@ -428,6 +540,8 @@ def prune_untriaged(model: str, db_path: str | None = None,
     for entry in entries[max(cap, 0):]:
         try:
             (directory / entry["name"]).unlink()
+            _trim_path(directory / entry["name"]).unlink(missing_ok=True)
+            _meta_path(directory / entry["name"]).unlink(missing_ok=True)
             removed.append(entry["name"])
         except OSError as e:
             log.warning(f"[training] Could not prune {entry['name']}: {e}")
@@ -467,12 +581,18 @@ def export_zip(model: str, db_path: str | None = None,
                     trim = _read_trim(path)
                     z.writestr(f"{bucket}/{entry['name']}", _cropped_wav(path, trim))
                     exported_paths.append(path)
-                    manifest["clips"].append({
+                    clip = {
                         "bucket": bucket, "name": entry["name"],
                         "kind": entry["kind"], "score": entry["score"],
                         "device_id": entry["device_id"], "ts_ms": entry["ts_ms"],
                         "trim": trim,
-                    })
+                    }
+                    if entry.get("upload") is not None:
+                        clip["upload"] = entry["upload"]
+                    manifest["clips"].append(clip)
+                    meta = _meta_path(path)
+                    if meta.is_file():
+                        z.write(meta, f"{bucket}/{meta.name}")
                     written += 1
             manifest["buckets"][bucket] = written
         z.writestr("manifest.json", json.dumps(manifest, indent=2))
@@ -481,6 +601,7 @@ def export_zip(model: str, db_path: str | None = None,
             try:
                 path.unlink()
                 _trim_path(path).unlink(missing_ok=True)
+                _meta_path(path).unlink(missing_ok=True)
             except OSError as e:
                 log.warning(f"[training] Could not remove exported capture {path.name}: {e}")
     return buf.getvalue()
@@ -509,6 +630,8 @@ def delete_device(device_id: str, db_path: str | None = None) -> int:
                 if parsed and parsed["device_id"] == safe:
                     try:
                         child.unlink()
+                        _trim_path(child).unlink(missing_ok=True)
+                        _meta_path(child).unlink(missing_ok=True)
                         deleted += 1
                     except OSError as e:
                         log.warning(f"[training] Could not delete {child.name}: {e}")

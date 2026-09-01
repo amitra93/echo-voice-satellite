@@ -135,7 +135,7 @@ EchoMuse HACS integration.
 Add the repository (**Settings → Add-ons → Add-on Store → ⋮ → Repositories**):
 
 ```
-https://github.com/wilbowes/EchoMuse
+https://github.com/amitra93/echo-voice-satellite
 ```
 
 Install **EchoMuse**, then **start it once and stop it again**. That first

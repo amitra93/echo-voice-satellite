@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 # Links the GHCR package page back to the repo (and lets the package inherit
 # the repo's public visibility once connected).
-LABEL org.opencontainers.image.source="https://github.com/wilbowes/EchoMuse" \
+LABEL org.opencontainers.image.source="https://github.com/amitra93/echo-voice-satellite" \
       org.opencontainers.image.description="EchoMuse controller — Echo Dot Gen 2 open-source voice assistant satellite"
 WORKDIR /app
 # Install curl for vendoring JS dependencies
@@ -66,6 +66,7 @@ COPY em_mbc.py .
 COPY em_scenes.py .
 COPY em_support.py .
 COPY em_shadow.py .
+COPY em_stop.py .
 COPY em_oww_warmup.py .
 COPY em_barge.py .
 COPY em_pki.py .

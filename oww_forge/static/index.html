@@ -75,7 +75,7 @@
   :root[data-theme="dark"] .card { background: linear-gradient(170deg, #403d35, #34312b); box-shadow: 0 1px 0 rgba(255,255,255,0.04) inset, 0 2px 6px rgba(0,0,0,0.35); }
   :root[data-theme="dark"] button { background: linear-gradient(180deg,#4b4840,#39362f); color: var(--text); border-color: #625d54; }
   :root[data-theme="dark"] button.accent { background: linear-gradient(180deg,#678ab9,#46698f); color: #f1f6ff; border-color: #3b5876; }
-  :root[data-theme="dark"] input { background: #27251f; color: var(--text); border-color: #625d54; }
+  :root[data-theme="dark"] input, :root[data-theme="dark"] select { background: #27251f; color: var(--text); border-color: #625d54; }
 
   main { max-width: 1180px; margin: 0 auto; padding: 22px 28px 80px;
          display: grid; grid-template-columns: 330px 1fr; gap: 20px; }
@@ -104,7 +104,7 @@
                   font-size: 11px; padding: 5px 8px; }
   button.small { font-size: 11px; padding: 5px 14px; }
 
-  input {
+  input, select {
     background: #f0ece4; color: var(--text); border: 1px solid var(--border);
     border-radius: 7px; padding: 8px 11px; font: 400 13px 'DM Sans', sans-serif;
     width: 100%; box-shadow: inset 0 1px 3px rgba(0,0,0,0.08);
@@ -232,7 +232,12 @@
     </div>
 
     <div class="card">
-      <div class="microlabel">Step 3 &middot; Create a wake word</div>
+      <div class="microlabel">Step 3 &middot; Create a model</div>
+      <label>Model purpose</label>
+      <select id="newKind" style="width:100%;padding:8px 11px;border-radius:7px;border:1px solid var(--border);font:400 13px 'DM Sans',sans-serif">
+        <option value="wake">Wake word</option>
+        <option value="stop">Stop word</option>
+      </select>
       <label>Wake phrase</label>
       <input id="newPhrase" placeholder='e.g. "hey clara, hey clarra"'>
       <div class="hint">Pick a short phrase of 3&ndash;4 syllables. The training voices are American
@@ -475,7 +480,7 @@ function render() {
     <div class="card ww wake-panel" role="tabpanel" data-name="${esc(w.name)}">
         <div class="top">
         <h3>${esc(w.name)}</h3>
-        <span class="phrase">“${esc(w.phrases.join('” / “'))}”</span>
+        <span class="phrase">${w.kind === 'stop' ? 'Stop word' : 'Wake word'} · “${esc(w.phrases.join('” / “'))}”</span>
         ${w.model_built ? `<span class="built">trained ${fmtAgo(w.model_mtime)}</span>` : ''}
       </div>
       <div class="stepper">${stepper}</div>
@@ -488,7 +493,7 @@ function render() {
       </div>
       <div class="actiongroup">
         <div class="dataset-options">
-          <div class="microlabel">Confusable phrases</div>
+          <div class="microlabel">${w.kind === 'stop' ? 'Hard negatives' : 'Confusable phrases'}</div>
           <label>Comma-separated phrases that must not wake
             <input data-confusables value="${esc(w.confusables.join(', '))}"
               placeholder="e.g. hey carla, hey brisket" ${busy() ? 'disabled' : ''} style="width:100%"></label>
@@ -517,7 +522,7 @@ function render() {
             ${busy() ? 'disabled' : ''}></label>
           <label>Queries per second <input data-gtts-qps type="number" min="0.1" step="0.1" value="${w.google_tts_qps}"
             ${busy() ? 'disabled' : ''}></label>
-          <div class="hint">A voice available for two selected locales receives this many clips for each locale. Confusable negatives receive the same matrix.</div>
+          <div class="hint">A voice available for two selected locales receives this many clips for each locale. ${w.kind === 'stop' ? 'Include real post-AFE playback captures before approving a stop model.' : 'Confusable negatives receive the same matrix.'}</div>
           <div class="row" style="margin-top:6px">
             <button class="small" data-act="gtts" ${busy() ? 'disabled' : ''}
               title="Adds Chirp 3 positive samples for every selected locale and voice">Generate audio</button>
@@ -851,12 +856,14 @@ $('cancelJob').onclick = async () => {
 };
 
 $('createBtn').onclick = async () => {
-  const phrase = $('newPhrase').value.trim();
+  const kind = $('newKind').value;
+  const phrase = $('newPhrase').value.trim() || (kind === 'stop' ? 'stop' : '');
   if (!phrase) return alert('Type the wake phrase first, e.g. "hey clara"');
   await api('/api/wakewords', {method: 'POST',
     headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({phrase, name: $('newName').value,
       samples: $('newSamples').value, steps: $('newSteps').value,
+      kind,
       confusables: $('newConfusables').value,
       google_tts_languages: $('newGttsLanguages').value,
       google_tts_voices: $('newGttsVoices').value,
@@ -864,6 +871,13 @@ $('createBtn').onclick = async () => {
       google_tts_qps: $('newGttsQps').value})});
   $('newPhrase').value = ''; $('newName').value = ''; $('newConfusables').value = '';
   refresh();
+};
+
+$('newKind').onchange = () => {
+  const stop = $('newKind').value === 'stop';
+  if (stop && !$('newPhrase').value.trim()) $('newPhrase').value = 'stop';
+  $('newPhrase').placeholder = stop ? 'stop, optional pronunciation variants' : 'e.g. "hey clara, hey clarra"';
+  $('newConfusables').placeholder = stop ? 'e.g. "top, shop, drop, start"' : 'e.g. "hey carla, hey clara"';
 };
 
 $('listGttsVoices').onclick = async () => {

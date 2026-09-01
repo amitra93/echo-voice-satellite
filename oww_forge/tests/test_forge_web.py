@@ -67,6 +67,15 @@ class ForgeWebGoogleTtsTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config["google_tts_qps"], 3.5)
         self.assertEqual(config["unrelated"], "preserved")
 
+    async def test_stop_creation_defaults_phrase_and_hard_negatives(self):
+        with patch.object(forge, "cmd_new") as create:
+            response = await forge_web.api_wakeword_create(Request({"kind": "stop"}))
+        self.assertEqual(response.status, 200)
+        args = create.call_args.args[0]
+        self.assertEqual(args.kind, "stop")
+        self.assertEqual(args.phrase, "stop")
+        self.assertIn("top", args.confusables)
+
     async def test_confusables_save_does_not_change_google_tts_config(self):
         await forge_web.api_confusables(Request({"phrases": [" New phrase "]}))
 

@@ -1921,6 +1921,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 sections={sections}
                 shadowCapable={!device.connected || !!device.owwShadowCapable}
                 triggerCapable={!device.connected || !!device.owwTriggerCapable}
+                stopwordCapable={!device.connected || !!device.stopwordCapable}
                 mixCapable={!device.connected || !!device.audioMixCapable}
                 holdCapable={!device.connected || !!device.buttonHoldCapable}
                 onScopeChange={(id, local) => {
@@ -4956,6 +4957,7 @@ const STAGE_MONO = "'DM Mono',monospace";
 const CONFIG_SECTIONS = {
   "playback": ["eqBands", "eqLoudness", "ttsGainDb", "duckDb", "limiterEnabled", "limiterRelease", "bassGuardEnabled", "bassGuardDb"],
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "saveWakeCaptures", "wakeCaptureSec", "wakeNearMissFloor"],
+  "stopword": ["stopModel", "stopThreshold"],
   "microphones": ["afeMicGainDb", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs"],
@@ -4965,7 +4967,7 @@ const CONFIG_SECTIONS = {
 // Display labels for the section ids, and the reverse key -> section index
 // that lets a write be gated by the section owning the key it touches.
 const SECTION_LABELS = {
-  playback: 'Playback', wakeword: 'Wake word', microphones: 'Microphones',
+  playback: 'Playback', wakeword: 'Wake word', stopword: 'Stop word', microphones: 'Microphones',
   ring: 'Ring', advanced: 'Advanced', bluetooth: 'Bluetooth',
 };
 const KEY_SECTION = {};
@@ -5068,8 +5070,9 @@ function StageAdvanced({ open, onToggle, disabledStyle, children }) {
 // "Controller" rather than leaving every segment unselected, which would look
 // like a control that had lost its value.
 function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
-                            shadowCapable = true, mixCapable = true,
-                            holdCapable = true, triggerCapable = true }) {
+                             shadowCapable = true, mixCapable = true,
+                             holdCapable = true, triggerCapable = true,
+                             stopwordCapable = true }) {
   // shadowCapable defaults TRUE because this form is also the fleet-config
   // view, where there is no single device whose capability could gate a
   // control. Referencing a `device` here is what blank-screened the Config
@@ -5124,6 +5127,14 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
       await loadCustomModels();
       if (resp.model?.path) set('owwModel', resp.model.path);
     } catch (e) { alert(e.error || 'Model upload failed'); }
+  }
+  async function uploadStopModel(file) {
+    if (!file) return;
+    try {
+      const resp = await API.upload('/api/oww_models/stop/upload', file, 'model');
+      if (resp.model?.path) set('stopModel', resp.model.path);
+      alert('Stop model installed and selected as the fleet stop model.');
+    } catch (e) { alert(e.error || 'Stop model upload failed'); }
   }
 
   async function deleteWakeModel(m) {
@@ -5285,7 +5296,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                 <div style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)', marginTop: 2 }}>{m.value}</div>
               </div>
             ))}
-            {[...customModels, ...(orphanModel ? [orphanModel] : [])].map(m => (
+            {[...customModels.filter(m => m.kind !== 'stop'), ...(orphanModel ? [orphanModel] : [])].map(m => (
               <div key={m.path} onClick={() => set('owwModel', m.path)} style={{
                 background: config.owwModel === m.path
                   ? 'linear-gradient(160deg,var(--accent-tint),var(--accent-line))'
@@ -5388,7 +5399,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                   Needs the wake word runtime installed on this Echo (Updates tab) — costs ~0.4 of a core while it runs.
                 </div>
               )}
-              <Toggle label="Save wake captures" sub="keeps short clips of activations and near-misses to label and retrain — writes speech to disk; review under Settings → Training" value={config.saveWakeCaptures ?? false} onChange={v => set('saveWakeCaptures', v)}/>
+               <Toggle label="Save wake captures" sub="keeps short clips of activations and near-misses to label and retrain — writes speech to disk; review under Settings → Training" value={config.saveWakeCaptures ?? false} onChange={v => set('saveWakeCaptures', v)}/>
               {(config.saveWakeCaptures ?? false) && (
                 <Slider label="Capture length" sub="seconds of audio before each detection to keep" value={config.wakeCaptureSec ?? 2.0} min={0.5} max={5.0} step={0.5} unit="s" onChange={v => set('wakeCaptureSec', v)}/>
               )}
@@ -5397,8 +5408,38 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
         </div>
       </Stage>
 
-      {/* 03 MICROPHONES */}
-      <Stage n="03" title="Microphones"
+      {/* 03 STOP WORD */}
+      <Stage n="03" title="Stop word"
+        chips={<><ScopeChip tone="controller">Controller</ScopeChip><ScopeChip tone="device">Echo</ScopeChip></>}
+        desc="Mandatory local interruption for voice responses, announcements, and timer alerts. Stop is never disabled; the model is installed before the Echo is armed."
+        scope={scopeEl('stopword')} dim={secStyle('stopword')}>
+        <div style={{ maxWidth: 620 }}>
+          <Select label="Stop model" value={config.stopModel || 'stop'}
+            options={customModels.filter(m => m.kind === 'stop').map(m => ({
+              value: m.path || m.name,
+              label: `${m.name}${m.available === false ? ' (missing)' : ''}`,
+              disabled: m.available === false,
+            }))}
+            onChange={v => set('stopModel', v)}/>
+          <label className="em-pill em-pill--small" style={{ display: 'inline-block', cursor: 'pointer', marginBottom: 10 }}>
+            Upload stop ONNX
+            <input type="file" accept=".onnx" hidden onChange={e => { uploadStopModel(e.target.files[0]); e.target.value = ''; }}/>
+          </label>
+          <Slider label="Stop threshold" sub="confidence required during thinking and voice playback; one calibrated threshold is used in both phases"
+            value={Number(Number(config.stopThreshold ?? 0.75).toFixed(2))} min={0.01} max={1} step={0.01}
+            formatValue={v => v.toFixed(2)} onChange={v => set('stopThreshold', Number(v.toFixed(2)))}/>
+          {!stopwordCapable && (
+            <div className="em-label" style={{ color: 'var(--error)', marginTop: -8 }}>Unsupported firmware: this Echo does not declare the required stopword capability.</div>
+          )}
+          {!customModels.some(m => m.kind === 'stop' && (m.path === (config.stopModel || 'stop') || m.name === (config.stopModel || 'stop')) && m.available !== false) && (
+            <div className="em-label" style={{ color: 'var(--error)', marginTop: -8 }}>Stop model missing. Voice responses require a ready model.</div>
+          )}
+          <div className="em-label" style={{ marginTop: 6 }}>Requires stopword-capable firmware, installed runtime/model assets, and the paired Amazon AFE route. There is no disable switch.</div>
+        </div>
+      </Stage>
+
+      {/* 04 MICROPHONES */}
+      <Stage n="04" title="Microphones"
         chips={<ScopeChip tone="device">Device</ScopeChip>}
         desc="Amazon AFE provides the processed microphone stream. AFE mic gain is applied after AFE processing and before VAD, wake-word scoring, recordings, and controller transmission."
         scope={scopeEl('microphones')} dim={secStyle('microphones')}>
@@ -5410,8 +5451,8 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
         </StageAdvanced>
       </Stage>
 
-      {/* 04 RING */}
-      <Stage n="04" title="Ring"
+      {/* 05 RING */}
+      <Stage n="05" title="Ring"
         chips={<ScopeChip tone="controller">Controller</ScopeChip>}
         desc="Colours for the LED ring during conversations — the solid listening ring and the thinking spinner. The red mute ring and cyan volume arc never change; red always means the mics are off."
         scope={scopeEl('ring')} dim={secStyle('ring')}>
@@ -5493,8 +5534,8 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
         </StageAdvanced>
       </Stage>
 
-      {/* 05 ADVANCED — button-turn internals: processing + speech gate */}
-      <Stage n="05" title="Advanced"
+      {/* 06 ADVANCED — button-turn internals: processing + speech gate */}
+      <Stage n="06" title="Advanced"
         chips={<><ScopeChip tone="device">Device</ScopeChip><ScopeChip>Button turns only</ScopeChip></>}
         desc="Everything here affects only bounded button-press turns — except the action button setting, which decides whether a tap starts one at all. Wake-word turns stream continuously — Home Assistant's VAD endpoints them, and the controller closes accidental wakes after 5s of silence relative to the room's measured noise floor — so none of these settings touch the wake path."
         scope={scopeEl('advanced')} dim={secStyle('advanced')}>
@@ -5520,8 +5561,8 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
         </div>
       </Stage>
 
-      {/* 06 BLUETOOTH */}
-      <Stage n="06" title="Bluetooth"
+      {/* 07 BLUETOOTH */}
+      <Stage n="07" title="Bluetooth"
         chips={<><ScopeChip tone="device">Device</ScopeChip><ScopeChip tone="controller">Controller</ScopeChip></>}
         desc="Turns the device into a Home Assistant Bluetooth proxy: it passively listens for BLE advertisements (presence beacons, temperature sensors) and forwards them to HA through the EchoMuse integration's own scanner — independent of the voice assistant. Enabling permanently switches the Dot's Bluetooth chip away from Android's stack (Bluetooth speaker pairing, never used by EchoMuse, stops being possible)."
         scope={scopeEl('bluetooth')} dim={secStyle('bluetooth')}>
@@ -5669,7 +5710,7 @@ function DeployAllModal({ release, devices, deployState, onStarted, onDismiss, o
 // ─── SettingsPanel ─────────────────────────────────────────────────────────────
 // Gear icon → modal with two tabs: Fleet Config and Account.
 
-// WakeTrainingTab — admin triage of captured wake activations / near-misses.
+// WakeTrainingTab — admin triage of captured wake and stop-word examples.
 //
 // Captures are grouped by wake-word model stem. The admin works the untriaged
 // queue one clip at a time: play it, then mark "Should have activated"
@@ -5930,9 +5971,8 @@ function WakeTrainingTab({ onBacklog }) {
     return (
       <div style={{ maxWidth: 520 }}>
         <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--text2)', lineHeight: 1.7 }}>
-          No wake captures yet. Turn on <b>Save wake captures</b> under a device's
-          Config → Wake word (or fleet config), and clips of activations and
-          near-misses will collect here to label.
+          No training captures yet. Wake captures collect after enabling <b>Save wake captures</b>.
+          Stop captures are recorded by the armed post-AFE stop path; label either kind here.
         </div>
       </div>
     );
@@ -5941,14 +5981,14 @@ function WakeTrainingTab({ onBacklog }) {
   return (
     <div style={{ maxWidth: 620 }}>
       <div style={{ fontFamily: mono, fontSize: 10, color: 'var(--muted)', marginBottom: 16, lineHeight: 1.6 }}>
-        Play each clip and mark whether the wake word <b>should</b> have fired.
+        Play each clip and mark whether the model <b>should</b> have fired.
         Download the dataset when done and import it into oww_forge to retrain.
         <br/>Keys: <b>A</b> activated · <b>I</b> ignored · <b>D</b> discard · <b>U</b> undo · <b>Space</b> replay.
       </div>
 
       {/* Wake-word picker */}
       <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap', marginBottom: 18 }}>
-        <span className="em-label">Wake word</span>
+        <span className="em-label">Model</span>
         <select value={model || ''} onChange={e => setModel(e.target.value)}
           style={{ fontFamily: mono, fontSize: 12, padding: '6px 10px' }}>
           {models.map(m => (
@@ -5970,7 +6010,7 @@ function WakeTrainingTab({ onBacklog }) {
       {current ? (
         <div className="em-panel" style={{ padding: '18px 20px', marginBottom: 16 }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 12, fontFamily: mono, fontSize: 10, color: 'var(--text2)' }}>
-            <span>{current.kind === 'act' ? 'Activation' : 'Near-miss'} · score {current.score.toFixed(3)}</span>
+            <span>{({ act: 'Wake activation', miss: 'Wake near-miss', stop_act: 'Stop accepted', stop_miss: 'Stop missed', false_stop: 'False stop', playback_negative: 'Playback negative' }[current.kind] || current.kind)} · score {current.score.toFixed(3)}</span>
             <span style={{ color: 'var(--muted)' }}>{current.device_id} · {new Date(current.ts_ms).toLocaleString()}</span>
           </div>
            {audioUrl

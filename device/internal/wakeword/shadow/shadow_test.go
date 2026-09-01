@@ -3,6 +3,7 @@ package shadow
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -192,6 +193,43 @@ func TestCrossingFiresOncePerUtterance(t *testing.T) {
 	}
 }
 
+func TestTrustedScoreCallbackPrecedesCrossingAndCarriesSequence(t *testing.T) {
+	inf := &fakeInferer{}
+	var mu sync.Mutex
+	order := []string{}
+	events := []ScoreEvent{}
+	s := NewScorer(inf, 0.5, func(_ float32, _ float32, _ time.Time, _ uint16) {
+		mu.Lock()
+		order = append(order, "cross")
+		mu.Unlock()
+	})
+	defer s.Close()
+	s.SetScoreCallback(func(event ScoreEvent) {
+		mu.Lock()
+		events = append(events, event)
+		order = append(order, "score")
+		mu.Unlock()
+	})
+	inf.set(0, 0)
+	pushAll(t, s, wakeword.FeatWindow)
+	inf.set(0.8, 0)
+	s.PushBytesSequence(make([]byte, wakeword.ChunkSamples*2), 77)
+	waitFor(t, "score and crossing callbacks", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(order) >= 2
+	})
+	mu.Lock()
+	defer mu.Unlock()
+	last := events[len(events)-1]
+	if order[len(order)-2] != "score" || order[len(order)-1] != "cross" {
+		t.Fatalf("callback order = %v", order)
+	}
+	if last.Sequence != 77 || !last.Crossed || last.Score != 0.8 || last.Threshold != 0.5 {
+		t.Fatalf("score event = %#v", last)
+	}
+}
+
 func TestCrossingCarriesTheSourcePCMSequence(t *testing.T) {
 	inf := &fakeInferer{}
 	sequence := make(chan uint16, 1)
@@ -326,6 +364,95 @@ func TestCloseIsIdempotent(t *testing.T) {
 	s := NewScorer(&fakeInferer{}, 0.5, nil)
 	s.Close()
 	s.Close()
+}
+
+type sharedInferer struct {
+	mu          sync.Mutex
+	embedCalls  int
+	primaryFeat []float32
+}
+
+func (f *sharedInferer) Melspec(samples []float32) ([]float32, int, error) {
+	frames := len(samples)/160 - 3
+	if frames < 0 {
+		frames = 0
+	}
+	return make([]float32, frames*wakeword.MelBins), frames, nil
+}
+
+func (f *sharedInferer) Embed([]float32) ([]float32, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.embedCalls++
+	out := make([]float32, wakeword.FeatDim)
+	out[0] = float32(f.embedCalls)
+	return out, nil
+}
+
+func (f *sharedInferer) Classify(feats []float32) (float32, error) {
+	f.mu.Lock()
+	f.primaryFeat = append(f.primaryFeat[:0], feats...)
+	f.mu.Unlock()
+	return 0, nil
+}
+
+type recordingHead struct {
+	mu    sync.Mutex
+	feat  []float32
+	calls int
+}
+
+func (h *recordingHead) Classify(feats []float32) (float32, error) {
+	h.mu.Lock()
+	h.feat = append(h.feat[:0], feats...)
+	h.calls++
+	h.mu.Unlock()
+	return 0, nil
+}
+
+func TestExtraHeadSharesFeaturePipelineAndRunsOnlyWhenEnabled(t *testing.T) {
+	inf := &sharedInferer{}
+	head := &recordingHead{}
+	var enabled atomic.Bool
+	s := NewScorerWithHeads(inf, 0.5, nil, Head{
+		Classifier: head,
+		Threshold:  0.5,
+		Enabled:    enabled.Load,
+	})
+	defer s.Close()
+
+	pushAll(t, s, wakeword.FeatWindow)
+	head.mu.Lock()
+	before := head.calls
+	head.mu.Unlock()
+	if before != 0 {
+		t.Fatalf("disabled head classified %d times", before)
+	}
+
+	enabled.Store(true)
+	pushAll(t, s, 1)
+	inf.mu.Lock()
+	primary := append([]float32(nil), inf.primaryFeat...)
+	embeds := inf.embedCalls
+	inf.mu.Unlock()
+	head.mu.Lock()
+	extra := append([]float32(nil), head.feat...)
+	calls := head.calls
+	head.mu.Unlock()
+	if calls != 1 {
+		t.Fatalf("enabled head calls = %d, want 1", calls)
+	}
+	if embeds != wakeword.FeatWindow+1 {
+		t.Fatalf("embedding calls = %d, want %d; head caused a second feature pass", embeds, wakeword.FeatWindow+1)
+	}
+	if len(primary) != len(extra) {
+		t.Fatalf("feature lengths = %d and %d", len(primary), len(extra))
+	}
+	for i := range primary {
+		if primary[i] != extra[i] {
+			t.Fatalf("feature[%d] differs: primary=%v head=%v", i, primary[i], extra[i])
+		}
+	}
 }
 
 // processed and peek let tests observe the scorer without racing on state the

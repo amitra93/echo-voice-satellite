@@ -21,16 +21,6 @@ import em_db
 CONTROLLER = Path(__file__).resolve().parents[1]
 
 
-def test_local_deployment_uses_the_canonical_controller_api_port():
-    """The local deployment must match the documented/add-on API port."""
-    compose = (CONTROLLER / "docker-compose.new-impl.yaml").read_text()
-    config = (CONTROLLER / "config.yaml").read_text()
-
-    assert "API_PORT=8768" in compose
-    assert "API_PORT=8771" not in compose
-    assert "ingress_port: 8768" in config
-
-
 def test_test_audio_is_transferred_before_the_device_query_is_started():
     """The E2E test must use a temporary device WAV, not local injection."""
     api = (CONTROLLER / "em_api.py").read_text()

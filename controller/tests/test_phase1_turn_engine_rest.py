@@ -406,8 +406,115 @@ def test_trigger_voice_turn_offers_the_wake_and_reports_terminal_outcome(fresh_e
         "type": "wake.offer", "device_id": "device-1", "turn_id": offer["turn_id"],
         "trigger": "wakeword(0.9)",
     }
+
+
+def test_request_turn_waits_for_acceptance_before_grant(fresh_engine, turn_db):
+    async def run():
+        device = FakeDevice()
+        sent = []
+        device.send_control = lambda message: asyncio.sleep(0, result=sent.append(message))
+
+        async def drive_turn():
+            for _ in range(50):
+                if engine.ENGINE.turns:
+                    break
+                await asyncio.sleep(0.01)
+            turn = next(iter(engine.ENGINE.turns.values()))
+            assert sent == []
+            await engine.turn_action(_Request(
+                {"tid": str(turn.turn_id)},
+                path=f"/api/turns/{turn.turn_id}/accept",
+            ))
+            turn.socket_ready.set()
+            while not sent:
+                await asyncio.sleep(0)
+            assert engine.confirm_device_started(device, "boot:1", turn.turn_id)
+            turn.endpoint.set()
+            turn.tts_end.set()
+
+        driver = asyncio.create_task(drive_turn())
+        await engine.trigger_voice_turn(
+            device, None, None, trigger_label="wakeword-dev(0.9)",
+            request_id="boot:1",
+        )
+        await driver
+        return sent
+
+    sent = asyncio.run(run())
+    assert sent == [{"type": "wake_grant", "requestId": "boot:1", "turnId": 1}]
     terminal = next(e for e in fresh_engine if e["type"] == "turn.terminal")
     assert terminal["outcome"] == "ok"
+
+
+def test_unaccepted_request_turn_is_persisted_terminal_and_denied(
+    fresh_engine, turn_db, monkeypatch,
+):
+    monkeypatch.setattr(engine, "TURN_ACCEPT_TIMEOUT_S", 0.01)
+
+    async def run():
+        device = FakeDevice()
+        sent = []
+        device.send_control = lambda message: asyncio.sleep(
+            0, result=sent.append(message)
+        )
+        result = await engine.trigger_voice_turn(
+            device, None, None, trigger_label="wakeword-dev(0.9)",
+            request_id="boot:2",
+        )
+        return result, sent
+
+    result, sent = asyncio.run(run())
+    assert result is False
+    assert sent == [{
+        "type": "wake_deny", "requestId": "boot:2",
+        "reason": "backend_unavailable",
+    }]
+    terminal = next(e for e in fresh_engine if e["type"] == "turn.terminal")
+    assert terminal["outcome"] == "backend_unavailable"
+    assert any(e["type"] == "turn.cancel" for e in fresh_engine)
+    assert em_db.get_turn(terminal["turn_id"])["outcome"] == "backend_unavailable"
+    assert engine.ENGINE.turns == {}
+
+
+def test_device_started_ack_must_match_device_request_and_turn(fresh_engine):
+    device = FakeDevice()
+    other = FakeDevice("other")
+    turn = engine.Turn(7, device, None, None, request_id="boot:7")
+    engine.ENGINE.turns[7] = turn
+
+    assert not engine.confirm_device_started(other, "boot:7", 7)
+    assert not engine.confirm_device_started(device, "stale", 7)
+    assert not engine.confirm_device_started(device, "boot:7", 8)
+    assert engine.confirm_device_started(device, "boot:7", 7)
+    assert turn.device_started.is_set()
+
+
+def test_cancelled_provisional_turn_is_persisted_and_terminalized(
+    fresh_engine, turn_db,
+):
+    async def run():
+        device = FakeDevice()
+        device.send_control = lambda message: asyncio.sleep(0)
+        task = asyncio.create_task(engine.trigger_voice_turn(
+            device, None, None, trigger_label="wakeword-dev(0.9)",
+            request_id="boot:cancel",
+        ))
+        for _ in range(50):
+            if engine.ENGINE.turns:
+                break
+            await asyncio.sleep(0.01)
+        turn_id = next(iter(engine.ENGINE.turns))
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return turn_id
+
+    turn_id = asyncio.run(run())
+    assert em_db.get_turn(turn_id)["outcome"] == "disconnected"
+    terminal = next(e for e in fresh_engine if e["type"] == "turn.terminal")
+    assert terminal["turn_id"] == turn_id
+    assert terminal["outcome"] == "disconnected"
+    assert engine.ENGINE.turns == {}
 
 
 def test_trigger_voice_turn_recovers_and_reports_audio_timeout_when_endpoint_never_arrives(

@@ -11,6 +11,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/wilbowes/EchoMuse/internal/config"
+	"github.com/wilbowes/EchoMuse/internal/stopword"
+	"github.com/wilbowes/EchoMuse/internal/wakeword/capture"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/shadow"
 	"github.com/wilbowes/EchoMuse/pkg/mic"
 	"github.com/wilbowes/EchoMuse/pkg/speaker"
@@ -100,7 +102,8 @@ const (
 // ─── VAD constants ────────────────────────────────────────────────────────────
 
 const (
-	vadOwwChunkBytes = 1280 * 2 // 2560 bytes = 80ms
+	vadOwwChunkBytes  = 1280 * 2 // 2560 bytes = 80ms
+	turnPrerollFrames = 25       // 2 seconds of local detector history
 
 	// prerollBudgetMs is how much pre-gate audio is retained while the VAD
 	// gate is closed and flushed upstream the moment it opens. The ring is
@@ -198,19 +201,86 @@ type DataClient struct {
 	// acting on it (internal/wakeword/shadow), nil when off. Guarded because
 	// a config push swaps it from the control goroutine while the mic
 	// goroutine is pushing frames into it.
-	shadowMu     sync.Mutex
-	shadowScorer *shadow.Scorer
+	shadowMu        sync.Mutex
+	shadowScorer    *shadow.Scorer
+	wakeMu          sync.Mutex
+	wakeGranted     bool
+	grantEpoch      uint64
+	activeRequestID string
+	pendingReplay   []capture.Frame
+	localRing       *capture.Ring
+	captureManager  *capture.Manager
+
+	stopMu       sync.Mutex
+	stopScorer   *shadow.Scorer
+	sharedStop   bool
+	stopManager  stopword.Manager
+	stopCallback func(arm stopword.Arm, score, threshold float32, at time.Time)
 }
 
 // NewDataClient wires the mandatory Amazon AFE mono mic stream to the speaker.
 func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Speaker) *DataClient {
+	ring := capture.New(capture.DefaultFrames)
 	return &DataClient{
-		deviceID: deviceID,
-		mic:      microphone,
-		spk:      spk,
-		readyCh:  make(chan string, 1),
+		deviceID:       deviceID,
+		mic:            microphone,
+		spk:            spk,
+		readyCh:        make(chan string, 1),
+		localRing:      ring,
+		captureManager: capture.NewManager(ring),
 	}
 }
+
+// GrantMic releases the local microphone stream to the controller. The next
+// processed frame replays detector preroll before live PCM.
+func (d *DataClient) GrantMic(requestID string, activationSeq uint16, replay bool, expires time.Time) bool {
+	d.wakeMu.Lock()
+	defer d.wakeMu.Unlock()
+	if !expires.IsZero() && !time.Now().Before(expires) {
+		return false
+	}
+	if replay {
+		frames, complete := d.localRing.SnapshotFrom(activationSeq, turnPrerollFrames)
+		if !complete {
+			return false
+		}
+		d.pendingReplay = frames
+	} else {
+		d.pendingReplay = nil
+	}
+	d.wakeGranted = true
+	d.grantEpoch++
+	d.activeRequestID = requestID
+	return true
+}
+
+func (d *DataClient) ConfigureWakeCaptures(enabled bool, seconds, floor float64, model, checksum string) {
+	hadInFlight := !enabled && d.captureManager.HasInFlight()
+	frames := int(seconds * 1000 / capture.FrameMs)
+	d.captureManager.Configure(capture.Settings{
+		Enabled: enabled, Frames: frames, NearMissFloor: float32(floor),
+		Model: shadow.ModelStem(model), ClassifierMD5: checksum,
+	})
+	if hadInFlight {
+		d.connMu.Lock()
+		if d.conn != nil {
+			d.conn.Close()
+		}
+		d.connMu.Unlock()
+	}
+}
+
+func (d *DataClient) ObserveWakeScore(event shadow.ScoreEvent) {
+	d.captureManager.Observe(event)
+}
+
+func (d *DataClient) BindActivationRequest(sequence uint16, requestID string) {
+	d.captureManager.BindRequest(sequence, requestID)
+}
+
+func (d *DataClient) GrantCapture(requestID string)    { d.captureManager.Grant(requestID) }
+func (d *DataClient) DenyCapture(requestID string)     { d.captureManager.Deny(requestID) }
+func (d *DataClient) AckCapture(captureID string) bool { return d.captureManager.Ack(captureID) }
 
 // SetShadowScorer installs (or removes, with nil) the on-device wake word
 // scorer. Any previous scorer is closed, which releases its ONNX Runtime
@@ -225,6 +295,7 @@ func (d *DataClient) SetShadowScorer(s *shadow.Scorer) {
 	old := d.shadowScorer
 	d.shadowScorer = s
 	d.shadowMu.Unlock()
+	d.localRing.Clear()
 	if old != nil {
 		old.Close()
 	}
@@ -235,6 +306,108 @@ func (d *DataClient) ShadowScorer() *shadow.Scorer {
 	d.shadowMu.Lock()
 	defer d.shadowMu.Unlock()
 	return d.shadowScorer
+}
+
+// SetStopScorer installs the dedicated classifier. It is only fed while an
+// arm is live, so loading a configured model does not consume idle CPU.
+func (d *DataClient) SetStopScorer(s *shadow.Scorer) {
+	d.stopMu.Lock()
+	old := d.stopScorer
+	d.stopScorer = s
+	d.stopMu.Unlock()
+	if old != nil {
+		old.Close()
+	}
+}
+
+// SetSharedStop records that the stop head is attached to ShadowScorer rather
+// than a separate scorer. The mic path therefore pushes one shared pipeline.
+func (d *DataClient) SetSharedStop(shared bool) {
+	d.stopMu.Lock()
+	d.sharedStop = shared
+	d.stopMu.Unlock()
+}
+
+func (d *DataClient) SharedStop() bool {
+	d.stopMu.Lock()
+	defer d.stopMu.Unlock()
+	return d.sharedStop
+}
+
+func (d *DataClient) StopArmed() bool { return d.stopManager.Active() }
+
+func (d *DataClient) StopScorer() *shadow.Scorer {
+	d.stopMu.Lock()
+	defer d.stopMu.Unlock()
+	return d.stopScorer
+}
+
+func (d *DataClient) OnStopDetected(cb func(arm stopword.Arm, score, threshold float32, at time.Time)) {
+	d.stopMu.Lock()
+	d.stopCallback = cb
+	d.stopMu.Unlock()
+}
+
+func (d *DataClient) ArmStop(turnID string, generation uint64, phase string, expiry time.Duration) bool {
+	d.micMu.Lock()
+	micActive := d.micActive
+	d.micMu.Unlock()
+	if !micActive {
+		log.Printf("[stopword] arm rejected for generation %d: AFE mic stream inactive", generation)
+		return false
+	}
+	d.stopMu.Lock()
+	shared := d.sharedStop
+	d.stopMu.Unlock()
+	if d.StopScorer() == nil && !shared {
+		log.Printf("[stopword] arm rejected for generation %d: scorer not ready", generation)
+		return false
+	}
+	if err := d.stopManager.Arm(turnID, generation, phase, expiry); err != nil {
+		log.Printf("[stopword] arm rejected for generation %d: %v", generation, err)
+		return false
+	}
+	// A new response must never inherit feature history from a prior arm.
+	// A standalone stop scorer starts fresh per arm. A shared scorer must keep
+	// its wake feature history intact; its stop head is simply enabled now.
+	if !shared {
+		d.StopScorer().Reset()
+	}
+	log.Printf("[stopword] armed generation %d for %s (%s)", generation, turnID, phase)
+	return true
+}
+
+func (d *DataClient) DisarmStop(generation uint64) {
+	if d.stopManager.Disarm(generation) {
+		log.Printf("[stopword] disarmed generation %d", generation)
+	} else {
+		log.Printf("[stopword] stale disarm generation %d ignored", generation)
+	}
+}
+
+func (d *DataClient) pushStop(b []byte) {
+	if !d.stopManager.Active() {
+		return
+	}
+	if sc := d.StopScorer(); sc != nil {
+		sc.PushBytes(b)
+	}
+}
+
+// HandleStopCrossing consumes a live arm and invokes the local interrupt
+// callback. It is called by the scorer goroutine, never the mic goroutine.
+func (d *DataClient) HandleStopCrossing(score, threshold float32, at time.Time) {
+	arm, ok := d.stopManager.Accept()
+	if !ok {
+		log.Printf("[stopword] stale or duplicate crossing ignored")
+		return
+	}
+	d.stopMu.Lock()
+	cb := d.stopCallback
+	d.stopMu.Unlock()
+	if cb != nil {
+		cb(arm, score, threshold, at)
+	}
 }
 
 func (d *DataClient) NotifyReady(serverAddr string) {
@@ -266,6 +439,12 @@ func (d *DataClient) StartMic(lockMic bool) {
 	d.micActive = true
 	d.micStopCh = make(chan struct{})
 	d.micConn = conn
+	d.wakeMu.Lock()
+	d.wakeGranted = false
+	d.activeRequestID = ""
+	d.pendingReplay = nil
+	d.wakeMu.Unlock()
+	d.localRing.Clear()
 	go d.streamMic(conn, d.micStopCh, lockMic)
 	log.Println("[data] Mic streaming started")
 }
@@ -278,6 +457,16 @@ func (d *DataClient) StopMic() {
 	}
 	close(d.micStopCh)
 	d.micActive = false
+	d.wakeMu.Lock()
+	requestID := d.activeRequestID
+	d.wakeGranted = false
+	d.activeRequestID = ""
+	d.pendingReplay = nil
+	d.wakeMu.Unlock()
+	if requestID != "" {
+		d.captureManager.EndSTT(requestID)
+	}
+	d.localRing.Clear()
 	// beam.Unlock() is deferred inside streamMic — always runs on the mic
 	// goroutine, eliminating the data race with Process() and Lock().
 	log.Println("[data] Mic streaming stopped")
@@ -349,7 +538,11 @@ func (d *DataClient) connect(ctx context.Context, baseURL string) error {
 	d.connMu.Lock()
 	d.conn = conn
 	d.connMu.Unlock()
-
+	// The data plane is also the local detector's transport lifecycle. Start
+	// the local-only stream as soon as the socket is identified; the controller
+	// must not have to request idle microphone audio in order for wake detection
+	// to run.
+	d.StartMic(false)
 	// Exit cleanup is ownership-guarded (2026-07-16): the control client
 	// cancels this connection's context and spawns a replacement data.Run on
 	// every control reconnect, so by the time this defer runs a replacement
@@ -384,6 +577,7 @@ func (d *DataClient) connect(ctx context.Context, baseURL string) error {
 	})
 	done := make(chan struct{})
 	defer close(done)
+	go d.runCaptureUploader(ctx, done, conn)
 
 	// Context watcher — cancellation must tear down an ESTABLISHED
 	// connection, not just abort a dial. The control client cancels this
@@ -482,11 +676,8 @@ func (d *DataClient) connect(ctx context.Context, baseURL string) error {
 	}
 }
 
-// streamMic subscribes to the mic, runs the processing pipeline, and streams
-// binary frames to the controller. The always-on wake stream (!lockMic) is
-// ungated and AGC-free: every period is sent, continuously. Bounded turn
-// streams (lockMic) keep the VAD gate, preroll ring, end-of-speech sentinels,
-// and no-speech timer.
+// streamMic subscribes to the mic and runs the local processing pipeline.
+// Network audio is withheld until GrantMic releases a wake-admitted turn.
 func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, lockMic bool) {
 	if d.mic == nil {
 		log.Println("[data] streamMic: no mic")
@@ -517,6 +708,18 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			d.micActive = false
 		}
 		d.micMu.Unlock()
+		if owner {
+			d.wakeMu.Lock()
+			d.wakeGranted = false
+			requestID := d.activeRequestID
+			d.activeRequestID = ""
+			d.pendingReplay = nil
+			d.wakeMu.Unlock()
+			if requestID != "" {
+				d.captureManager.EndSTT(requestID)
+			}
+			d.localRing.Clear()
+		}
 		log.Println("[data] streamMic: exited")
 	}()
 
@@ -530,12 +733,14 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 	active := false
 	everActive := false // true once active has been true at least once this turn
 	buf := make([]byte, 0, vadOwwChunkBytes*4)
+	detectorBuf := make([]byte, 0, vadOwwChunkBytes*2)
 	// preroll ring — processed mono periods captured while the gate is
 	// closed, oldest first. Flushed into buf at gate open, cleared while
 	// active. Slices are retained (not copied): Process() returns a fresh
 	// allocation each period, so nothing aliases them.
 	preroll := make([][]byte, 0, prerollBudgetMs/160+1) // capacity hint at the real batch cadence
-	var seqNum uint16
+	var detectorSeq uint16
+	var wireSeq uint16
 	var periodCount uint64 // periodic RMS diagnostic
 	var afeClipped uint64
 
@@ -560,11 +765,10 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 		sc.Reset()
 	}
 
-	sendFrame := func(payload []byte) {
+	sendFrame := func(sequence uint16, payload []byte) {
 		frame := make([]byte, 3+len(payload))
 		frame[0] = frameTypeMic
-		binary.BigEndian.PutUint16(frame[1:3], seqNum)
-		seqNum++
+		binary.BigEndian.PutUint16(frame[1:3], sequence)
 		copy(frame[3:], payload)
 		d.connMu.Lock()
 		conn.SetWriteDeadline(time.Now().Add(wsWriteWait))
@@ -578,6 +782,10 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			conn.Close()
 		}
 	}
+	sendMic := func(payload []byte) {
+		sendFrame(wireSeq, payload)
+		wireSeq++
+	}
 
 	// noSpeechTimer fires if speech is never detected within noSpeechTimeout
 	// of turn start. Stopped (and its channel drained) the instant active
@@ -585,29 +793,62 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 	// owned by the existing silenceMax hysteresis below, same as before
 	// this change.
 	//
-	// Only armed when lockMic is true. Per SETUP.md's mic_start semantics:
-	// mic_start with no lock_mic is the permanent, always-on ch6/omni
-	// wake-word listening stream (started once at connect, meant to run
-	// indefinitely) — mic_start with lock_mic:true is a bounded voice turn
-	// (post-wake-word or button press, perimeter mic locked for the turn's
-	// duration). The no-speech timeout is only meaningful for the latter;
-	// arming it unconditionally silently killed the permanent listening
-	// stream after 5s of ordinary silence, with nothing to restart it,
-	// breaking wake-word detection entirely until a button press happened
-	// to re-enter streamMic fresh. Confirmed against real device logs
-	// before this fix: "no speech detected within timeout" fired 5s after
-	// every idle-listening Mic streaming started, with no corresponding
-	// StartMic call to bring it back.
+	// Only armed for a granted bounded turn. The pre-grant local detector stream
+	// must never end because the room is quiet.
 	//
 	// When not armed, noSpeechTimerC stays nil — a nil channel blocks
 	// forever in a select, which is the idiomatic Go way to permanently
 	// disable a select case at zero runtime cost.
 	var noSpeechTimer *time.Timer
 	var noSpeechTimerC <-chan time.Time
-	if lockMic {
+	defer func() {
+		if noSpeechTimer != nil {
+			noSpeechTimer.Stop()
+		}
+	}()
+	stopNoSpeechTimer := func() {
+		if noSpeechTimer == nil {
+			return
+		}
+		if !noSpeechTimer.Stop() {
+			select {
+			case <-noSpeechTimerC:
+			default:
+			}
+		}
+		noSpeechTimer, noSpeechTimerC = nil, nil
+	}
+	armNoSpeechTimer := func() {
+		stopNoSpeechTimer()
 		noSpeechTimer = time.NewTimer(effectiveNoSpeechTimeout())
-		defer noSpeechTimer.Stop()
 		noSpeechTimerC = noSpeechTimer.C
+	}
+	resetTurnState := func() {
+		stopNoSpeechTimer()
+		speechCount, silenceCount = 0, 0
+		active, everActive, lockMic = false, false, false
+		buf = buf[:0]
+		preroll = preroll[:0]
+	}
+	turnEpoch := uint64(0)
+	finishGrant := func(epoch uint64, sentinel byte) bool {
+		d.wakeMu.Lock()
+		if !d.wakeGranted || d.grantEpoch != epoch {
+			d.wakeMu.Unlock()
+			return false
+		}
+		requestID := d.activeRequestID
+		d.wakeGranted = false
+		d.activeRequestID = ""
+		d.pendingReplay = nil
+		// Keep the grant lock through the write so a replacement grant cannot
+		// be installed before this turn's terminal sentinel is on the wire.
+		sendMic([]byte{sentinel})
+		d.wakeMu.Unlock()
+		if requestID != "" {
+			d.captureManager.EndSTT(requestID)
+		}
+		return true
 	}
 
 	for {
@@ -618,11 +859,12 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 		case <-noSpeechTimerC:
 			// Timer firing implies active was never true — if it had been,
 			// this case would already be unreachable (timer stopped below).
-			// Unreachable entirely when !lockMic, since noSpeechTimerC is
-			// nil in that case and a nil channel never becomes ready.
+			// Unreachable for the local-only stream, since noSpeechTimerC is nil
+			// there and a nil channel never becomes ready.
 			log.Println("[data] streamMic: no speech detected within timeout — ending turn")
-			sendFrame([]byte{frameTypeNoSpeechTimeout})
-			return
+			finishGrant(turnEpoch, frameTypeNoSpeechTimeout)
+			resetTurnState()
+			continue
 
 		case raw, ok := <-ch:
 			if !ok {
@@ -654,6 +896,44 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			// Amazon AFE supplies mono, beamformed, echo-cancelled S16 audio.
 			mono := raw
 			afeClipped += applyS16Gain(mono, gainLin)
+			detectorBuf = append(detectorBuf, mono...)
+			d.wakeMu.Lock()
+			replay := d.pendingReplay
+			d.pendingReplay = nil
+			for len(detectorBuf) >= vadOwwChunkBytes {
+				frame := detectorBuf[:vadOwwChunkBytes]
+				localSequence := detectorSeq
+				detectorSeq++
+				d.localRing.Push(localSequence, frame)
+				if sc := d.ShadowScorer(); sc != nil {
+					sc.PushBytesSequence(frame, localSequence)
+				}
+				detectorBuf = detectorBuf[vadOwwChunkBytes:]
+			}
+			granted := d.wakeGranted
+			epoch := d.grantEpoch
+			d.wakeMu.Unlock()
+			if granted && epoch != turnEpoch {
+				resetTurnState()
+				turnEpoch = epoch
+			}
+			if len(replay) > 0 {
+				for _, frame := range replay {
+					sendMic(frame.PCM)
+				}
+				lockMic = true
+				active = true
+			}
+			if !granted {
+				continue
+			}
+			// A grant turns the local detector stream into the bounded turn
+			// stream. This is deliberately decided per frame so the grant can
+			// arrive while the AFE subscription is already running.
+			lockMic = true
+			if noSpeechTimer == nil && !active {
+				armNoSpeechTimer()
+			}
 
 			// ── Processing pipeline ──────────────────────────────────────
 			// VAD runs on the processed AFE output before it is sent upstream.
@@ -701,36 +981,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			}
 			periodCount++
 
-			// Ungated wake stream: the always-on (!lockMic) stream sends
-			// every processed period, batched into 80ms chunks — no VAD
-			// gate, no preroll, no end-of-speech sentinels. openwakeword
-			// is a streaming model whose internal mel-spectrogram buffer
-			// assumes continuous audio; feeding it VAD-gated bursts spliced
-			// together (even with preroll) measurably depresses scores, and
-			// an absolute RMS threshold is wrong in at least one room of
-			// every home. Bandwidth is a non-issue: 16kHz mono S16 is
-			// 32KB/s, ~12.5 frames/s at this chunk size — 6× smaller than
-			// the TTS playback stream. Turn endpointing for wake-triggered
-			// turns is owned controller-side (HA STT_VAD_END in esphome
-			// mode, plus the controller's own no-speech timeout); the RMS
-			// gate below now serves only bounded lockMic turns.
 			if !lockMic {
-				buf = append(buf, mono...)
-				for len(buf) >= vadOwwChunkBytes {
-					// Score the SAME bytes on the SAME 80ms boundaries the
-					// controller receives, so a device/controller score
-					// difference can only be the engine and not the framing.
-					// PushBytes never blocks: it drops when the scorer is
-					// behind rather than delaying this loop, which reads
-					// 160ms ALSA batches out of a 160ms-deep ring.
-					// Re-read per frame: a config push can swap the scorer
-					// mid-stream, and the replaced one is closed.
-					if sc := d.ShadowScorer(); sc != nil {
-						sc.PushBytesSequence(buf[:vadOwwChunkBytes], seqNum)
-					}
-					sendFrame(buf[:vadOwwChunkBytes])
-					buf = buf[vadOwwChunkBytes:]
-				}
 				continue
 			}
 
@@ -757,14 +1008,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 							// above). Stop the timer; drain per
 							// time.Timer.Stop's documented pattern in case
 							// it raced and already fired.
-							if noSpeechTimer != nil {
-								if !noSpeechTimer.Stop() {
-									select {
-									case <-noSpeechTimerC:
-									default:
-									}
-								}
-							}
+							stopNoSpeechTimer()
 						}
 					}
 				}
@@ -779,12 +1023,14 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 							pad := make([]byte, vadOwwChunkBytes-len(buf)%vadOwwChunkBytes)
 							buf = append(buf, pad...)
 							for len(buf) >= vadOwwChunkBytes {
-								sendFrame(buf[:vadOwwChunkBytes])
+								sendMic(buf[:vadOwwChunkBytes])
 								buf = buf[vadOwwChunkBytes:]
 							}
 							buf = buf[:0]
 						}
-						sendFrame([]byte{frameTypeVADEnd})
+						finishGrant(turnEpoch, frameTypeVADEnd)
+						resetTurnState()
+						continue
 					}
 				}
 			}
@@ -792,7 +1038,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			if active {
 				buf = append(buf, mono...)
 				for len(buf) >= vadOwwChunkBytes {
-					sendFrame(buf[:vadOwwChunkBytes])
+					sendMic(buf[:vadOwwChunkBytes])
 					buf = buf[vadOwwChunkBytes:]
 				}
 			} else {

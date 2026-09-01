@@ -12,7 +12,7 @@ that are eligible to play voice responses.
 
 - The stop model accepts `stop` only, with pronunciation variants trained as
   data rather than a broad phrase list.
-- It stops voice responses and announcements.
+- It stops voice responses, announcements, and firing timer alerts.
 - It cancels an Assist pipeline that is still thinking.
 - It does not stop background music.
 - It does not start a follow-up Assist turn.
@@ -99,7 +99,7 @@ The controller sends a `stop_arm` message containing:
 
 - `turnId`;
 - monotonically increasing `generation`;
-- phase: `thinking` or `playback`;
+- phase: `thinking`, `playback`, or `timer`;
 - expiry/dead-man interval;
 - one calibrated stop threshold.
 
@@ -180,6 +180,8 @@ controller.
 
 - Arm during `on_thinking` after STT has ended.
 - Change to the playback threshold when TTS playback starts.
+- Arm when a timer starts firing and use the playback threshold while its alert
+  audio is active.
 - Disarm at every terminal path: success, stop, cancel, error, timeout, and
   disconnect.
 - Stop arming must work independently of the existing optional ordinary
@@ -442,6 +444,7 @@ The device should log:
 - stop during thinking;
 - stop during TTS with several seconds already buffered;
 - stop during an announcement;
+- stop while a timer is firing;
 - TTS does not self-stop;
 - music continues after voice stop;
 - controller disconnect after local stop still silences voice;
@@ -629,6 +632,83 @@ accepted stop, independently of controller/HACS acknowledgement.
 after STT ends and the controller arms the turn. This accepts the roughly
 1.28-second initial readiness latency in exchange for no permanent idle CPU
 cost.
+
+### D25. Timer alerts
+
+**Decision: timer alerts are stoppable.** Arm the stop model for the local
+device while a timer is firing, using the playback threshold. An accepted stop
+immediately flushes that device's voice plane and cancels only its matching
+timer-alert turn; it does not affect timer audio on other devices.
+
+### D26. Delivery scope
+
+**Decision: implement the complete design.** The device runtime, controller,
+HACS integration, dashboard, training captures, and Forge workflow ship as one
+feature. Later phases may depend on earlier ones, but no part is intentionally
+left as a follow-up.
+
+### D27. Bundled stop model
+
+**Decision: use a built-in fixed model.** The controller image provides the
+ONNX classifier at a fixed path and model ID. Startup seeds it into the
+controller model registry as the fleet default without requiring an admin
+upload.
+
+### D28. Initial threshold
+
+**Decision: ship a conservative configurable default.** The default is kept in
+controller configuration and exposed in the Wake word section. It is tuned from
+post-AFE field captures; no model-side threshold metadata is authoritative.
+
+### D29. Mandatory enforcement timing
+
+**Decision: enforce immediately.** When this feature ships, a device without
+the `stopword` capability, selected installed model, ready runtime, or required
+paired AFE cannot begin a voice response or announcement. Runtime failures use
+the D16 visible-degraded policy after a previously ready device fails.
+
+## Implementation Phases
+
+### Phase 1: Controller contracts and persistence
+
+Add the pure `em_stop` arm state machine; device config defaults and scoping;
+model registry roles; stop asset planning; database migration and aggregate
+observability. Unit-test state transitions, stale/duplicate rejection,
+configuration partitioning, model-role validation, and two-pinned-model asset
+plans.
+
+### Phase 2: Device-local interrupt runtime
+
+Refactor the streaming feature path to fan out shared embeddings to wake and
+stop heads. Add `stopword`, `stop_arm`, and `stop_detected`; validate paired AFE
+before arming; flush only voice audio and pulse locally on acceptance. Unit-test
+fixture compatibility, head fan-out, generation/expiry behavior, safe model
+replacement, and voice-versus-music flush semantics.
+
+### Phase 3: Controller and HACS cancellation path
+
+Wire arming to thinking, playback, announcements, and new per-device timer
+alert turns. Handle accepted device detections idempotently, persist `stopped`,
+and send targeted HACS cancellation. HACS tracks and cancels Assist/TTS tasks,
+resolves the audio rendezvous, and rejects late events. Unit-test cancellation,
+late-event isolation, no-follow-up-turn behavior, timer isolation, and every
+terminal disarm path.
+
+### Phase 4: Mandatory readiness and dashboard
+
+Enforce readiness before starting voice audio. Surface fixed-model state,
+installation, AFE/capability/runtime health, model selection, and thresholds in
+the dashboard. Add controller stop captures and labelling/export. Unit-test
+readiness gates, install-before-arm ordering, API authorization, and dashboard
+config parity.
+
+### Phase 5: Forge and rollout validation
+
+Add purpose-aware stop model creation, stop-specific data import/evaluation,
+and threshold/false-stop reporting. Validate controller and device suites in
+CI, then perform hardware post-AFE tests for TTS overlap, false stops, local
+flush latency, timers, and controller-disconnect behavior before production
+deployment.
 
 ### D11/D12. Final AEC runtime policy
 
@@ -831,3 +911,11 @@ for playback arming.
   and playback.
 - **C. Device-specific policy:** always warm only on devices meeting measured
   CPU/thermal headroom criteria.
+
+### D25. Timer alerts
+
+- **A. Stoppable timer alerts:** run the stop model while a timer is firing and
+  stop its local alert audio on acceptance.
+- **B. Non-stoppable timer alerts:** do not arm stop detection for timer audio.
+- **C. Configurable timer alerts:** allow callers or users to choose whether a
+  timer alert is stoppable.

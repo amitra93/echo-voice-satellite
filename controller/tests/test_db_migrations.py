@@ -205,6 +205,13 @@ def test_v23_removes_only_obsolete_direct_capture_config(tmp_path):
 
 
 def test_v24_removes_retired_audio_config(tmp_path):
+    """
+    Only the capture-side AFE settings are retired here. ttsGainDb is a live
+    playback-side control (TTS output gain) and must survive this migration —
+    it was swept into the original retirement set by mistake because it
+    shipped alongside the capture settings that genuinely were superseded,
+    and a fresh database silently lost its own seeded default because of it.
+    """
     p = _legacy_db(tmp_path, upto=23)
     conn = sqlite3.connect(p)
     old = {"ttsGainDb": 4, "bassShelfHz": 100, "subsonicHz": 60,
@@ -220,4 +227,4 @@ def test_v24_removes_retired_audio_config(tmp_path):
     fleet = json.loads(conn.execute(
         "SELECT value FROM system_config WHERE key = 'global_device_config'").fetchone()[0])
     device = json.loads(conn.execute("SELECT config FROM devices").fetchone()[0])
-    assert fleet == device == {"eqBands": [1]}
+    assert fleet == device == {"ttsGainDb": 4, "eqBands": [1]}

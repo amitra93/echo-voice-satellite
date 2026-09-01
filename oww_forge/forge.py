@@ -18,6 +18,7 @@ Typical flow:
 """
 
 import argparse
+import hashlib
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 import itertools
@@ -40,6 +41,10 @@ MODELS = DATA / "models"
 CREDENTIALS = DATA / "credentials.json"
 FORGE_DIR = Path(__file__).parent
 TRAIN_PY = "/opt/openwakeword/openwakeword/train.py"
+FORGE_VERSION = "1"
+MODEL_KINDS = ("wake", "stop")
+STOP_DEFAULT_PHRASE = "stop"
+STOP_DEFAULT_CONFUSABLES = "top,shop,drop,start,don't"
 
 PIPER_CKPT = ASSETS / "piper" / "en_US-libritts_r-medium.pt"
 PIPER_CKPT_URL = (
@@ -932,6 +937,9 @@ def missing_assets(config: dict | None = None) -> list:
 def cmd_new(args) -> None:
     # comma-separated variants train ONE model that fires on any of them —
     # the lever for pronunciation/accent coverage
+    kind = getattr(args, "kind", "wake")
+    if kind not in MODEL_KINDS:
+        sys.exit(f"unknown model kind: {kind}")
     phrases = [p.strip().lower() for p in args.phrase.split(",") if p.strip()]
     confusables = [p.strip().lower() for p in args.confusables.split(",") if p.strip()]
     if not phrases:
@@ -947,6 +955,7 @@ def cmd_new(args) -> None:
     template = (FORGE_DIR / "config.template.yml").read_text()
     cfg = (
         template.replace("@NAME@", name)
+        .replace("@MODEL_KIND@", kind)
         .replace("@PHRASES@", "\n".join(f'  - "{p}"' for p in phrases))
         .replace("@N_SAMPLES@", str(args.samples))
         .replace("@N_SAMPLES_VAL@", str(args.samples_val))
@@ -963,9 +972,11 @@ def cmd_new(args) -> None:
     cfg = cfg.replace("google_tts_qps: 2", f"google_tts_qps: {args.google_tts_qps}")
     cfg_path.write_text(cfg)
     log(f"created {cfg_path}")
-    log(f"phrases: {phrases}  positives: {args.samples}  steps: {args.steps}")
+    log(f"kind: {kind}  phrases: {phrases}  positives: {args.samples}  steps: {args.steps}")
     if confusables:
         log(f"confusables: {confusables}")
+    if kind == "stop":
+        log("stop guidance: include labelled post-AFE stop, false-stop, and playback-negative captures; synthetic recall alone cannot approve this model")
     log(f"next: forge.py build {name}   (optionally forge.py google-tts {name} first)")
 
 
@@ -1283,6 +1294,7 @@ def cmd_build(args) -> None:
         MODELS.mkdir(parents=True, exist_ok=True)
         dest = MODELS / f"{name}.onnx"
         shutil.copy2(src, dest)
+        write_model_manifest(name, config, dest)
         log(f"model ready: {dest} ({dest.stat().st_size / 1e3:.0f} kB)")
         log("install into EchoMuse: see oww_forge/README.md §Installing")
         evaluate_model(name)
@@ -1320,6 +1332,34 @@ def _format_eval_row(label: str, scores: list[float], threshold_hi: float = 0.5,
             f">={threshold_hi:.1f}: {hi_pct:5.1f}% | >={threshold_lo:.1f}: {lo_pct:5.1f}%")
 
 
+def _capture_kind(path: Path) -> str | None:
+    """Stop provenance retained by import_labeled_dataset's custom filename."""
+    match = re.match(r"^custom_(stop_act|stop_miss|false_stop|playback_negative)_", path.name)
+    return match.group(1) if match else None
+
+
+def write_model_manifest(name: str, config: dict, model_path: Path) -> Path:
+    """Write Forge provenance beside an ONNX model without changing its wire format."""
+    kind = config.get("model_kind", "wake")
+    if kind not in MODEL_KINDS:
+        kind = "wake"
+    manifest = {
+        "kind": kind,
+        "target_phrases": config.get("target_phrase", []),
+        "forge_version": FORGE_VERSION,
+        "training_provenance": {
+            "model_name": config.get("model_name", name),
+            "training_mix": config.get("training_mix"),
+        },
+        "model_sha256": hashlib.sha256(model_path.read_bytes()).hexdigest(),
+    }
+    path = model_path.with_suffix(".manifest.json")
+    part = path.with_name(path.name + ".part")
+    part.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+    part.replace(path)
+    return path
+
+
 def _score_files_parallel(model_path: Path, files: list[Path], num_workers: int = 6) -> dict[Path, float]:
     """Score a list of audio files across worker threads with per-thread ONNX models."""
     from concurrent.futures import ThreadPoolExecutor
@@ -1353,6 +1393,7 @@ def evaluate_model(name: str) -> None:
 
     cfg_path = WAKEWORDS / name / "config.yml"
     work_dir = WAKEWORDS / name / name
+    cfg = {}
     if cfg_path.exists():
         import yaml
         cfg = yaml.safe_load(cfg_path.read_text())
@@ -1373,7 +1414,9 @@ def evaluate_model(name: str) -> None:
         return
 
     log("=" * 72)
-    log(f" MODEL EVALUATION REPORT: {name}.onnx")
+    kind = cfg.get("model_kind", "wake")
+    threshold = float(cfg.get("stop_threshold", 0.75 if kind == "stop" else 0.5))
+    log(f" MODEL EVALUATION REPORT: {name}.onnx ({kind})")
     log("=" * 72)
 
     pos_scores = []
@@ -1394,9 +1437,9 @@ def evaluate_model(name: str) -> None:
             else:
                 by_source["Piper / Synthetic"].append(score)
 
-        log(_format_eval_row("  Overall Positives", pos_scores, 0.5, 0.3))
+        log(_format_eval_row("  Overall Positives", pos_scores, threshold, 0.3))
         for src, sc in sorted(by_source.items()):
-            log(_format_eval_row(f"    - {src}", sc, 0.5, 0.3))
+            log(_format_eval_row(f"    - {src}", sc, threshold, 0.3))
         if by_gtts_locale:
             log("    Google Chirp 3 by Locale:")
             for loc, sc in sorted(by_gtts_locale.items()):
@@ -1416,9 +1459,22 @@ def evaluate_model(name: str) -> None:
             else:
                 by_neg_source["Piper Adversarial"].append(score)
 
-        log(_format_eval_row("  Overall Negatives", neg_scores, 0.5, 0.2))
+        log(_format_eval_row("  Overall Negatives", neg_scores, threshold, 0.2))
         for src, sc in sorted(by_neg_source.items()):
-            log(_format_eval_row(f"    - {src}", sc, 0.5, 0.2))
+            log(_format_eval_row(f"    - {src}", sc, threshold, 0.2))
+
+    if kind == "stop":
+        all_map = {**(_score_files_parallel(model_path, pos_files) if pos_files else {}),
+                   **(_score_files_parallel(model_path, neg_files) if neg_files else {})}
+        groups = {label: [] for label in ("stop_act", "stop_miss", "false_stop", "playback_negative")}
+        for path, score in all_map.items():
+            capture_kind = _capture_kind(path)
+            if capture_kind:
+                groups[capture_kind].append(score)
+        log("\n--- Post-AFE Stop Captures ---")
+        for label, scores in groups.items():
+            polarity = "positive" if label in ("stop_act", "stop_miss") else "negative"
+            log(_format_eval_row(f"  {label} ({polarity})", scores, threshold, 0.2))
 
     log("-" * 72)
     if pos_scores and neg_scores:
@@ -1533,6 +1589,16 @@ def import_labeled_dataset(name: str, zip_path: Path) -> dict:
     stamp = uuid.uuid4().hex[:8]
 
     with zipfile.ZipFile(zip_path) as z, tempfile.TemporaryDirectory() as tmp:
+        # The controller manifest is optional for hand-assembled datasets. It
+        # retains stop scenario provenance while bucket placement remains the
+        # admin-selected positive/negative truth.
+        try:
+            manifest = json.loads(z.read("manifest.json"))
+            manifest_kinds = {clip.get("name"): clip.get("kind")
+                              for clip in manifest.get("clips", [])
+                              if isinstance(clip, dict)}
+        except (KeyError, ValueError, TypeError):
+            manifest_kinds = {}
         for info in z.infolist():
             if info.is_dir():
                 continue
@@ -1547,7 +1613,9 @@ def import_labeled_dataset(name: str, zip_path: Path) -> dict:
             split = "test" if idx % test_every == 0 else "train"
             raw = Path(tmp) / f"in_{polarity}_{idx}{ext}"
             raw.write_bytes(z.read(info))
-            dest = dirs[(polarity, split)] / f"custom_{stamp}_{polarity}_{idx:06d}.wav"
+            kind = manifest_kinds.get(Path(parts[-1]).name)
+            prefix = f"custom_{kind}" if kind in {"stop_act", "stop_miss", "false_stop", "playback_negative"} else "custom"
+            dest = dirs[(polarity, split)] / f"{prefix}_{stamp}_{polarity}_{idx:06d}.wav"
             try:
                 _convert_16k(raw, dest)
                 counts[f"{polarity}_{split}"] += 1
@@ -1680,6 +1748,8 @@ def main() -> None:
     p.add_argument("phrase", help='wake phrase; comma-separate pronunciation variants '
                                   '(e.g. "hey clara, hey clarra") — one model fires on any')
     p.add_argument("--name", help="model name (default: slug of the phrase)")
+    p.add_argument("--kind", choices=MODEL_KINDS, default="wake",
+                   help="model purpose (stop models are evaluated with post-AFE capture groups)")
     p.add_argument("--confusables", default="", help="comma-separated phrases to train as negatives")
     p.add_argument("--google-tts-languages", default="en-US,en-GB,en-AU,en-IN,en-PH,en-SG,en-ZA")
     p.add_argument("--google-tts-voices", default="")

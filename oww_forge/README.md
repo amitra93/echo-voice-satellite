@@ -200,7 +200,7 @@ US vowel, not a British "clar-ra". Three levers, in increasing strength:
 ### Import labelled captures from EchoMuse
 
 The EchoMuse controller can record the audio around real wake **activations**
-and **near-misses** and let an admin label each clip in the dashboard
+and **near-misses**, plus armed post-AFE stop scenarios, and let an admin label each clip in the dashboard
 (Settings → Training): "should have activated" (positive) or "should have
 ignored" (negative). Download the finished dataset there as a `.zip` and bring
 it here:

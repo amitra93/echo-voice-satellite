@@ -145,15 +145,21 @@ def test_addon_image_is_published_not_built_on_the_user_machine():
     the user runs Home Assistant on — an onnxruntime/ffmpeg build on a Pi —
     and cannot pass EM_CONTROLLER_VERSION, so the controller reports "dev"
     and the update notice goes quiet. The arch list must also stay within
-    what controller-release.yml actually publishes.
+    what controller-build.yml's publish job actually publishes.
     """
     config = (CONTROLLER / "config.yaml").read_text()
     assert re.search(r"^image:\s*\S+", config, re.M), \
         "config.yaml must pull the published image, not build on the user's machine"
 
-    workflow = (CONTROLLER.parent / ".github/workflows/controller-release.yml").read_text()
-    platforms = re.search(r"platforms:\s*(\S+)", workflow)
-    assert platforms, "controller-release.yml no longer declares platforms"
+    workflow = (CONTROLLER.parent / ".github/workflows/controller-build.yml").read_text()
+    # Scoped to the `build` job specifically — the `verify-pr` job earlier in
+    # the same file is a PR-only, amd64-only, push:false buildability check
+    # with its own `platforms:` line, and a plain first-match search would
+    # read that as "amd64 only published" regardless of what the real publish
+    # job declares.
+    publish_job = workflow[workflow.index("\n  build:"):]
+    platforms = re.search(r"platforms:\s*(\S+)", publish_job)
+    assert platforms, "controller-build.yml's build job no longer declares platforms"
     published = platforms.group(1)
     arch_block = re.search(r"^arch:\n((?:\s+-\s*\w+\n)+)", config, re.M)
     assert arch_block, "config.yaml has no arch list"
@@ -162,8 +168,8 @@ def test_addon_image_is_published_not_built_on_the_user_machine():
     equivalent = {"aarch64": "linux/arm64", "amd64": "linux/amd64"}
     for arch in declared:
         assert equivalent.get(arch) in published, (
-            f"config.yaml offers {arch} but controller-release.yml only "
-            f"publishes {published} — that install would find no image"
+            f"config.yaml offers {arch} but controller-build.yml's build job "
+            f"only publishes {published} — that install would find no image"
         )
 
 
@@ -195,20 +201,6 @@ def test_release_notes_survive_the_whole_relay():
 
     jsx = (Path(__file__).resolve().parent.parent / "static" / "dashboard.jsx").read_text()
     assert "release.notes" in jsx, "the dashboard must render the notes"
-
-
-def test_release_workflow_publishes_the_tag_annotation():
-    """
-    The notes shown in the dashboard come from the annotated tag, so the
-    workflow must publish that rather than only GitHub's generated commit
-    list. If this drifts, every future release silently shows a commit dump to
-    whoever is deciding whether to update.
-    """
-    from pathlib import Path
-    wf = (Path(__file__).resolve().parent.parent.parent
-          / ".github" / "workflows" / "release.yml").read_text()
-    assert "body_path:" in wf, "the release must publish notes from a file"
-    assert "%(contents)" in wf, "notes must come from the tag annotation"
 
 
 def test_every_device_payload_has_an_update_path():
@@ -1618,7 +1610,14 @@ def test_teardown_cancels_the_live_listener_not_a_stale_handle():
     closed connection.
     """
     src = (CONTROLLER / "em_controller.py").read_text()
-    assert "(device.oww_task or oww_task).cancel()" in src
+    assert "if device.oww_task is not None:" in src
+    assert "device.oww_task.cancel()" in src
+
+
+def test_request_capable_devices_never_start_the_controller_wake_listener():
+    src = (CONTROLLER / "em_controller.py").read_text()
+    assert 'if "wake_request_v1" not in capabilities:' in src
+    assert "oww_task = _supervise_wake_listener(device)" in src
 
 
 def test_a_stuck_pause_can_be_recovered():
