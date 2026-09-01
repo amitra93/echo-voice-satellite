@@ -144,33 +144,18 @@ def test_addon_image_is_published_not_built_on_the_user_machine():
     Without an `image:` key Supervisor builds the Dockerfile on whatever
     the user runs Home Assistant on — an onnxruntime/ffmpeg build on a Pi —
     and cannot pass EM_CONTROLLER_VERSION, so the controller reports "dev"
-    and the update notice goes quiet. The arch list must also stay within
-    what controller-build.yml's publish job actually publishes.
+    and the update notice goes quiet.
+
+    This used to also assert config.yaml's arch list stays within what
+    controller-build.yml's publish job actually publishes — dropped along
+    with that job (controller-build.yml is verify-only now; see its own
+    header comment). Nothing currently publishes ANY controller image, so
+    there is no "what gets published" left to compare the arch list against;
+    re-add that half once a publish path exists again.
     """
     config = (CONTROLLER / "config.yaml").read_text()
     assert re.search(r"^image:\s*\S+", config, re.M), \
         "config.yaml must pull the published image, not build on the user's machine"
-
-    workflow = (CONTROLLER.parent / ".github/workflows/controller-build.yml").read_text()
-    # Scoped to the `build` job specifically — the `verify-pr` job earlier in
-    # the same file is a PR-only, amd64-only, push:false buildability check
-    # with its own `platforms:` line, and a plain first-match search would
-    # read that as "amd64 only published" regardless of what the real publish
-    # job declares.
-    publish_job = workflow[workflow.index("\n  build:"):]
-    platforms = re.search(r"platforms:\s*(\S+)", publish_job)
-    assert platforms, "controller-build.yml's build job no longer declares platforms"
-    published = platforms.group(1)
-    arch_block = re.search(r"^arch:\n((?:\s+-\s*\w+\n)+)", config, re.M)
-    assert arch_block, "config.yaml has no arch list"
-    declared = set(re.findall(r"-\s*(\w+)", arch_block.group(1)))
-    # Home Assistant's arch names vs Docker's platform names.
-    equivalent = {"aarch64": "linux/arm64", "amd64": "linux/amd64"}
-    for arch in declared:
-        assert equivalent.get(arch) in published, (
-            f"config.yaml offers {arch} but controller-build.yml's build job "
-            f"only publishes {published} — that install would find no image"
-        )
 
 
 def test_release_notes_survive_the_whole_relay():
