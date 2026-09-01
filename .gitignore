@@ -1,5 +1,6 @@
 .idea
 __pycache__
+.coverage
 /device/build/
 controller/.env
 controller/data/
