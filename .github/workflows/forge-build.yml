@@ -1,46 +1,43 @@
 name: Forge Build
 
-# Builds the wake-word trainer image. Same shape as controller-build.yml:
+# Build-verification only — this workflow does NOT publish anything.
 #
-#   verify-pr    PR only, when oww_forge/Dockerfile changed. CPU/amd64 only,
-#                no push — answers "does it still build", nothing more.
-#   cuda / cpu   Push to main (or manual dispatch). Build AND PUBLISH,
-#                tagged by commit sha.
+# It used to also build-and-push CUDA (amd64) and CPU (amd64+arm64) trainer
+# images to GHCR on every push to main, tagged by commit sha. That publish
+# path is gone: this now answers exactly one question, "does the Dockerfile
+# still build", for both a PR and a push to main, and nothing else. No
+# registry login, no GHCR credentials, no pushed layers anywhere.
 #
-# Every pin in oww_forge/Dockerfile is load-bearing — piper-sample-generator
-# v2.0.0 for its flat layout, an openWakeWord SHA carrying a local patch,
-# torch 2.7.1 — and a local `docker compose build` re-resolves the floating
-# layers underneath them every time it runs, so a build check here is the
-# only thing that catches a broken pin before someone sits through a local
-# build to find out. Until this workflow existed, NOTHING built this image
-# on a PR at all — oww_forge/Dockerfile isn't even a Dependabot ecosystem
-# (see dependabot.yml), because its pins are baked into RUN commands rather
-# than a manifest Dependabot can parse, so this is also the only automated
-# signal this Dockerfile gets between releases.
+# CONSEQUENCE WORTH KNOWING: nothing in this repo's CI publishes a forge
+# image anymore, sha-tagged or otherwise. `oww_forge/docker-compose.deploy.yml`
+# pulls `ghcr.io/.../echomuse-forge:latest` and `:latest-cpu`, and neither has
+# ever had anything published under this fork's own GHCR namespace to pull.
+# If that deployment path needs to work, something (a manual build+push, or a
+# revived publish step) has to fill that gap; it is not this workflow's job
+# anymore.
 #
-# TWO VARIANTS, and the split is deliberate:
+# Why it exists at all: every pin in oww_forge/Dockerfile is load-bearing —
+# piper-sample-generator v2.0.0 for its flat layout, an openWakeWord SHA
+# carrying a local patch, torch 2.7.1 — and a local `docker compose build`
+# re-resolves the floating layers underneath them every time it runs, so a
+# build check here is the only thing that catches a broken pin before someone
+# sits through a local build to find out. oww_forge/Dockerfile isn't even a
+# Dependabot ecosystem (see dependabot.yml), because its pins are baked into
+# RUN commands rather than a manifest Dependabot can parse, so this is also
+# the only automated signal this Dockerfile gets at all.
 #
-#   :sha-<short>          CUDA, linux/amd64 ONLY
-#   :sha-<short>-cpu       CPU torch, linux/amd64 + linux/arm64
+# CPU/amd64 only, on purpose: this answers "does the Dockerfile still build",
+# and the CUDA/arm64 variants install the same wheels from the same base
+# image for that question — a second architecture or backend under QEMU/no-
+# GPU would cost runner minutes to restate the answer. Docker Desktop on
+# macOS runs containers in a Linux VM with no Metal/MPS passthrough anyway,
+# so an arm64 build here would not even be validating a GPU path.
 #
-# CUDA is amd64-only because there is no arm64 machine anyone would train on
-# with an NVIDIA GPU attached; building it would spend runner time producing
-# an image for hardware that does not exist.
-#
-# The CPU variant IS multi-arch, for Apple Silicon. Note what that does and
-# does not buy: Docker Desktop on macOS runs containers in a Linux VM with no
-# Metal/MPS passthrough, so training in a container on a Mac is CPU-bound
-# whatever we ship. arm64 does not unlock the GPU — it removes QEMU, which is
-# the difference between the documented overnight CPU run and something nobody
-# would sit through. Anyone wanting the M-series GPU has to run the trainer
-# outside Docker against torch's MPS backend, which is not what this ships.
-#
-# NOTE ON RELEASES: forge-release.yml (forge-v* tags -> `:X.Y.Z`/`:latest` +
-# `:X.Y.Z-cpu`/`:latest-cpu`, no GitHub Release) was removed. This workflow
-# only ever writes a `:sha-<short>` tag — nothing publishes `:latest` or
-# `:latest-cpu` anymore, which is what oww_forge/docker-compose.deploy.yml
-# pulls. That gap needs a decision before this is a complete replacement for
-# what forge-release.yml did.
+# Gated at the trigger to oww_forge/Dockerfile and this workflow file only —
+# application code under oww_forge/ (forge.py, forge_web.py, ...) cannot
+# break the image build in a way the unit-test workflow's forge-tests job
+# misses, on a push to main exactly as much as on a PR, so both triggers
+# share the same path list.
 
 on:
   pull_request:
@@ -51,30 +48,13 @@ on:
   push:
     branches: [main]
     paths:
-      - 'oww_forge/**'
+      - 'oww_forge/Dockerfile'
       - '.github/workflows/forge-build.yml'
   workflow_dispatch:
 
-env:
-  IMAGE: ghcr.io/${{ github.repository_owner }}/echomuse-forge
-
 jobs:
-  # ── PR verification: does it still build? ─────────────────────────────
-  #
-  # Gated at the trigger (see the `on:` block above) to oww_forge/Dockerfile
-  # and this workflow file only — application code under oww_forge/ (forge.py,
-  # forge_web.py, ...) cannot break the image build in a way the unit-test
-  # workflow's forge-tests job misses.
-  #
-  # CPU/amd64 only, on purpose: this answers "does the Dockerfile still
-  # build", and CUDA/arm64 variants install the same wheels from the same
-  # base image for that question — a second architecture or backend under
-  # QEMU/no-GPU would cost runner minutes to restate the answer, the same
-  # reasoning the CUDA job's own disk-reclaim comment gives for skipping
-  # arm64 on GPU builds entirely.
-  verify-pr:
-    name: Verify forge image builds (PR)
-    if: github.event_name == 'pull_request'
+  verify:
+    name: Verify forge image builds (CPU, amd64)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -90,188 +70,3 @@ jobs:
           push: false
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-  # ── CUDA, amd64 ──────────────────────────────────────────────────────────
-  cuda:
-    name: Build and publish (CUDA, amd64)
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      # A hosted runner has roughly 14GB free on /, and CUDA torch does not
-      # fit in it: the wheels alone are ~3GB and the installed image lands
-      # near 10GB before the build cache. Without this the build dies partway
-      # with a disk error that reads like a broken Dockerfile. Done inline
-      # rather than with a third-party action, so nothing outside this repo
-      # gets to run as part of a publish.
-      - name: Reclaim runner disk
-        run: |
-          echo "before:"; df -h / | tail -1
-          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
-                      /usr/local/share/boost /usr/local/share/powershell \
-                      /usr/local/lib/node_modules /opt/hostedtoolcache/CodeQL \
-                      "${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}" || true
-          sudo docker image prune -af || true
-          echo "after:"; df -h / | tail -1
-
-      - name: Version from the commit
-        id: v
-        run: echo "sha=sha-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push (CUDA, amd64)
-        uses: docker/build-push-action@v7
-        with:
-          context: oww_forge
-          file: oww_forge/Dockerfile
-          platforms: linux/amd64
-          build-args: GPU=1
-          push: true
-          tags: ${{ env.IMAGE }}:${{ steps.v.outputs.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.description=EchoMuse wake-word trainer (CUDA)
-
-  # ── CPU, one job per architecture on its OWN runner ──────────────────────
-  #
-  # Native runners rather than one QEMU job: the arm64 half is free for a
-  # public repo, and emulating a torch install is slow enough to dominate the
-  # whole workflow. Each arch pushes by DIGEST and the manifest is assembled
-  # afterwards — two jobs cannot both write the same tag without one of them
-  # winning and the other silently disappearing from the manifest.
-  cpu:
-    name: Build and publish (CPU, ${{ matrix.slug }})
-    if: github.event_name != 'pull_request'
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - runner: ubuntu-latest
-            platform: linux/amd64
-            slug: amd64
-          - runner: ubuntu-24.04-arm
-            platform: linux/arm64
-            slug: arm64
-    runs-on: ${{ matrix.runner }}
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      - name: Version from the commit
-        id: v
-        run: echo "sha=sha-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push by digest (CPU, ${{ matrix.slug }})
-        id: build
-        uses: docker/build-push-action@v7
-        with:
-          context: oww_forge
-          file: oww_forge/Dockerfile
-          platforms: ${{ matrix.platform }}
-          build-args: GPU=0
-          outputs: type=image,name=${{ env.IMAGE }},push-by-digest=true,name-canonical=true,push=true
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          labels: |
-            org.opencontainers.image.source=https://github.com/${{ github.repository }}
-            org.opencontainers.image.description=EchoMuse wake-word trainer (CPU)
-
-      # The BARE hex, with the sha256: prefix stripped. upload-artifact
-      # rejects a colon in a filename, and it rejects it at UPLOAD — after
-      # the image layers have already been pushed — so the failure lands
-      # exactly where a half-published image is created.
-      - name: Export the digest
-        run: |
-          digest="${{ steps.build.outputs.digest }}"
-          mkdir -p /tmp/digests
-          touch "/tmp/digests/${digest#sha256:}"
-
-      - name: Upload the digest
-        uses: actions/upload-artifact@v7
-        with:
-          name: forge-digest-${{ matrix.slug }}
-          path: /tmp/digests/*
-          retention-days: 1
-          if-no-files-found: error
-
-  # ── One multi-arch tag from the two digests ──────────────────────────────
-  cpu-manifest:
-    name: Assemble CPU manifest
-    needs: cpu
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-    steps:
-      - name: Download the digests
-        uses: actions/download-artifact@v7
-        with:
-          pattern: forge-digest-*
-          merge-multiple: true
-          path: /tmp/digests
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Version from the commit
-        id: v
-        run: echo "sha=sha-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
-
-      # Both architectures must be present. A manifest quietly built from one
-      # digest is the failure worth catching here: it publishes, it pulls, and
-      # it is simply the wrong architecture for half the people who asked for
-      # it — which surfaces as exec format error on their machine, not ours.
-      - name: Assemble and push
-        run: |
-          cd /tmp/digests
-          n=$(ls | wc -l)
-          if [ "$n" -ne 2 ]; then
-            echo "::error::expected 2 architecture digests, found $n: $(ls | tr '\n' ' ')"
-            exit 1
-          fi
-          refs=""
-          for f in *; do
-            refs="$refs ${IMAGE}@sha256:${f}"
-          done
-          echo "assembling from:$refs"
-          docker buildx imagetools create \
-            -t "${IMAGE}:${{ steps.v.outputs.sha }}-cpu" \
-            $refs
-          docker buildx imagetools inspect "${IMAGE}:${{ steps.v.outputs.sha }}-cpu"

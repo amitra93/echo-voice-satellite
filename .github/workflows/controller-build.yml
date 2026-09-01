@@ -1,22 +1,43 @@
 name: Controller Build
 
-# Two jobs, one workflow, because they answer the same question — "does the
-# controller image build" — for two different audiences:
+# Build-verification only — this workflow does NOT publish anything.
 #
-#   verify-pr   PR only. Does the Dockerfile/requirements.txt still build?
-#               No push, no registry credentials touched.
-#   build       Push to main (or manual dispatch). Builds AND PUBLISHES,
-#               tagged by commit sha, plus an SBOM and a report-only
-#               vulnerability scan.
+# It used to also build-and-push a `:sha-<short>` image to GHCR on every
+# push to main (plus an SBOM and a vulnerability scan of that image). That
+# publish path is gone: this now answers exactly one question, "does the
+# controller image build", for both a PR and a push to main, and nothing
+# else. No registry login, no GHCR credentials, no pushed layers anywhere.
 #
-# NOTE ON RELEASES: this workflow no longer has a promotion step behind it —
-# controller-release.yml (which re-tagged a sha-build as vX.Y.Z + `latest`
-# for the Home Assistant add-on and docker-compose.deploy.yml) was removed.
-# Nothing here publishes `latest` or a semver tag; `build` only ever writes
-# `:sha-<short>`. docker-compose.deploy.yml still pulls `:latest`, which
-# this workflow does not maintain — that gap needs a decision (revive a
-# promotion step, or point deploy at a sha tag some other way) before this
-# is a complete replacement for what controller-release.yml did.
+# CONSEQUENCE WORTH KNOWING: nothing in this repo's CI publishes a
+# controller image anymore, sha-tagged or otherwise. `docker-compose.deploy.yml`
+# pulls `ghcr.io/.../echomuse-controller:latest` and the Home Assistant add-on
+# (`controller/config.yaml`'s `image:`) pulls a version tag — neither has ever
+# had anything published under this fork's own GHCR namespace to pull. If
+# either deployment path needs to work, something (a manual build+push, or a
+# revived publish step) has to fill that gap; it is not this workflow's job
+# anymore.
+#
+# Why it exists at all: NOTHING else builds this image. The unit-test
+# workflow pins itself to python-version 3.12 regardless of what the
+# Dockerfile says, so a base-image or dependency bump can arrive with every
+# other check green and no evidence behind any of them.
+#
+# That is not hypothetical. Dependabot #127 (python:3.12-slim -> 3.14-slim)
+# was green on every check while speexdsp-ns==0.1.2 has no wheel past cp312
+# and onnxruntime==1.20.1 none past cp313, so the image could not have built
+# at all.
+#
+# Deliberately narrow, because a full image build is minutes:
+#   - Only when Dockerfile/requirements.txt/this workflow file changed.
+#     Application code cannot break the build in a way the unit tests miss;
+#     a missing wheel is exactly what they cannot see, and it can only come
+#     from one of those three paths — true for a push to main exactly as
+#     much as for a PR, so both triggers share the same path list.
+#   - amd64 only. The break this catches is a missing wheel or an apt
+#     package that moved, both of which show up on either architecture, and
+#     arm64 under QEMU costs far more than it adds.
+#   - No push, no registry login, no GHCR credentials. This answers
+#     "does it build", nothing more.
 
 on:
   pull_request:
@@ -28,40 +49,14 @@ on:
   push:
     branches: [main]
     paths:
-      - 'controller/**'
+      - 'controller/Dockerfile'
+      - 'controller/requirements.txt'
       - '.github/workflows/controller-build.yml'
   workflow_dispatch:
 
 jobs:
-  # ── PR verification: does it still build? ─────────────────────────────
-  #
-  # NOTHING ELSE builds this image on a PR — the unit-test workflow pins
-  # itself to python-version 3.12 regardless of what the Dockerfile says,
-  # so a base-image or dependency bump used to arrive with every check green
-  # and no evidence behind any of them.
-  #
-  # That is not hypothetical. Dependabot #127 (python:3.12-slim -> 3.14-slim)
-  # was green on every check while speexdsp-ns==0.1.2 has no wheel past
-  # cp312 and onnxruntime==1.20.1 none past cp313, so the image could not
-  # have built at all. The first failure would have been on main, in the
-  # job that publishes.
-  #
-  # Deliberately narrower than the `push` trigger below, because a full
-  # image build is minutes:
-  #   - Only Dockerfile/requirements.txt/this workflow file — NOT the whole
-  #     controller/** tree the `push` job watches. Application code cannot
-  #     break the build in a way the unit tests miss; a missing wheel is
-  #     exactly what they cannot see, and it can only come from one of
-  #     those three paths.
-  #   - amd64 only. The break this catches is a missing wheel or an apt
-  #     package that moved, both of which show up on either architecture,
-  #     and arm64 under QEMU costs far more than it adds. The `build` job
-  #     still publishes both.
-  #   - No push, no registry login, no GHCR credentials. This answers
-  #     "does it build", nothing more.
-  verify-pr:
-    name: Verify controller image builds (PR)
-    if: github.event_name == 'pull_request'
+  verify:
+    name: Verify controller image builds
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -75,93 +70,3 @@ jobs:
           platforms: linux/amd64
           cache-from: type=gha
           cache-to: type=gha,mode=max
-
-  # ── Publish from main ───────────────────────────────────────────────────
-  build:
-    name: Build and publish controller image
-    if: github.event_name != 'pull_request'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v7
-
-      # EM_CONTROLLER_VERSION is baked into the image (ARG -> ENV in the
-      # Dockerfile), so it has to be known at BUILD time. controller/config.yaml's
-      # `version:` is the answer — it is the field the Home Assistant add-on
-      # pin already has to track, so this build reports the version it is
-      # heading towards rather than a distinct one. That only shows on a
-      # sha- image pulled deliberately, which is not the documented way to
-      # run the controller.
-      - name: Version from the add-on pin
-        id: version
-        run: |
-          v="$(sed -n 's/^version:[[:space:]]*"\(.*\)"[[:space:]]*$/\1/p' controller/config.yaml)"
-          if [ -z "$v" ]; then
-            echo "::error::could not read version from controller/config.yaml"
-            exit 1
-          fi
-          echo "version=v$v" >> "$GITHUB_OUTPUT"
-          echo "sha=sha-$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
-          echo "building v$v as sha-$(git rev-parse --short=7 HEAD)"
-
-      - name: Set up QEMU
-        uses: docker/setup-qemu-action@v4
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v4
-
-      - name: Log in to GHCR
-        uses: docker/login-action@v4
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and push
-        id: build
-        uses: docker/build-push-action@v7
-        with:
-          context: controller
-          push: true
-          platforms: linux/amd64,linux/arm64
-          build-args: |
-            EM_CONTROLLER_VERSION=${{ steps.version.outputs.version }}
-          tags: ghcr.io/${{ github.repository_owner }}/echomuse-controller:${{ steps.version.outputs.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # By digest: there is no string to get wrong and no chance of scanning
-      # something other than the artifact just built.
-      - name: Generate SBOM
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          scan-type: image
-          image-ref: ghcr.io/${{ github.repository_owner }}/echomuse-controller@${{ steps.build.outputs.digest }}
-          format: cyclonedx
-          output: sbom-${{ steps.version.outputs.sha }}.cdx.json
-
-      - name: Upload SBOM
-        uses: actions/upload-artifact@v7
-        with:
-          name: sbom-${{ steps.version.outputs.sha }}
-          path: sbom-${{ steps.version.outputs.sha }}.cdx.json
-          if-no-files-found: warn
-          retention-days: 90
-
-      # Report-only, deliberately. Gating a merge to main on a new CVE in a
-      # base image would block unrelated work on someone else's disclosure
-      # schedule. There is no scheduled re-scan of the published image
-      # anymore (security-scan.yml was removed) — this build-time scan is
-      # now the only automated look this image gets.
-      - name: Scan image for vulnerabilities
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          scan-type: image
-          image-ref: ghcr.io/${{ github.repository_owner }}/echomuse-controller@${{ steps.build.outputs.digest }}
-          format: table
-          severity: HIGH,CRITICAL
-          exit-code: '0'
