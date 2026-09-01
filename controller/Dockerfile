@@ -67,6 +67,7 @@ COPY em_scenes.py .
 COPY em_support.py .
 COPY em_shadow.py .
 COPY em_stop.py .
+COPY em_capture_upload.py .
 COPY em_oww_warmup.py .
 COPY em_barge.py .
 COPY em_pki.py .
