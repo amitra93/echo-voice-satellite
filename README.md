@@ -1,9 +1,9 @@
 # EchoMuse
 
-[![Unit Tests](https://github.com/wilbowes/EchoMuse/actions/workflows/unit-test.yaml/badge.svg)](https://github.com/wilbowes/EchoMuse/actions/workflows/unit-test.yaml)
-[![Controller Build](https://github.com/wilbowes/EchoMuse/actions/workflows/controller-build.yml/badge.svg)](https://github.com/wilbowes/EchoMuse/actions/workflows/controller-build.yml)
-[![Forge Build](https://github.com/wilbowes/EchoMuse/actions/workflows/forge-build.yml/badge.svg)](https://github.com/wilbowes/EchoMuse/actions/workflows/forge-build.yml)
-[![Device Build](https://github.com/wilbowes/EchoMuse/actions/workflows/device-build.yml/badge.svg)](https://github.com/wilbowes/EchoMuse/actions/workflows/device-build.yml)
+[![Unit Tests](https://github.com/amitra93/echo-voice-satellite/actions/workflows/unit-test.yaml/badge.svg)](https://github.com/amitra93/echo-voice-satellite/actions/workflows/unit-test.yaml)
+[![Controller Build](https://github.com/amitra93/echo-voice-satellite/actions/workflows/controller-build.yml/badge.svg)](https://github.com/amitra93/echo-voice-satellite/actions/workflows/controller-build.yml)
+[![Forge Build](https://github.com/amitra93/echo-voice-satellite/actions/workflows/forge-build.yml/badge.svg)](https://github.com/amitra93/echo-voice-satellite/actions/workflows/forge-build.yml)
+[![Device Build](https://github.com/amitra93/echo-voice-satellite/actions/workflows/device-build.yml/badge.svg)](https://github.com/amitra93/echo-voice-satellite/actions/workflows/device-build.yml)
 
 A fork of https://github.com/wilbowes/EchoMuse that has the following differences (as of August 2026):
 
