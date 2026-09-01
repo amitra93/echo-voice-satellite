@@ -41,8 +41,16 @@ jobs:
         # websockets remains stubbed via sys.modules, while openwakeword and
         # onnxruntime stay out: nothing here needs a real wake-word model.
         # pytest-cov measures production code only via .coveragerc;
-        # cryptography supports the isolated device-link PKI tests.
-        run: pip install pytest pytest-cov numpy scipy pyyaml aiohttp cryptography
+        # cryptography supports the isolated device-link PKI tests. bcrypt is
+        # em_auth.py's real password-hashing dependency (pinned in
+        # requirements.txt) — em_api.py and em_controller.py both import
+        # em_auth at module level, so any test file that imports either
+        # (test_auth.py, test_api_*.py, test_controller_device.py, ...)
+        # fails collection without it. This was missing for a real run, not
+        # hypothetically: masked locally by bcrypt already being present as
+        # an OS package outside any virtualenv, so it never showed up until
+        # the exact same install line ran on a clean GitHub-hosted runner.
+        run: pip install pytest pytest-cov numpy scipy pyyaml aiohttp cryptography bcrypt
       - name: Run pytest
         working-directory: controller
         run: python -m pytest tests/ -v --cov=. --cov-config=.coveragerc --cov-report=term-missing --cov-report=xml:coverage.xml --cov-report=html:coverage-html
