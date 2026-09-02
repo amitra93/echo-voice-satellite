@@ -72,6 +72,15 @@ python -m pytest tests/        # needs: pytest numpy scipy pyyaml aiohttp — no
 python -m pytest tests/ --cov=. --cov-report=term-missing   # needs: pytest-cov
 ```
 
+**Pre-commit:** Always run both suites before every `git commit`:
+
+```bash
+cd device && go test ./internal/... ./pkg/...   # host Go, same scope as CI
+cd controller && python -m pytest tests/         # covers node dashboard_logic.test.mjs
+```
+
+Do not commit or push with failing tests.
+
 Most of the controller test suite covers pure-logic modules — the bulk of
 `em_*.py` is now built as small decision functions with their own tests
 (`em_button`, `em_linkauth`, `em_ingressauth`, `em_turnclock`, `em_arbiter`,
