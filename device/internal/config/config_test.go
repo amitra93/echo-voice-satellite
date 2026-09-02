@@ -134,6 +134,46 @@ func TestWakeCaptureConfigSupportsFalseZeroFloorAndClampsDuration(t *testing.T) 
 	}
 }
 
+func TestStopCaptureConfigHandlesEnableAndClampsDuration(t *testing.T) {
+	d := &Device{
+		initialised: true, SaveStopCaptures: true,
+		StopCaptureSec: 2,
+	}
+	d.Apply(ConfigMessage{
+		SaveStopCaptures: boolPtr(false), StopCaptureSec: 99,
+	})
+	snapshot := d.Snapshot()
+	if snapshot.SaveStopCaptures == nil || *snapshot.SaveStopCaptures {
+		t.Fatal("explicit stop capture disable was lost")
+	}
+	if snapshot.StopCaptureSec != 5 {
+		t.Fatalf("stop capture snapshot clamp = %#v", snapshot)
+	}
+	d.Apply(ConfigMessage{SaveStopCaptures: boolPtr(true), StopCaptureSec: 0.01})
+	snapshot = d.Snapshot()
+	if snapshot.SaveStopCaptures == nil || !*snapshot.SaveStopCaptures {
+		t.Fatal("explicit stop capture enable was lost")
+	}
+	if snapshot.StopCaptureSec != 0.08 {
+		t.Fatalf("stop capture floor clamp = %#v", snapshot)
+	}
+}
+
+func TestStopCaptureDefaultsArePresent(t *testing.T) {
+	d := &Device{}
+	d.Apply(ConfigMessage{})
+	snap := d.Snapshot()
+	if snap.SaveStopCaptures == nil {
+		t.Fatal("SaveStopCaptures nil after defaults")
+	}
+	if *snap.SaveStopCaptures != false {
+		t.Fatalf("SaveStopCaptures default = %v, want false", *snap.SaveStopCaptures)
+	}
+	if snap.StopCaptureSec != 2.0 {
+		t.Fatalf("StopCaptureSec default = %v, want 2.0", snap.StopCaptureSec)
+	}
+}
+
 func TestSendspinServerSurvivesConfigSnapshot(t *testing.T) {
 	d := &Device{initialised: true}
 	d.Apply(ConfigMessage{SendspinServer: "ws://ma.local:8927/sendspin"})

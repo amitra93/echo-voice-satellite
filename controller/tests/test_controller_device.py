@@ -1533,6 +1533,91 @@ def test_device_wake_request_barges_thinking_and_playback(monkeypatch):
     asyncio.run(run())
 
 
+def test_run_voice_locked_continuation_uses_fresh_admission_and_keeps_wake_grant(monkeypatch):
+    """
+    Continuation is controller-initiated, not a new device wake_request.
+    It must not reuse the original wake's requestId/deadline (which is
+    4s after the initial grant and will be stale for any normal-length
+    turn) and for wake_request_v1 it must keep the GrantMic stream alive
+    (no mic_stop between turns).
+    Regression for turn 500: continuation with stale deadline failed
+    admission_valid() in 3ms as "disconnected" and produced no STT.
+    """
+    async def run():
+        device = new_device(["wake_request_v1", "stopword"])
+        device.stop_model_ready = True
+        device.oww_model_ready = True
+        device.data_ws = object()
+        device.oww_paused.set()
+        device.barge_in_enabled = False
+        em_controller._devices[device.device_id] = device
+        calls = []
+
+        async def record(name, *a, **kw):
+            calls.append(name)
+
+        device.mic_start = lambda: record("mic_start")
+        device.mic_stop = lambda: record("mic_stop")
+        monkeypatch.setattr(em_controller.em_player, "interrupt", lambda *a, **kw: record("interrupt"))
+        monkeypatch.setattr(em_controller.em_player, "resume_interrupted", lambda *a, **kw: record("resume"))
+        monkeypatch.setattr(em_controller, "leds_listening", lambda *a, **kw: record("listening"))
+        monkeypatch.setattr(em_controller, "_leds_turn_end", lambda *a, **kw: record("turn_end"))
+        monkeypatch.setattr(em_controller, "_push_device_state", lambda *a, **kw: record("state"))
+        monkeypatch.setattr(em_controller, "leds_spin_green", lambda *a, **kw: asyncio.sleep(3600))
+        monkeypatch.setattr(em_controller, "_run_streaming_post_turn_playback", lambda *a, **kw: asyncio.sleep(0, result=1))
+        monkeypatch.setattr(em_controller._wake_arbiter, "release", lambda *a, **kw: calls.append("release"))
+
+        captured = {}
+
+        async def trigger(**kwargs):
+            # First call is the initial wake turn, second is continuation.
+            # Capture the admission_valid for the continuation to verify
+            # it is fresh (not the stale original deadline).
+            if not captured:
+                captured["first_admission"] = kwargs["admission_valid"]
+                captured["first_request"] = kwargs["request_id"]
+                await kwargs["on_thinking"]()
+                async def pcm():
+                    yield b"response"
+                await kwargs["post_turn_play"](pcm())
+                return True  # ask to continue
+            else:
+                captured["second_admission"] = kwargs["admission_valid"]
+                captured["second_request"] = kwargs["request_id"]
+                captured["second_label"] = kwargs["trigger_label"]
+                # The fresh deadline must still be valid after the first
+                # turn's ~8s duration; stale would be False.
+                assert kwargs["admission_valid"] is not None
+                assert kwargs["admission_valid"]() is True
+                await kwargs["on_thinking"]()
+                async def pcm2():
+                    yield b"response2"
+                await kwargs["post_turn_play"](pcm2())
+                return False
+
+        monkeypatch.setattr(em_controller.turn_engine, "trigger_voice_turn", trigger)
+        # Seed a stale original deadline by calling _run_voice_locked with
+        # an explicit admission_valid that expires immediately.
+        stale = em_controller._make_admission_valid(device, asyncio.get_event_loop().time() - 10)
+        await em_controller._run_voice_locked(
+            device, "wakeword", is_wakeword=True, request_id="orig-123", admission_valid=stale
+        )
+
+        assert captured["first_request"] == "orig-123"
+        assert captured["second_request"] is None
+        assert captured["second_label"] == "continuation"
+        # continuation must have a fresh deadline, not the stale one
+        assert captured["second_admission"] is not captured["first_admission"]
+        assert captured["second_admission"]() is True
+        # The fresh deadline must be live; stale would be disconnected.
+        # (mic_stop gating for wake_request_v1 is verified separately
+        # via the barge/continuation stream remaining alive.)
+        assert device.oww_paused.is_set() is False  # outer finally clears
+        em_controller._devices.pop(device.device_id, None)
+
+    asyncio.run(run())
+
+
 def test_handle_control_rejects_non_register_and_holds_unknown_device_pending(monkeypatch):
     class WS:
         remote_address = ("192.0.2.1", 1234)
