@@ -16,15 +16,12 @@ if "websockets" not in sys.modules:
 
 import em_api
 import em_oww_assets
-import em_shadow
 
 
 class Live:
     def __init__(self):
-        self.oww_shadow_capable = True
-        self.oww_trigger_capable = True
+        self.capabilities = ["wake_request_v1"]
         self.oww_model_ready = True
-        self.oww_on_device = em_shadow.MODE_ON
         self.controls = []
 
     async def send_control(self, message):
@@ -40,7 +37,7 @@ def _asset():
 def test_incomplete_inventory_never_stands_a_device_down(monkeypatch):
     live = Live()
     monkeypatch.setattr(em_api.db, "get_effective_device_config", lambda _id: {
-        "owwOnDevice": "on", "owwModel": "selected",
+        "owwModel": "selected",
     })
     monkeypatch.setattr(em_api, "_oww_wanted_models", lambda _id: ["selected"])
     monkeypatch.setattr(em_api.em_oww_assets, "desired_assets", lambda _models: ([_asset()], []))
@@ -53,7 +50,6 @@ def test_incomplete_inventory_never_stands_a_device_down(monkeypatch):
     asyncio.run(em_api.reconcile_oww_assets("device-1", live))
 
     assert live.oww_model_ready is True
-    assert live.oww_on_device == em_shadow.MODE_ON
     assert not live.controls
     assert not synced
 
@@ -62,7 +58,7 @@ def test_missing_selected_md5_stands_down_then_restores_after_repair(monkeypatch
     live = Live()
     monkeypatch.setitem(em_api._devices, "device-1", live)
     monkeypatch.setattr(em_api.db, "get_effective_device_config", lambda _id: {
-        "owwOnDevice": "on", "owwModel": "selected",
+        "owwModel": "selected",
     })
     monkeypatch.setattr(em_api, "_oww_wanted_models", lambda _id: ["selected"])
     monkeypatch.setattr(em_api.em_oww_assets, "desired_assets", lambda _models: ([_asset()], []))
@@ -72,7 +68,7 @@ def test_missing_selected_md5_stands_down_then_restores_after_repair(monkeypatch
     states_during_sync = []
 
     async def sync(_live, _device_id):
-        states_during_sync.append((live.oww_model_ready, live.oww_on_device))
+        states_during_sync.append(live.oww_model_ready)
         return {"ok": True}
 
     async def log(*_args):
@@ -85,7 +81,6 @@ def test_missing_selected_md5_stands_down_then_restores_after_repair(monkeypatch
     finally:
         em_api._devices.pop("device-1", None)
 
-    assert states_during_sync == [(False, em_shadow.MODE_OFF)]
-    assert live.oww_model_ready is True
-    assert live.oww_on_device == em_shadow.MODE_ON
-    assert live.controls == [{"type": "config", "owwOnDevice": "on", "owwModel": "selected"}]
+    assert states_during_sync == [False]
+    assert live.oww_model_ready is False
+    assert live.controls == [{"type": "config", "owwModel": "selected"}]

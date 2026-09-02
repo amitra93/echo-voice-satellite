@@ -33,8 +33,6 @@ OPTION_ENV_VARS = {
     "server_host": "SERVER_HOST",
     "server_ip": "SERVER_IP",
     "mdns_name": "MDNS_NAME",
-    "oww_model": "OWW_MODEL",
-    "oww_threshold": "OWW_THRESHOLD",
     "require_device_tls": "REQUIRE_DEVICE_TLS",
     "device_approval": "DEVICE_APPROVAL",
     "debug": "DEBUG",

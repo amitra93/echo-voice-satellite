@@ -8,13 +8,6 @@ import pytest
 
 
 def _install_import_stubs():
-    openwakeword = types.ModuleType("openwakeword")
-    model = types.ModuleType("openwakeword.model")
-    model.Model = type("FakeOWWModel", (), {})
-    openwakeword.model = model
-    sys.modules.setdefault("openwakeword", openwakeword)
-    sys.modules.setdefault("openwakeword.model", model)
-
     zeroconf = types.ModuleType("zeroconf")
     zeroconf.ServiceInfo = type("ServiceInfo", (), {})
     zasync = types.ModuleType("zeroconf.asyncio")
@@ -37,12 +30,6 @@ def _install_import_stubs():
 
 _install_import_stubs()
 import em_controller
-
-# The controller has captured the classes it needs during import. Do not leave
-# the synthetic package in sys.modules: later tests correctly treat the
-# optional openwakeword dependency as absent.
-sys.modules.pop("openwakeword.model", None)
-sys.modules.pop("openwakeword", None)
 
 
 class FakeWS:
@@ -72,13 +59,252 @@ def test_device_wake_admission_rejects_reserved_device(monkeypatch):
     assert device.wake_request_id == "existing"
 
 
+def test_device_stop_generation_seeded_above_a_stale_device_counter():
+    """
+    Regression test: a fresh Device object (created on every controller
+    restart, since it is not persisted) used to seed stop_generation at 0.
+    The device's own stopword.Manager generation counter is long-lived
+    across control-plane reconnects, so a controller restarted mid-fleet-
+    operation would send generation 1, 2, 3... while the device still
+    remembered a much higher generation from before the restart, and the
+    device's monotonic check rejected every arm as "invalid arm" until the
+    controller's counter organically climbed back past it. Seeding from wall
+    clock instead puts the starting value far above anything a real device
+    session could have accumulated.
+    """
+    now_ms = em_controller.time.time() * 1000
+    device = new_device(["wake_request_v1", "stopword"])
+
+    # Comfortably above any generation a real device could have reached
+    # advancing by 1-2 per turn — not just above 0 — and within a second of
+    # actual wall-clock time (int() truncates, so allow for that).
+    assert device.stop_generation > 1_000_000
+    assert abs(device.stop_generation - now_ms) < 1000
+
+
+def test_wake_request_admission_gate_lets_barge_through_before_busy_check():
+    """
+    Regression test for a real, previously-shipped bug: the voice_lock/barge
+    check must run BEFORE the ordinary busy check. device.wake_request_id
+    stays set for an admitted turn's entire active duration (cleared only
+    once trigger_voice_turn returns, not just during the admission
+    handshake), so it is non-None for the whole window a device-originated
+    barge attempt can arrive in. Checking busy first denied every barge
+    request unconditionally — barge-in could not admit under any
+    configuration — and no test caught it because every existing
+    _handle_wake_request test pre-set wake_request_id to match the incoming
+    id, which is exactly what establishing this gate correctly is for.
+    """
+    device = new_device(["wake_request_v1"])
+    device.wake_request_id = "original-turn-request"  # the turn already in progress
+    device.barge_in_enabled = True
+
+    async def run():
+        async with device.voice_lock:
+            return em_controller._wake_request_admission_gate(device)
+
+    assert asyncio.run(run()) is None
+
+
+def test_wake_request_admission_gate_denies_barge_when_disabled():
+    device = new_device(["wake_request_v1"])
+    device.wake_request_id = "original-turn-request"
+    device.barge_in_enabled = False
+
+    async def run():
+        async with device.voice_lock:
+            return em_controller._wake_request_admission_gate(device)
+
+    assert asyncio.run(run()) == "barge_disabled"
+
+
+def test_wake_request_admission_gate_denies_ordinary_busy_when_not_mid_turn():
+    device = new_device(["wake_request_v1"])
+    device.wake_request_id = "existing"
+    assert em_controller._wake_request_admission_gate(device) == "busy"
+
+
+def test_wake_request_admission_gate_allows_fresh_request():
+    device = new_device(["wake_request_v1"])
+    assert em_controller._wake_request_admission_gate(device) is None
+
+
+def test_stop_detected_cancels_turn_without_killing_the_handler(monkeypatch):
+    """
+    Regression test for a real, previously-shipped bug (5.3 in the
+    device-only wake word design doc's hardware checklist): the accepted
+    branch of the stop_detected handler counted the stop with
+
+        await loop.run_in_executor(
+            None, db.bump_wake_counters, device_id, stops_accepted=1)
+
+    run_in_executor takes POSITIONAL args only — the kwargs call raised
+    TypeError inside the control-plane dispatch loop. The exception was
+    swallowed by handle_control's blanket handler, which then tore the
+    device's control/data connections down. The stop itself never ran
+    (stop_voice_turn is called BEFORE the counter bump, but the TypeError
+    aborted the whole handler task, and on hardware the observed behaviour
+    was: TTS did not stop, the device disconnected, and it reconnected a
+    few seconds later with the turn still running).
+
+    This test drives the real stop_detected handler end to end — real
+    StopState arming, real run_in_executor hop — and asserts BOTH that the
+    turn is cancelled AND that handle_control returns normally instead of
+    raising.
+    """
+    import em_turn_engine
+
+    stopped = []
+
+    async def fake_stop_voice_turn(device_id, turn_id, detection=None):
+        stopped.append((device_id, turn_id))
+        return True
+
+    async def no_op(*args, **kwargs):
+        return None
+
+    class WS:
+        """Register, report the stop model ready, then detect a stop.
+
+        The arm cannot be prepared up front: handle_control constructs a
+        FRESH Device from the register handshake, so the armed StopState
+        must live on that object. Arming lazily while producing the
+        stop_detected message guarantees register/stop_status have been
+        processed first (messages are consumed one at a time).
+        """
+        remote_address = ("192.0.2.13", 8767)
+
+        def __init__(self, device):
+            self.sent = []
+            self.closed = False
+            self._device = device
+            self._messages = self._stream()
+
+        def _stream(self):
+            """Yield register, stop_status, then an armed stop_detected.
+
+            The arm cannot be prepared up front: handle_control constructs a
+            FRESH Device from the register handshake, so the armed StopState
+            must live on that object. A generator guarantees register/
+            stop_status are consumed before the stop_detected message is
+            BUILT, so the live device exists in _devices by then.
+            """
+            yield json.dumps({
+                "type": "register", "device_id": self._device.device_id,
+                "ip": "192.0.2.13", "version": "test",
+                "capabilities": ["wake_request_v1", "stopword"],
+            })
+            yield json.dumps({
+                "type": "stop_status", "model": "stop", "ready": True,
+            })
+            live = em_controller._devices.get(self._device.device_id)
+            assert live is not None, "register must have stored the device"
+            live.stop_generation += 1
+            generation = live.stop_generation
+            loop = asyncio.get_event_loop()
+            armed = live.stop_state.arm(
+                501, generation, "playback", loop.time() + 135.0,
+            )
+            assert armed.action == "armed"
+            yield json.dumps({
+                "type": "stop_detected", "turnId": 501,
+                "generation": generation,
+                "score": 0.9, "threshold": 0.75, "ageMs": 120,
+                "phase": "playback",
+            })
+
+        async def recv(self):
+            return next(self._messages)
+
+        async def send(self, value):
+            self.sent.append(json.loads(value))
+
+        async def close(self):
+            self.closed = True
+
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            try:
+                return next(self._messages)
+            except StopIteration:
+                raise StopAsyncIteration
+
+    async def run():
+        device = new_device(["wake_request_v1", "stopword"])
+        old_devices = em_controller._devices
+        em_controller._devices = {device.device_id: device}
+        old_engine = em_turn_engine.ENGINE
+        em_turn_engine.ENGINE = em_turn_engine.TurnEngine()
+        monkeypatch.setattr(em_controller.db, "get_config", lambda *args: "strict")
+        monkeypatch.setattr(em_controller.db, "bump_wake_counters",
+                            lambda *args, **kwargs: None)
+        monkeypatch.setattr(em_controller.turn_engine, "stop_voice_turn",
+                            fake_stop_voice_turn)
+        monkeypatch.setattr(em_controller.turn_engine, "_push_event", no_op)
+        monkeypatch.setattr(em_controller, "_link_auth_ok",
+                            lambda *args: asyncio.sleep(0, result=True))
+        monkeypatch.setattr(em_controller.db, "get_device",
+                            lambda *args: {"label": "Test", "approved": 1,
+                                           "firmware_ver": "v1"})
+        monkeypatch.setattr(em_controller.db, "get_turns", lambda *args: [])
+        monkeypatch.setattr(em_controller.db, "get_effective_device_config",
+                            lambda *args: {})
+        monkeypatch.setattr(em_controller.db, "get_device_config",
+                            lambda *args: {})
+        monkeypatch.setattr(em_controller.db, "set_device_config",
+                            lambda *args: None)
+        monkeypatch.setattr(em_controller.db, "record_device_stats",
+                            lambda *args: None)
+        monkeypatch.setattr(em_controller.db, "touch_device_seen",
+                            lambda *args: None)
+        monkeypatch.setattr(em_controller.db, "upsert_device_seen",
+                            lambda *args: None)
+        monkeypatch.setattr(em_controller.db, "log_device",
+                            lambda *args: None)
+        monkeypatch.setattr(em_controller.db, "set_turn_playback",
+                            lambda *args: None)
+        monkeypatch.setattr(em_controller.api, "_push_event", no_op)
+        monkeypatch.setattr(em_controller.api, "_push_log_event", no_op)
+        monkeypatch.setattr(em_controller.api, "wifi_record_result",
+                            lambda *args: ({"pending": None}, False))
+        monkeypatch.setattr(em_controller.api, "notify_device_connected", no_op)
+        monkeypatch.setattr(em_controller.api, "notify_device_disconnected", no_op)
+        monkeypatch.setattr(em_controller.api, "reconcile_oww_assets", no_op)
+        monkeypatch.setattr(em_controller.em_player, "device_gone",
+                            lambda *args: None)
+        monkeypatch.setattr(em_controller, "leds_off", no_op)
+        monkeypatch.setattr(em_controller, "_push_device_state", no_op)
+        monkeypatch.setattr(em_controller.ha_sidechannels, "capabilities",
+                            lambda *args: None)
+        try:
+            # stop_voice_turn matches the turn by device_id only, so the
+            # Turn may hold the pre-register object.
+            turn = em_turn_engine.Turn(501, device, None, None)
+            em_turn_engine.ENGINE.turns[501] = turn
+
+            ws = WS(device)
+            # The old code raised TypeError HERE (swallowed by
+            # handle_control's blanket except, which then closed the
+            # connection) — so assert the turn cancelled AND the loop
+            # survived to ack the register.
+            await em_controller.handle_control(ws)
+            assert stopped == [(device.device_id, 501)]
+            assert any(m.get("type") == "ack" for m in ws.sent)
+        finally:
+            em_controller._devices = old_devices
+            em_turn_engine.ENGINE = old_engine
+
+    asyncio.run(run())
+
+
 def test_device_wake_admission_arbitrates_and_releases(monkeypatch):
     capabilities = ["wake_request_v1", "stopword"]
     winner = new_device(capabilities)
     loser = new_device(capabilities)
     loser.device_id = "loser"
     for device in (winner, loser):
-        device.oww_on_device = em_controller.em_shadow.MODE_ON
         device.oww_model_ready = True
         device.data_ws = object()
         device.stop_model_ready = True
@@ -113,7 +339,6 @@ def test_device_wake_admission_arbitrates_and_releases(monkeypatch):
 def test_ordinary_wake_request_starts_admission_without_idle_pcm(monkeypatch):
     async def run():
         device = new_device(["wake_request_v1", "stopword"])
-        device.oww_on_device = em_controller.em_shadow.MODE_ON
         device.oww_model_ready = True
         device.stop_model_ready = True
         device.data_ws = object()
@@ -122,7 +347,7 @@ def test_ordinary_wake_request_starts_admission_without_idle_pcm(monkeypatch):
 
         async def voice_turn(*args, **kwargs):
             called.append(kwargs)
-            assert device.mic_queue.empty() and device.voice_queue.empty()
+            assert device.voice_queue.empty()
             return False
 
         monkeypatch.setattr(em_controller, "_run_voice_locked", voice_turn)
@@ -165,7 +390,6 @@ def test_wake_status_requires_selected_model_and_matching_classifier(monkeypatch
 
 def test_wake_request_past_device_deadline_is_denied_as_stale():
     device = new_device(["wake_request_v1", "stopword"])
-    device.oww_on_device = em_controller.em_shadow.MODE_ON
     device.oww_model_ready = True
     device.stop_model_ready = True
     device.data_ws = object()
@@ -198,7 +422,8 @@ def test_capture_upload_requires_live_privacy_model_and_checksum_before_ack(monk
         device.send_control = lambda message: asyncio.sleep(0, result=sent.append(message))
         monkeypatch.setattr(
             em_controller.em_training_captures, "save_uploaded",
-            lambda *args: saved.append(args) or "capture.wav",
+            lambda *args, **kwargs: saved.append((args, kwargs))
+            or ("capture.wav", False),
         )
         monkeypatch.setattr(
             em_controller.em_training_captures, "discard",
@@ -233,14 +458,48 @@ def test_capture_upload_requires_live_privacy_model_and_checksum_before_ack(monk
             device.data_ws = ws
             device.save_wake_captures = True
 
-            def disable_during_save(*args):
+            def disable_during_save(*args, **kwargs):
                 device.save_wake_captures = False
-                return "capture.wav"
+                return "capture.wav", True
 
             monkeypatch.setattr(
                 em_controller.em_training_captures,
                 "save_uploaded",
                 disable_during_save,
+            )
+            assert not await em_controller._accept_capture_upload(
+                device, ws, completed
+            )
+            assert discarded == [("wake", "capture.wav")]
+
+            device.save_wake_captures = True
+            device.data_ws = ws
+
+            def replace_socket_during_save(*args, **kwargs):
+                device.data_ws = object()
+                return "capture-from-old-socket.wav", True
+
+            monkeypatch.setattr(
+                em_controller.em_training_captures,
+                "save_uploaded",
+                replace_socket_during_save,
+            )
+            assert not await em_controller._accept_capture_upload(
+                device, ws, completed
+            )
+            assert discarded == [("wake", "capture.wav")]
+
+            device.save_wake_captures = True
+            device.data_ws = ws
+
+            def disable_during_duplicate(*args, **kwargs):
+                device.save_wake_captures = False
+                return "existing.wav", False
+
+            monkeypatch.setattr(
+                em_controller.em_training_captures,
+                "save_uploaded",
+                disable_during_duplicate,
             )
             assert not await em_controller._accept_capture_upload(
                 device, ws, completed
@@ -253,16 +512,15 @@ def test_capture_upload_requires_live_privacy_model_and_checksum_before_ack(monk
 
 
 def test_capabilities_and_rtt_aggregation():
-    device = new_device(["led_anim", "audio_mix", "button_hold", "oww_shadow", "oww_trigger", "sendspin_native", "output_chain"])
+    device = new_device(["led_anim", "audio_mix", "button_hold", "wake_request_v1", "sendspin_native", "output_chain"])
     assert device.led_anim_capable
     assert device.audio_mix_capable
     assert device.button_hold_capable
-    assert device.oww_shadow_capable
-    assert device.oww_trigger_capable
+    assert device.wake_request_capable
     assert device.sendspin_native_capable
     assert device.output_chain_capable
     empty = new_device()
-    assert not empty.led_anim_capable and not empty.oww_trigger_capable
+    assert not empty.led_anim_capable and not empty.wake_request_capable
     assert not empty.sendspin_native_capable
     assert not empty.output_chain_capable
 
@@ -286,6 +544,7 @@ def test_capabilities_and_rtt_aggregation():
 def test_control_messages_and_listening_field():
     async def run():
         device = new_device()
+        device.oww_paused.set()
         await device.set_leds([{"id": 1}], listening=True)
         await device.send_led_anim({"pattern": "off"})
         await device.ping()
@@ -701,28 +960,22 @@ def test_control_handler_processes_device_state_messages(monkeypatch):
         async def close(self):
             self.closed = True
 
-    async def never_wake(_device):
-        await asyncio.Event().wait()
-
     async def no_op(*args, **kwargs):
         return None
 
     row = {"label": "Kitchen", "approved": 1, "firmware_ver": "v1"}
-    config = {"owwOnDevice": "off", "startupVolume": 80,
+    config = {"startupVolume": 80,
               "owwModel": "hey_jarvis_v0.1", "bleProxyEnabled": True}
     messages = [
         json.dumps({"type": "ambient_light", "lux": 12}),
         json.dumps({"type": "mute_state", "muted": True}),
         json.dumps({"type": "volume_state", "level": 90}),
         json.dumps({"type": "stats", "cpuPct": 5, "ambientLux": 12,
-                    "owwShadow": {"frames": 3, "drops": 1, "crossings": 1,
-                                   "maxScore": 0.8, "threshold": 0.3}}),
+                    "wakeDetector": {"frames": 3, "drops": 1, "crossings": 1,
+                                     "maxScore": 0.8, "threshold": 0.3}}),
         json.dumps({"type": "wifi_result", "ok": True, "ssid": "Home"}),
         json.dumps({"type": "playback_stats", "periods": 4, "underruns": 1,
                     "stats": {"min_depth": 2}}),
-        json.dumps({"type": "oww_shadow_cross", "score": 0.7, "ageMs": 20}),
-        json.dumps({"type": "oww_wake", "score": 0.8, "threshold": 0.3,
-                    "ageMs": 10, "activationSeq": 42}),
         json.dumps({"type": "ble_adverts", "adverts": [{"address": "x"}]}),
         json.dumps({"type": "wifi_scan_result", "networks": []}),
         json.dumps({"type": "log", "level": "info", "message": "hello"}),
@@ -756,7 +1009,6 @@ def test_control_handler_processes_device_state_messages(monkeypatch):
         monkeypatch.setattr(em_controller.api, "notify_device_disconnected", no_op)
         monkeypatch.setattr(em_controller.em_player, "device_gone", lambda *args: None)
         monkeypatch.setattr(em_controller, "leds_off", no_op)
-        monkeypatch.setattr(em_controller, "wake_word_listener", never_wake)
         monkeypatch.setattr(em_controller.ha_sidechannels, "ambient_light", lambda *args: None)
         monkeypatch.setattr(em_controller.ha_sidechannels, "mute_state", lambda *args: None)
         monkeypatch.setattr(em_controller.ha_sidechannels, "volume", lambda *args: None)
@@ -798,6 +1050,7 @@ def test_data_handler_routes_valid_audio_and_vad_sentinel(monkeypatch):
 
     async def run():
         device = new_device()
+        device.oww_paused.set()
         old_devices = em_controller._devices
         em_controller._devices = {"dev": device}
         monkeypatch.setattr(em_controller, "_link_auth_ok", lambda *args: asyncio.sleep(0, result=True))
@@ -810,8 +1063,8 @@ def test_data_handler_routes_valid_audio_and_vad_sentinel(monkeypatch):
         ])
         try:
             await em_controller.handle_data(ws)
-            assert device.mic_queue.get_nowait() == b"audio"
-            assert device.mic_queue.get_nowait() == em_controller.turn_engine.VAD_SENTINEL_END
+            assert device.voice_queue.get_nowait() == b"audio"
+            assert device.voice_queue.get_nowait() == em_controller.turn_engine.VAD_SENTINEL_END
             assert device.data_ws is None
             assert not device.data_ready.is_set()
         finally:
@@ -1155,10 +1408,84 @@ def test_run_voice_locked_handles_normal_turn_and_continuation(monkeypatch):
     asyncio.run(run())
 
 
+def test_run_voice_locked_barge_restart_gets_a_fresh_admission_deadline(monkeypatch):
+    """
+    Regression test for a real, previously-shipped bug: the barge-restart
+    branch of _run_voice_locked's loop used to keep reusing whichever
+    admission_valid closure the function was ORIGINALLY called with —
+    deadline included. For a barge admitted well into an active turn (the
+    whole point of barge-in), that deadline belongs to the original wake and
+    has long since passed, so the replacement turn's admission_valid()
+    always failed the instant HA accepted its wake.offer. From the outside
+    that read as "barge-in stops TTS but never opens the follow-up turn — it
+    just ends the voice session", with the actual cause (a stale timestamp
+    check) invisible anywhere in the symptom.
+    """
+    async def run():
+        device = new_device()
+        device.capabilities.append("stopword")
+        device.stop_model_ready = True
+        device.oww_model_ready = True
+        device.data_ws = object()
+        device.oww_paused.set()
+        device.barge_in_enabled = True
+
+        async def record(name, *args, **kwargs):
+            pass
+
+        device.mic_start = lambda: record("mic_start")
+        device.mic_stop = lambda: record("mic_stop")
+        monkeypatch.setattr(em_controller.em_player, "interrupt", lambda *args: record("interrupt"))
+        monkeypatch.setattr(em_controller.em_player, "resume_interrupted", lambda *args: record("resume"))
+        monkeypatch.setattr(em_controller, "leds_listening", lambda *args: record("listening"))
+        monkeypatch.setattr(em_controller, "_leds_turn_end", lambda *args: record("turn_end"))
+        monkeypatch.setattr(em_controller, "_push_device_state", lambda *args: record("state"))
+        monkeypatch.setattr(em_controller, "leds_spin_green", lambda *args: asyncio.sleep(3600))
+        monkeypatch.setattr(em_controller, "_run_streaming_post_turn_playback", lambda *args: asyncio.sleep(0, result=1))
+
+        # The deadline an original wake_request from well before this call
+        # would have produced — already expired by the time this runs.
+        already_expired = asyncio.get_running_loop().time() - 10.0
+        stale_admission_valid = em_controller._make_admission_valid(device, already_expired)
+        assert stale_admission_valid() is False  # sanity: it really is expired
+
+        seen = []
+
+        async def trigger(**kwargs):
+            seen.append(kwargs["admission_valid"])
+            if len(seen) == 1:
+                device.barge_request_id = "barge-1"
+                device.barge_detected = True
+                return False
+            async def pcm():
+                yield b"response"
+            await kwargs["post_turn_play"](pcm())
+            return False
+
+        monkeypatch.setattr(em_controller.turn_engine, "trigger_voice_turn", trigger)
+        old_devices = em_controller._devices
+        em_controller._devices = {device.device_id: device}
+        try:
+            await em_controller._run_voice_locked(
+                device, "wakeword", is_wakeword=True,
+                request_id="original-wake", admission_valid=stale_admission_valid,
+            )
+            assert len(seen) == 2
+            assert seen[0] is stale_admission_valid
+            assert seen[0]() is False
+            # The replacement turn must not inherit the original's expired
+            # deadline — a fresh closure, evaluating True right now.
+            assert seen[1] is not stale_admission_valid
+            assert seen[1]() is True
+        finally:
+            em_controller._devices = old_devices
+
+    asyncio.run(run())
+
+
 def test_device_wake_request_barges_thinking_and_playback(monkeypatch):
     async def run():
         device = new_device(["wake_request_v1", "stopword"])
-        device.oww_on_device = em_controller.em_shadow.MODE_ON
         device.oww_model_ready = True
         device.data_ws = object()
         device.stop_model_ready = True
@@ -1202,175 +1529,6 @@ def test_device_wake_request_barges_thinking_and_playback(monkeypatch):
         finally:
             em_controller.turn_engine.ENGINE = old_engine
             em_controller._devices = old_devices
-
-    asyncio.run(run())
-
-
-def test_wake_capture_snapshot_is_debounced_and_saved_off_loop(monkeypatch):
-    async def run():
-        device = new_device()
-        device.wake_ring.extend(b"ring")
-        device.wake_capture_sec = 2.0
-        saved = []
-        monkeypatch.setattr(em_controller.em_training_captures, "plan_snapshot", lambda *args: b"clip")
-        monkeypatch.setattr(em_controller.em_training_captures, "save", lambda *args: saved.append(args))
-        loop = asyncio.get_running_loop()
-        em_controller._maybe_capture_wake(device, "hey", 0.7, "act", loop)
-        await asyncio.sleep(0)
-        assert saved == [("hey", "dev", b"clip", "act", 0.7)]
-        previous = device._last_capture_mono
-        monkeypatch.setattr(em_controller.em_training_captures, "plan_snapshot", lambda *args: None)
-        em_controller._maybe_capture_wake(device, "hey", 0.8, "miss", loop)
-        assert device._last_capture_mono == previous
-
-    asyncio.run(run())
-
-
-def test_wake_listener_triggers_controller_turn_and_restores_listening(monkeypatch):
-    class StopListener(Exception):
-        pass
-
-    class Model:
-        def reset(self):
-            return None
-
-        def predict(self, samples):
-            return {"hey": 0.9}
-
-    async def run():
-        device = new_device()
-        device.oww_model = "hey"
-        device.oww_threshold = 0.5
-        device.oww_on_device = em_controller.em_shadow.MODE_OFF
-        device.save_wake_captures = False
-        calls = []
-        monkeypatch.setattr(em_controller, "OWWModel", lambda **kwargs: Model())
-        monkeypatch.setattr(em_controller.em_oww_models, "prediction_key", lambda value: "hey")
-        monkeypatch.setattr(em_controller.db, "log_device", lambda *args: None)
-        monkeypatch.setattr(em_controller.api, "_push_event", lambda *args: asyncio.sleep(0))
-        monkeypatch.setattr(em_controller, "_run_voice_locked", lambda *args, **kwargs: asyncio.sleep(0, result=calls.append("turn")))
-        monkeypatch.setattr(em_controller, "_maybe_capture_wake", lambda *args: calls.append("capture"))
-        device.mic_start = lambda: asyncio.sleep(0, result=calls.append("mic_start")) if calls.count("mic_start") == 0 else (_ for _ in ()).throw(StopListener())
-        device.mic_stop = lambda: asyncio.sleep(0, result=calls.append("mic_stop"))
-        device.beam_lock = lambda: asyncio.sleep(0, result=calls.append("beam_lock"))
-        device.beam_unlock = lambda: asyncio.sleep(0, result=calls.append("beam_unlock"))
-
-        task = asyncio.create_task(em_controller.wake_word_listener(device))
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        # New and reset OWW models are gated until their seeded feature window
-        # has been replaced by real audio.
-        for _ in range(em_controller.em_oww_warmup.FEATURE_WINDOW):
-            await device.mic_queue.put(b"\x01\x00" * (em_controller.CHUNK_BYTES // 2))
-        with pytest.raises(StopListener):
-            await task
-        assert calls[:4] == ["mic_start", "beam_lock", "turn", "beam_unlock"]
-        assert device.oww_paused.is_set()
-
-    asyncio.run(run())
-
-
-def test_wake_listener_escalates_when_mic_frames_stop_arriving(monkeypatch):
-    class StopListener(Exception):
-        pass
-
-    class Model:
-        def reset(self):
-            return None
-
-        def predict(self, samples):
-            return {"hey": 0.0}
-
-    async def run():
-        device = new_device()
-        device.oww_model = "hey"
-        device.oww_threshold = 0.5
-        starts = []
-        stops = []
-        monkeypatch.setattr(em_controller, "OWWModel", lambda **kwargs: Model())
-        monkeypatch.setattr(em_controller.em_oww_models, "prediction_key", lambda value: "hey")
-
-        async def mic_start():
-            starts.append(True)
-            if len(starts) > 3:
-                raise StopListener()
-
-        async def mic_stop():
-            stops.append(True)
-
-        device.mic_start = mic_start
-        device.mic_stop = mic_stop
-        original_wait_for = em_controller.asyncio.wait_for
-        attempts = 0
-
-        async def timeout_then_stop(awaitable, timeout):
-            nonlocal attempts
-            attempts += 1
-            if attempts <= 3:
-                awaitable.close()
-                raise asyncio.TimeoutError()
-            return await original_wait_for(awaitable, timeout)
-
-        monkeypatch.setattr(em_controller.asyncio, "wait_for", timeout_then_stop)
-        with pytest.raises(StopListener):
-            await em_controller.wake_word_listener(device)
-        assert len(starts) == 4
-        assert len(stops) == 1
-
-    asyncio.run(run())
-
-
-def test_wake_listener_reloads_model_after_live_config_change(monkeypatch):
-    class StopListener(Exception):
-        pass
-
-    class Model:
-        def __init__(self, score):
-            self.score = score
-
-        def reset(self):
-            return None
-
-        def predict(self, samples):
-            return {"new": self.score, "hey": self.score}
-
-    async def run():
-        device = new_device()
-        device.oww_model = "hey"
-        device.oww_threshold = 0.5
-        created = []
-
-        def make_model(**kwargs):
-            name = kwargs["wakeword_models"][0]
-            created.append(name)
-            return Model(0.0 if name == "hey" else 0.9)
-
-        monkeypatch.setattr(em_controller, "OWWModel", make_model)
-        monkeypatch.setattr(em_controller.em_oww_models, "prediction_key", lambda value: value)
-        monkeypatch.setattr(em_controller.db, "log_device", lambda *args: None)
-        monkeypatch.setattr(em_controller.api, "_push_event", lambda *args: asyncio.sleep(0))
-        monkeypatch.setattr(em_controller, "_run_voice_locked", lambda *args, **kwargs: asyncio.sleep(0))
-        device.beam_lock = lambda: asyncio.sleep(0)
-        device.beam_unlock = lambda: asyncio.sleep(0)
-        mic_starts = 0
-
-        async def mic_start():
-            nonlocal mic_starts
-            mic_starts += 1
-            if mic_starts == 1:
-                device.oww_model = "new"
-            elif mic_starts > 1:
-                raise StopListener()
-
-        device.mic_start = mic_start
-        device.mic_stop = lambda: asyncio.sleep(0)
-        task = asyncio.create_task(em_controller.wake_word_listener(device))
-        await asyncio.sleep(0)
-        await asyncio.sleep(0)
-        await device.mic_queue.put(b"\x01\x00" * (em_controller.CHUNK_BYTES // 2))
-        with pytest.raises(StopListener):
-            await task
-        assert created == ["hey", "new"]
 
     asyncio.run(run())
 

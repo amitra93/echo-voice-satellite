@@ -495,9 +495,9 @@ adb shell "su -c 'cat /tmp/server.log'"
 ✅ Slow white LED pulse while pending controller approval
 ✅ Amazon AFE production audio — paired system-UID OpenSL `VOICE_RECOGNITION`
 capture and playback; Amazon's HAL owns microphone processing
-✅ OpenWakeWord — "Hey Jarvis" detected server-side (threshold 0.3)
+✅ Local wake detection — "Hey Jarvis" detected on-device
 ✅ LED mapping calibrated — LED 0 at 240°, confirmed from volume sweep
-✅ Continuous processed wake stream — OWW scores uninterrupted AFE capture
+✅ Continuous processed wake stream — the device scores uninterrupted AFE capture
 ✅ Per-room noise floor tracking (v2.7.0, controller) — measurement-only asymmetric EWMA; drives the SNR-relative 5s no-speech cutoff (wake-then-silence closes quietly again)
 ✅ PTY dashboard shell (v2.7.1) — device allocates a real pseudo-terminal (mksh prompt, line editing, top/vi, resize); dashboard terminal is xterm.js; programmatic sessions (OTA) keep the raw pipe
 ✅ /tmp/server.log size cap (v2.7.1) — trim loop in start_server.sh, bounded at ~5.5MB; VAD diag slowed to ~10min with prompt clip-count reporting
@@ -506,7 +506,7 @@ capture and playback; Amazon's HAL owns microphone processing
 ✅ Speaker audioChanDepth 32 — prevents mid-stream underrun stutter on longer TTS responses (v2.6.4)
 ✅ Dashboard offline IP display — shows last known IP with "(last seen)" annotation when offline; suppresses Docker-NAT 127.0.0.1 artefact (v2.6.4)
 ✅ Per-turn structured trace — [TURN] log line with full stage timing at turn end
-✅ OWW near-miss visibility — scores > 0.05 logged at INFO (rate-limited 1/2s per device), persistent counter on dashboard status tab (v2.6.5)
+✅ Near-miss visibility — device-selected near-miss captures surface in dashboard Settings → Training (opt-in); the v2.6.5 controller-era near-miss counter is retired with controller scoring
 ✅ VAD threshold tunable down to 0.0001 (dashboard slider floor corrected)
 ### Historical completion log
 
@@ -558,7 +558,7 @@ and capable firmware renders LED animations locally.
 ✅ Conversation continuation actually works — mic restarted before each continuation turn; shipped broken in v2.6.4 (v2.6.5, C2)
 ✅ Preroll discard wake-turns-only — button/continuation turns pass 0, no first-word clipping on those paths (v2.6.5, C3)
 ✅ Mute is device-authoritative — mute stops the running mic stream, unmute restores it; audio stops leaving the device while the ring is red (v2.6.5, C5 partial — full-chip ADC mute pending)
-✅ OWW speex NS toggle (owwSpeexNs) — openwakeword's 16kHz-native speexdsp suppressor on the wake path only, dashboard/API/DB wired, off by default (v2.6.5, Q1)
+✅ Retired wake-denoise setting — historical 16 kHz wake-path suppressor (v2.6.5, Q1)
 ✅ Device preroll ring — ~512ms of pre-gate audio flushed on VAD gate open; fixes onset splice that depressed OWW scores and clipped first phonemes (v2.6.5)
 ✅ AGC reset at every mic stream start + mic stopped before TTS playback — TTS-echo-crushed gain can't poison the next turn; enabled AGC re-enable (v2.6.5)
 ✅ Speaker EOS vs underrun disambiguation — 0x03 EOS sets EndStream(), natural drain no longer logged as underrun (v2.6.5)

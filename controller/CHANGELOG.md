@@ -728,9 +728,8 @@ and the original answer is gone rather than resumed.
   cannot be installed, the device stays on the wake word it already has and
   the device log says so. Nothing you chose gets overridden.
 
-  Devices that use controller-side wake word detection are unaffected: the
-  model file means nothing to them, so the change applies immediately as
-  before.
+  This release note describes the retired mixed-mode architecture. Current
+  firmware always detects wake words locally and requires the selected model.
 
 ## 2.20.1-ea.4 — Prerelease
 

@@ -176,10 +176,10 @@ whether or not the controller is reachable.
 
 ## 02 — Wake word
 
-How the device decides you said the magic word. By default this work happens
-on the controller, not the Dot — the Dot just streams audio to it. The Dot
-can also do this work itself, either alongside the controller as a
-comparison or instead of it; see **Wake word detection** below.
+How the device decides you said the magic word. All wake word and stopword
+processing happens **on the Dot itself** — the controller never scores wake
+audio and only arbitrates the turn requests the device asks for; see
+**Wake word detection** below.
 
 ### Wake word model
 Which word wakes it: Hey Jarvis, Alexa, Hey Mycroft, or Hey Rhasspy. These
@@ -236,10 +236,12 @@ The confidence bar the recogniser must clear.
 - Toward **Eager**: catches you more reliably, but expect the occasional
   ghost activation.
 
-**How to tune it**: the Status tab counts **near-misses** — moments where the
-score came close but didn't trigger. If you're being ignored and see
-near-misses climbing, move one step toward Eager. If it wakes up when nobody
-spoke, move toward Precise.
+**How to tune it**: **near-misses** are moments where the score came close
+but didn't trigger. The device scores its own mic stream, so with **Save wake
+captures** on it captures those near-misses and **Settings → Training** shows
+them with their scores. If you're being ignored and near-misses are piling
+up, move one step toward Eager. If it wakes up when nobody spoke, move toward
+Precise.
 
 ### Barge-in
 Lets the wake word **interrupt the assistant mid-turn** — say the wake word
@@ -277,73 +279,49 @@ quiet, the original answer is gone rather than resumed — Home Assistant has no
 way to restart a reply it has already abandoned. The turn just ends quietly.
 
 ### Wake word detection
-Who decides you said the wake word. Three settings:
+Wake word detection runs **entirely on the Dot**. The device scores its own
+microphone stream with the selected wake model, and only when the score
+crosses the threshold does it ask the controller for permission to start a
+turn. No audio leaves the Dot until that grant — except opted-in training
+captures, which you control per device. There is no controller-side detection
+and no detector-location mode to choose: the controller never receives idle
+microphone audio and never loads or runs a wake model.
 
-- **Controller** (default) — the Dot streams audio and the controller
-  listens. What EchoMuse has always done.
-- **Both (compare)** — the Echo *also* runs the same model over the same
-  audio and reports what it would have detected, without acting on it. It
-  never triggers a turn. This is the one to use first: it tells you whether
-  on-device detection is trustworthy on your hardware, in your room, before
-  anything depends on it.
-- **On device** — the Echo decides, and the controller starts the turn on
-  its word.
-
-**Why you might want "On device".** The wake decision stops crossing your
+**Why detection lives on the device.** The wake decision stops crossing your
 network, so it is not delayed by a bad moment on the link. On a marginal
 connection that is the difference between a Dot that responds promptly and
 one that lags unpredictably.
 
 Be clear about what it does **not** do:
 
-- **It does not reduce network traffic.** The audio still streams
-  continuously, because the controller runs the rest of the turn.
+- **It does not reduce network traffic to zero.** The audio still streams
+  once a turn is granted, because the controller runs the rest of the turn.
 - **It does not keep working without the controller.** The wake word is only
   the first step; the turn itself needs the controller for Home Assistant,
   the microphone stream and the spoken reply. A wake detected while the
   controller is down lights the ring and goes nowhere.
 
-The controller keeps listening alongside it, which keeps the comparison in
-**Activity** running so you can see whether the two agree. That costs nothing
-*extra* — it is the same work the controller was already doing in
-**Controller** mode — but it is work that is no longer strictly needed once
-you trust the device, and on a busy Home Assistant machine you may prefer not
-to pay for it. **Both (compare)** is the mode built for measuring; consider
-dropping back to it when you want the numbers rather than leaving them
-running forever.
+Three things the device-side detector needs:
 
-Barge-in — interrupting a response by speaking over it — is scored by the
-controller in every mode and is unaffected by this setting.
-
-Each voice turn's row in **Activity** shows both scores side by side, and
-the per-device activity API returns an agreement summary (how often they
-agreed, how far apart in milliseconds, and crossings the device saw that
-never became a turn).
-
-**Multi-device caveat.** If you have several Echos in earshot of each other,
-put only one on **On device** for now. The rule that stops two Dots
-answering at once still judges claims by when they arrive rather than when
-each Echo actually heard you, so a device whose message was delayed can lose
-to one that heard you less well. With a single device set this way, or with
-Echos that cannot hear each other, this does not apply.
-
-Three things to know before leaving Controller:
-
-- **It needs files installed on the Dot** that aren't part of the firmware —
+- **Files installed on the Dot** that aren't part of the firmware —
   ONNX Runtime plus the wake-word models, about 15MB, placed in
   `/data/local/share/echomuse/oww`. They're deliberately not shipped in the
   firmware image, because that would double both the download and the space
-  each of the two firmware slots takes. Until they're there, the setting does
-  nothing and the device log says which file is missing.
-- **It costs about half a CPU core, permanently**, because the wake stream is
-  always on. Measured on an Echo Dot Gen 2 that has capacity for it — the mic
+  each of the two firmware slots takes. The dashboard installs them during
+  provisioning and can repair them later from the device's Updates tab. Until
+  they're there, wake detection is explicitly unavailable — the device says
+  so rather than falling back to anything else.
+- **About half a CPU core, permanently**, because the wake stream is always
+  on. Measured on an Echo Dot Gen 2 that has capacity for it — the mic
   pipeline was unaffected across hours of use, including during music
   playback — but enable it on **one device at a time** and watch the
   **Resources** panel on the Status tab.
-- **It needs recent firmware**, and the two settings need different
-  vintages: scoring shipped before triggering did. Each option is disabled
-  and says so on an Echo whose firmware cannot do it, rather than appearing
-  to work.
+- **Recent firmware.** Each related control is disabled and says so on an
+  Echo whose firmware cannot do it, rather than appearing to work.
+
+The stopword ("stop" during a response) and barge-in (interrupting by saying
+the wake word over playback) are scored the same way — on the device, against
+the same AFE capture stream.
 
 ---
 
@@ -572,7 +550,6 @@ These are set once, on the server, and need a controller restart to change:
 | Setting | What it is |
 |---|---|
 | `SERVER_IP` | The controller computer's LAN IP — what devices are told to connect to. Leave it empty to detect it from this host; the controller refuses to start rather than advertise an address it had to guess at, and warns if the detected one looks like a container bridge. |
-| `OWW_MODEL` / `OWW_THRESHOLD` | Startup defaults for wake word/sensitivity — the dashboard values override these. |
 | `DEVICE_APPROVAL` | `strict` (you approve every new device — recommended) or `auto`. |
 | `MUSIC_ASSISTANT_URL` | Music Assistant Sendspin endpoint pushed to native Echo devices. |
 | `SERVER_TLS_PORT` | Encrypted device link (wss) port — default 8770, `0` disables. Devices switch to it automatically once they hold pushed credentials (wizard install, or the **Secure link** button on the device Status tab). |

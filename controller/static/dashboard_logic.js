@@ -90,14 +90,10 @@
     return out;
   }
 
-  function onDeviceMode(config) {
-    const v = String(config.owwOnDevice ?? 'off').toLowerCase();
-    return ['off', 'shadow', 'on'].includes(v) ? v : 'off';
-  }
 
   root.EchoMuseDashboardLogic = {
     ingressPath, isIngress, ingressWebSocketUrl, wwModelLabel, uptime, relTime,
     deviceState, eventAccent, wifiBand, turnSegments, percentile, bannerMode,
-    effectiveConfig, onDeviceMode,
+    effectiveConfig,
   };
 })(typeof window !== 'undefined' ? window : globalThis);

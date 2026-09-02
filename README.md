@@ -11,6 +11,7 @@ A fork of https://github.com/wilbowes/EchoMuse that has the following difference
 *  Devices appear through a custom HACS integration rather than ESPHome. This allows for more control and I will be using this to support Gemini Live in the future.
 *  Audio is routed through Amazon Echo Android APIs, leading to richer and deeper sound.
 *  Changes to `oww_forge` to make wakewor training easier.
+*  Wake word and stopword detection run entirely on the devices — the controller never receives idle microphone audio and never scores a wake or stop model.
 
 ## Contributing
 

@@ -16,14 +16,12 @@
 # network_mode: host is required for mDNS device discovery — see
 # docker-compose.deploy.yml's comment.
 #
-# No GPU build arg here (host has no nvidia-smi).
 
 services:
   echomuse-controller:
     build:
       context: .
       args:
-        GPU: "0"
         EM_CONTROLLER_VERSION: ${EM_CONTROLLER_VERSION:-dev}
     container_name: echomuse-v2-controller
     restart: unless-stopped
@@ -37,10 +35,8 @@ services:
       - SERVER_HOST=0.0.0.0
       - SERVER_PORT=8767
       - API_PORT=8768
-      - OWW_THRESHOLD=0.5
       - SERVER_TLS_PORT=0
       - SERVER_IP=192.168.0.71
-      - OWW_MODEL=hey_jarvis
       - REQUIRE_DEVICE_TLS=0
       - MUSIC_ASSISTANT_URL=192.168.0.3:8927
     volumes:

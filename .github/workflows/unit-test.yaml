@@ -298,7 +298,7 @@ jobs:
       # WHY THIS EXISTS: the two largest files in the controller have no
       # test that so much as imports them. controller/CLAUDE.md records the
       # constraint honestly — the suite cannot import em_controller or
-      # em_esphome, which is why em_linkauth, em_runbarrier, em_barge and
+       # em_esphome, which is why em_linkauth, em_runbarrier, em_button and
       # em_turnclock were split out as pure modules with real coverage.
       # That split is right and should continue. What it leaves behind is a
       # blind spot: em_controller.py is ~4000 lines that nothing in CI ever

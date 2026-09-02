@@ -7,7 +7,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 EchoMuse repurposes Amazon Echo Dot Gen 2 (FireOS 5 / Android 5.1, codename "biscuit") as an open-source voice assistant satellite. Two components:
 
 - **`device/`** — Go binary that runs directly on the rooted Echo Dot
-- **`controller/`** — Python asyncio WebSocket server that manages devices, runs wake word detection, and proxies to a voice pipeline
+- **`controller/`** — Python asyncio WebSocket server that manages devices, arbitrates device-originated wake requests, and proxies to a voice pipeline (wake word and stopword detection run entirely on the device; the controller never receives idle PCM and never scores a wake or stop model)
 - **`oww_forge/`** — standalone Docker batch trainer for custom openWakeWord models (synthetic TTS positives → augmentation → classifier head → `.onnx`). Not part of the controller; see `oww_forge/README.md`. Upstream pins in its Dockerfile are load-bearing (piper-sample-generator v2.0.0 flat layout; openWakeWord SHA with a `--convert_to_tflite` argparse patch). Models install via the dashboard (Config → Wake word → "+ Custom model" → `/api/oww_models/upload`) into `oww_models/` beside the SQLite DB; `owwModel` stores the file path for custom models. openwakeword keys predictions by filename *stem*, never the path — always score via `em_oww_models.prediction_key`
 
 ## Building the device binary
@@ -75,16 +75,15 @@ python -m pytest tests/ --cov=. --cov-report=term-missing   # needs: pytest-cov
 Most of the controller test suite covers pure-logic modules — the bulk of
 `em_*.py` is now built as small decision functions with their own tests
 (`em_button`, `em_linkauth`, `em_ingressauth`, `em_turnclock`, `em_arbiter`,
-`em_shadow`, `em_scenes`, `em_config_sections`, and more), the pattern
+`em_scenes`, `em_config_sections`, and more), the pattern
 CLAUDE.md documents throughout this file. `em_api.py` is the one exception
 importing a genuinely heavy dependency at module level (`aiohttp`), which is
 why it's in the install list — but its OTHER heavy import (`websockets`) is
 stubbed via `sys.modules` rather than installed, since the handlers under
 test don't need it (`tests/test_training_captures_api.py` is the pattern to
 follow for more of `em_api.py`). `em_controller.py` is still excluded
-entirely, since it imports `openwakeword`/`onnxruntime` and `zeroconf` at
-module level with no stub in place yet — pulling those in would cost minutes
-of install for a real wake-word model nothing here exercises. Both suites
+entirely because its WebSocket and device runtime dependencies are not needed
+by the pure-logic suite. Both suites
 (plus `go vet`) run in CI on every push/PR (`.github/workflows/ci.yml`).
 
 **Release:** pushing a `v*` tag triggers `.github/workflows/release.yml`, which builds the binary in the compiler image and attaches it to a GitHub release. **Tag with `git tag -a --cleanup=verbatim`** — the annotation message becomes the release body (`body_path` from `git tag -l --format='%(contents)'`), which is what the dashboard shows next to an available update. Write it for the person deciding whether to push firmware to a device they depend on: what changed, what to expect, anything required of them. GitHub's generated commit list is still appended below it. A lightweight tag yields an empty body and falls back to that list, which is a worse experience, not a broken one.
@@ -100,8 +99,8 @@ and the only visible sign was a wall of paragraphs. Fixing it afterwards means
 commit list by hand, since the PATCH replaces the whole body.
 
 **Device/controller compatibility.** The two halves version independently, so any pairing can occur in the field. Two rules, both guarded by `tests/test_capabilities.py`:
-- **Negotiate by capability, not version.** The device announces what it implements in its register message (`internal/client/control.go`: `mic`, `speaker`, `leds`, `led_anim`, `buttons`, `test_audio`, `oww_shadow`, `oww_trigger`, `button_hold`, `audio_mix`, `music_sync`, and `ambient_light` **only when the sensor is actually readable**); the controller reads `Device.capabilities` via properties like `led_anim_capable` / `oww_shadow_capable`. Never compare version strings — that puts release history in the controller and misjudges dev builds. A UI control whose feature the device lacks is shown **disabled with the reason**, never as a control that silently does nothing.
-- **Degrade to old behaviour, never to a wrong answer.** Unknown JSON fields and message types are ignored both ways. Where a new field records a measurement, absence stores as **NULL, not 0** — old firmware reporting no `playback_stats` must not read as "zero underruns", and a device that cannot score wake words locally must not read as "scored and missed" (hence `turns.dev_shadow` alongside `dev_wake_score`).
+- **Negotiate by capability, not version.** The device announces what it implements in its register message, including `wake_request_v1`, `led_anim`, `button_hold`, `audio_mix`, and `ambient_light` only when its sensor is readable. The controller reads `Device.capabilities` through matching capability properties. Never compare version strings — that puts release history in the controller and misjudges dev builds. A UI control whose feature the device lacks is shown **disabled with the reason**, never as a control that silently does nothing.
+- **Degrade to old behaviour, never to a wrong answer.** Unknown JSON fields and message types are ignored both ways. Where a new field records a measurement, absence stores as **NULL, not 0** — old firmware reporting no `playback_stats` must not read as "zero underruns". Firmware without `wake_request_v1` remains available for recovery but cannot submit wake turns.
 
 ### Schema migrations
 
@@ -166,7 +165,6 @@ Dashboard available at `http://<SERVER_IP>:8768`. WebSocket devices connect to p
 
 Key env vars in `.env` (see `.env.example` for the full list):
 - `SERVER_IP` — LAN IP advertised via mDNS (devices connect here)
-- `OWW_MODEL` / `OWW_THRESHOLD` — OpenWakeWord model name and detection threshold
 - `DEVICE_APPROVAL` — `strict` (admin must approve new devices) or `auto`
 - `DEBUG` — `1` raises the controller to DEBUG. Read **once at import**, so
   a change needs a restart, and parsed as `== "1"` rather than a bare
@@ -375,12 +373,10 @@ next `RUN_START`, which the abort makes structurally certain to be ours) is
 kept because it is correct in isolation and the underlying problem it solved —
 two overlapping pipeline runs on one connection with no run identifier to tell
 them apart — is a property of HA's Assist protocol, not of ESPHome
-specifically, so it may be needed again once barge-in-triggered abort is wired
-through the new architecture. `em_controller.py`'s `_barge_watcher` still calls
-`abort_ha_run` on a barge-in exactly as before; today that call does not yet
-reach HA's pipeline (`turn.cancel` reaches the turn engine but not a running
-Assist pipeline run) — a gap noted in `em_turn_engine.py`'s own docstring
-rather than left silent.
+specifically, so it may be needed again once device-originated barge-in abort
+is wired through the new architecture. Today `turn.cancel` reaches the turn
+engine but not a running Assist pipeline run; that gap is documented in
+`em_turn_engine.py` rather than left silent.
 
 **Mute remains device-sovereign.** The HACS integration exposes a privacy-mute
 switch, but the only device primitive is `mute_toggle`, which invokes the same
@@ -506,21 +502,23 @@ Production audio is Amazon AFE only. The system-UID helper opens paired OpenSL
 processing, beam selection, gain, and echo handling. The helper must open both
 ends or report an audio startup failure. Do not add a raw ALSA fallback.
 
-The device continuously sends the AFE's processed mono wake stream to the
-controller. EchoMuse's device renderer retains voice/music planes, ducking,
+The device scores its continuous AFE mono capture locally against its
+wake-word and stopword models and sends no idle audio to the controller —
+only after a local score crossing does it request admission
+(`wake_request_v1`) and, when granted, stream that turn's mic audio.
+EchoMuse's device renderer retains voice/music planes, ducking,
 flush/discard-until-EOS, playback statistics, and OpenSL presentation timing.
 Local beamforming, SpeexDSP, raw ADC gain, fixed mic gain, AGC, and their
 configuration are not production features. Raw ALSA tools in `device/tools/`
 are diagnostics only.
 
-- **Barge-in** (controller-side `_barge_watcher`) — a wake word during TTS
-  cancels playback via `speaker_flush`; the AFE remains responsible for the
-  device-side audio processing while capture is live. A barge must abort HA's
-  run before starting the interrupting turn.
+- **Barge-in** — the device detects a wake word during TTS and asks the
+  controller to cancel playback before starting the interrupting turn. The AFE
+  remains responsible for device-side audio processing while capture is live.
 
 ### Controller audio pipeline
 
-1. **Wake word** — openwakeword (ONNX) runs in a thread executor per device on `mic_queue`. When 2+ devices are connected, `em_arbiter.py` applies **first-detector-wins** suppression: the first device to cross threshold answers *immediately* (no added latency, the claim is synchronous) and any other device detecting within `wakeArbitrationMs` (default 700, 0 = off) stands down and logs "Wake ceded". The claim is released at turn end. Do NOT reinstate the original best-SNR-after-a-wait design: it taxed every wake ~364ms (it gated on devices *connected*, not in earshot) and field data showed SNR at detection was indistinguishable across devices (0.9/1.15/0.93) while the SNR winner produced a worse transcript than the first detector.
+1. **Wake word** — the device scores its local AFE capture and sends a `wake_request_v1` after crossing its configured threshold. When 2+ devices are connected, `em_arbiter.py` applies **first-request-wins** suppression: the first device to request admission answers immediately and any other request within `wakeArbitrationMs` (default 700, 0 = off) stands down. The claim is released at turn end. Do NOT reinstate a proposal window: it adds latency to every wake without reliably improving room selection.
 2. **Voice turn** — on wake or dot-button: drain stale frames → acquire `voice_lock` → `em_turn_engine.trigger_voice_turn` streams mic frames up the per-turn audio WebSocket (`MIC_PCM`, `em_audio_frame.py`) to the HACS integration, which drives HA's Assist pipeline and streams the resulting TTS back down the same socket as 24kHz PCM chunks (`TTS_PCM`) **as HA's TTS engine produces them** — not a URL the controller fetches. The controller upsamples 24→48 (linear interpolation; TTS is narrowband speech, so this is cheap and sufficient) → EQ (`em_eq.py`) → `stream_speaker` → device `0x02` frames. Playback starts while HA is still generating, the same "don't accumulate the whole response first" property the old `_stream_tts_audio` had, achieved here by construction rather than by an explicit streaming-fetch helper — there is no URL fetch step to write one for. See "Voice backend" above for the full turn-engine/HACS design and `docs/design/full-duplex-plan.md` for why (Model 3)
 ### Ducking: music and voice are separate planes on the device
 
@@ -595,7 +593,7 @@ with no way for the user to tell which they had.
 | `internal/config/config.go` | Global runtime config; env var defaults, overridden by controller push |
 | `internal/bindings/` | Hardware drivers: mic PCM, speaker PCM, LED I2C, button evdev |
 | `internal/wakeword/` | openWakeWord streaming feature pipeline (mel ring → 76-frame windows → embedding ring → classifier). Pure Go: inference sits behind the `Inferer` interface so the buffering is host-testable with no ONNX/cgo. Validated tensor-for-tensor against Python via a golden fixture (`testdata/`, regenerate with `gen_fixture.py`) |
-| `internal/wakeword/ort/` | The `Inferer` implementation: ONNX Runtime via cgo. The library is **dlopen'd at runtime, never linked** (only the MIT C header is vendored) so a device without it boots normally and falls back to controller-side wake word — verified by the ARM binary needing only libdl/liblog/libc with zero undefined `Ort*` symbols. `DefaultOptions` (1 thread, XNNPACK, `allow_spinning=0`) is the measured optimum: 37.7% of one core against 243% for ORT's defaults. Don't "fix" the thread count — more threads lowers latency and *raises* CPU, the wrong trade for duty-cycled work |
+| `internal/wakeword/ort/` | The `Inferer` implementation: ONNX Runtime via cgo. The library is **dlopen'd at runtime, never linked** (only the MIT C header is vendored), so a missing runtime leaves wake detection explicitly unavailable without preventing the device from booting. The ARM binary needs only libdl/liblog/libc with zero undefined `Ort*` symbols. `DefaultOptions` (1 thread, XNNPACK, `allow_spinning=0`) is the measured optimum: 37.7% of one core against 243% for ORT's defaults. Don't "fix" the thread count — more threads lowers latency and *raises* CPU, the wrong trade for duty-cycled work |
 | `internal/wakeword/shadow/` | On-device scoring that reports but never acts (see "On-device wake word"). `Push` must never block: inference runs on its own goroutine and drops frames when behind |
 | `internal/wakeword/fixture/` | Shared golden-fixture parser, tolerance policy and `Verify`. Used by both the host test and `tools/oww_probe`, deliberately — the probe's answer is the trusted one because it runs on hardware, so it must be exactly as strict as the test by construction. Tolerances are relative to the **tensor's** scale, not per element: per-element relative error is meaningless for tensors straddling zero |
 | `internal/bindings/als/` | Ambient light (ams **TSL2540** on i2c). Android does not expose it AT ALL — `dumpsys sensorservice` reports an empty list, nothing under `/sys/class/sensors`, no input device; it is visible only on the raw i2c bus, the same shape as the mute LED being on a different GPIO than the vendor HAL believed. Resolved **by name, not address** (`0-0039` is an enumeration accident). **The bus listing is not a hardware inventory**: both ALS names are registered by Amazon's board file, so a `tsl2540` at 0x39 and a `tsl2584tsv` at 0x29 appear on every unit whatever is soldered on (`modalias` is static kernel data). Which one answers differs by batch — ours have the 2540 and nothing at 0x29 (`taos_probe() err = -6`, ENXIO), the `G090LF096` batch has the 2584 instead, reachable only through IIO at `/sys/bus/iio/devices/iio:device0` (#90). A second-sourced part, not a driver fault, so the answer is to read the IIO sensor too, never to loosen the match to a `tsl` prefix. The **boot log is the real inventory** — both drivers probe on every unit and log what replied — but `dmesg` rolls, so it needs reading soon after a reboot. Never `unbind` the driver to experiment: it succeeds, leaves the `als_*` attributes in place, and the next read hangs the device until a power cycle. `Lux()` returns **nil, never 0** — a covered sensor reads a genuine 0. `Watch` reports a step change immediately (25% relative, 10-lux floor, measured noise ±1.5%); the steady value rides the ~30s stats tick. `Report()` says **why** there is no sensor (`ok`/`no_chip`/`no_attribute`/`unknown`, plus every i2c name it saw) and rides the register message as `ambient_light_status` — absence used to be logged only to the device's own stdout, which support bundles do not collect, so two users could not be told apart without a shell session (#90). The whole bus is enumerated **before** matching: returning at the match truncated the list on working devices, which is exactly the side you compare against |
@@ -613,7 +611,6 @@ with no way for the user to tell which they had.
 | `em_auth.py` | Session auth with bcrypt |
 | `em_eq.py` | Parametric EQ applied to TTS audio before playback |
 | `em_oww_assets.py` | On-device wake word asset distribution — plans what a device needs (runtime + shared models + classifiers), what to push and what to evict. Pure logic; the two transports live in `em_api.py` |
-| `em_shadow.py` | On-device wake word shadow mode — correlates device-reported threshold crossings with the controller's own detections (clock domains, match window, consume-on-match) |
 | `em_scenes.py` | LED ring scenes — resolves `ledScene`/`ledListenColor`/`ledThinkColor` config into render-ready listening/spinner frames |
 | `em_turn_engine.py` | The voice-turn state machine — wired into `em_api.py`, not a standalone server. Owns `trigger_voice_turn`/`cancel_voice_turn`, `_stream_mic_audio`, `_persist_turn`, and the per-turn audio-WS registry (`turn_id → ws`). Replaces `em_esphome.py` (deleted, Phase 4 cutover — see `docs/design/full-duplex-plan.md`) |
 | `em_audio_frame.py` | The `>BBI` mic/TTS frame codec (`MIC_PCM`/`MIC_EOS`/`TTS_PCM`/`TTS_EOS`) for the per-turn audio WebSocket — the only custom wire protocol left in the voice path. Mirrored, not shared, by `hacs/.../audio_frame.py` on the HA side |
@@ -625,11 +622,16 @@ with no way for the user to tell which they had.
 | `em_tap_burst.py` | Coalesces a burst of action-button taps into one single/double/triple event. The window is restarted per tap and `enabled()` is re-checked at expiry, both correct. **The window is timed at the CONTROLLER, on arrival**, so the gap it measures is the real gap plus the RTT difference between the two taps — 26.4% of probes on this fleet exceed 200ms, which is why double/triple are unreliable below ~350ms (#115). The fix is a device-measured gap, the same reasoning as `heldMs` |
 | `em_recordings.py` | Utterance capture storage — WAVs in `recordings/` beside the DB, per-device file-count retention, ownership-checked path resolution |
 | `em_turnclock.py` | When a voice turn stops waiting, as a pure function. **The no-speech window is measured from the FIRST REAL AUDIO FRAME, not from turn start** — those answer different questions, and measured from turn start a slow link masquerades as a silent user. A 1373ms delivery gap (#139) shortened a 5s window to 3.6s and answered `no_speech` to someone mid-sentence, with the audio captured perfectly on the device and TCP holding it. `FIRST_AUDIO_GRACE` bounds the other side so audio that never arrives still ends the turn |
-| `em_runbarrier.py` | Serialising pipeline runs across a barge-in, as a pure state machine — after a server-side abort, discard events until the next `RUN_START`, which the abort makes structurally certain to be ours. Has **no live caller** as of the Phase 4 cutover (`_barge_watcher` still calls `abort_ha_run`, which does not yet reach a running HA pipeline run); kept because the run-overlap problem it solves is a property of HA's Assist protocol, not of the retired ESPHome transport. Split out for `em_linkauth`'s reason: the suite doesn't need the heavier modules that would otherwise drag in |
+| `em_runbarrier.py` | Serialising pipeline runs across a barge-in, as a pure state machine — after a server-side abort, discard events until the next `RUN_START`, which the abort makes structurally certain to be ours. Has **no live caller** as of the Phase 4 cutover; kept because the run-overlap problem it solves is a property of HA's Assist protocol, not of the retired ESPHome transport. Split out for `em_linkauth`'s reason: the suite doesn't need the heavier modules that would otherwise drag in |
 | `em_announce.py` | Running an HA announcement to completion, as a specification rather than a live call site: the new turn engine reimplements its two load-bearing rules (never reply early, always reply — `AnnounceFinished`/its equivalent is HA's completion signal and HA **blocks** on it) inline, but `ANNOUNCE_TIMEOUT_S` is still imported by `em_turn_engine.py` to bound `post_turn_play`, and the tests remain the spec those properties must meet |
 | `em_linkauth.py` | The device-link auth decision as a pure function. Split out of `em_controller._link_auth_ok` so it is testable: the suite does not import em_controller, so this was security logic with no coverage until it orphaned a device |
 
-## On-device wake word (shadow mode)
+## Historical On-device Wake Word Migration
+
+The following records the retired shadow-mode migration. The current protocol
+is device-only `wake_request_v1`; the controller neither receives idle PCM nor
+scores wake audio. See `docs/design/device-only-wakeword-design.md` for the
+current architecture.
 
 The Echo can run the wake model itself. `owwOnDevice` = `off` (default),
 `shadow` or `on`; an unknown value normalises to `off` at BOTH ends rather than
@@ -641,7 +643,7 @@ cannot honour it. Neither end may assume the other is the careful one.
 `oww_shadow` on purpose.** Shadow shipped first, so there is firmware in the
 field that scores and reports without being able to act on it; offering those
 `on` produces a device that scores perfectly and never answers.
-`em_shadow.effective_mode` degrades `on` to `shadow` when the capability is
+The former mode resolver degraded `on` to `shadow` when the capability was
 absent — never to `on`, which would leave the controller waiting for wakes the
 firmware has no code to send while no longer acting on its own. That is a wrong
 answer rather than the old behaviour, which is the line the whole capability
@@ -655,7 +657,7 @@ long AGO — never a timestamp) instead of `oww_shadow_cross`. It lands in
 (~80ms), because that is where turn setup lives: capture routing, beam lock and
 arbitration have to happen together, and driving them from the control-plane
 handler would be a second copy of the most delicate sequence in the controller.
-`em_shadow.decide_wake_source` is the decision, pure and tested, for the reason
+The former wake-source decision was pure and tested, for the reason
 `em_button.decide` and `em_linkauth.decide` are.
 
 - **The controller keeps scoring, and its detections stop triggering.** Its
@@ -665,8 +667,8 @@ handler would be a second copy of the most delicate sequence in the controller.
   seen at all. Without it, turning a device `on` would silently end the
   measurement: every turn would show a device score with nothing to compare
   against, which reads as perfect agreement rather than as no data.
-- **It is also what leaves barge-in alone.** Barge is scored controller-side
-  over the turn's own audio (`_barge_watcher`) and is untouched by this.
+- **It also left the old barge-in path alone.** Barge used a separate
+  controller-side turn-audio detector in that migration.
 - **`last_wake_mono` is the CROSSING instant, not arrival.** Using arrival
   would fold the network hop into every comparison and every arbitration
   decision, which this fleet's measured 1.1–2.6s RTT excursions make certain
@@ -743,7 +745,7 @@ every barge-in look like an on-device miss. The activity rollup therefore report
 three buckets, not two: agreed, missed, and **not_comparable** (controller used a
 lower bar, or the device's threshold is unknown).
 
-Correlation (`em_shadow.ShadowTracker`, schema v13) happens at turn-persist
+Correlation in the former shadow tracker (schema v13) happened at turn-persist
 time, not at detection: the crossing report can land after the wake it belongs
 to, and by turn end it has had seconds to arrive. The nearest crossing within
 `MATCH_WINDOW_S` (2.0s) wins and is **consumed**, so two turns in quick
@@ -759,8 +761,8 @@ turn are the false-accept side that per-turn rows structurally cannot show.
 Requirements and cost: ONNX Runtime plus the three models must be installed at
 `shadow.DefaultDir` (`/data/local/share/echomuse/oww`, override `EM_OWW_DIR`)
 — they are **not** in the firmware, since 12.3MB would double the OTA payload
-and both A/B slots. Absence is an ordinary condition, logged once, and the
-device carries on with controller-side wake word. `device/tools/oww_probe`
+and both A/B slots. Absence is an ordinary condition, logged once, and leaves
+wake detection unavailable. `device/tools/oww_probe`
 verifies a device reproduces Python and reports the real CPU cost. It costs
 ~38% of one core permanently on top of the ~18-20% mic-pipeline baseline, so
 **enable it on one device at a time**.
@@ -829,17 +831,18 @@ The first attempt stood the device down to controller-side scoring while the
 model installed. That works and was rejected: it silently overrides a setting
 the user chose, and the dashboard goes on reporting `owwOnDevice: on` — the
 same "reports healthy while something else is true" shape the capability rule
-exists to forbid. Note there is no privacy difference between the two modes
-(the device streams the wake audio either way, and the controller scores it in
-`on` mode too — that is what `turns.ctrl_wake_score` records), but a silent
-override is a trust problem regardless.
+exists to forbid. Note at the time there was no privacy difference between the
+two modes (the device streamed wake audio either way and the controller scored
+it in `on` mode too — that is what `turns.ctrl_wake_score` recorded); with
+device-only `wake_request_v1` the controller no longer receives idle PCM at
+all, but a silent override remains a trust problem regardless.
 
 Only devices that actually score locally are held back — with
 `owwOnDevice=off` the file is irrelevant, so the change stays instant. Both the
 old and the incoming mode are consulted, or a save that enables on-device
 scoring while changing the wake word slips through on the old mode.
 
-`em_shadow.effective_mode` also takes `model_ready` alongside
+The former mode resolver also took `model_ready` alongside
 `trigger_capable`, as a **backstop** with no current writer: install-before-
 switch removed the case that set it, and its intended writer is the
 reconcile-on-connect pass designed in #191 — the first thing that will actually
@@ -1140,7 +1143,7 @@ holes in a saved utterance. That mistake was made and corrected on the day.
 
 **Utterance recordings (schema v12).** Opt-in per device via `saveUtterances` (Config → Microphones): the mic audio streamed to HA for a turn is kept as a 16kHz mono WAV in `recordings/` beside the DB, playable and downloadable from each turn's row in the Activity tab (`GET /api/devices/{id}/turns/{turn}/audio`). Lets you hear what STT heard instead of inferring it from a bad transcript. Buffered in `_stream_mic_audio`, so the file is byte-for-byte the `MIC_PCM` wire payload sent up the per-turn audio WebSocket. Capped at `MAX_UTTERANCE_BYTES` (30s), written in `_persist_turn` because the filename is keyed on the turn's rowid. Retention is a hard per-device **file count** (`em_recordings.KEEP_PER_DEVICE`=10) — much shorter than `TURN_RETENTION`, so **a non-NULL `audio_file` on an older row is a claim to check, not to trust**; every reader goes through `em_recordings.resolve`, which also re-checks that the file belongs to the device in the URL (the endpoint takes both from the path) and treats a missing file as an ordinary 404. Default OFF and it should stay that way: this is the only feature that writes recognisable speech to disk. `db.delete_device` unlinks a device's recordings explicitly — nothing cascades to the filesystem. Note the dashboard fetches the WAV via `API.blob` rather than an `<a href>`: sessions are Bearer-header-only, no cookie is ever set, so browser-initiated requests would 401.
 
-**Wake-word training captures (`em_training_captures.py`).** Opt-in per device via `saveWakeCaptures` (Config → Wake word, fleet or per-device), captured **entirely controller-side** and grouped by wake-word model stem for labelling + `oww_forge` retraining. The controller already scores the continuous 16kHz wake stream in `wake_word_listener` (`em_controller.py`), so pre-roll needs no device change: a per-device `wake_ring` rolling buffer there is snapshotted on a wake **activation** OR a **near-miss** (`_maybe_capture_wake`) into `training_captures/<model_stem>/untriaged/` as a WAV. `wakeCaptureSec` (default 2.0) is how much pre-roll a clip keeps; the ring is bounded to `WAKE_RING_MAX_SEC` (5s), fed only while not muted and not `speaking`, and `WAKE_CAPTURE_DEBOUNCE_S` (3s) collapses the many frames one utterance crosses the near-miss floor on into a single clip. The clip's `kind` (`act`/`miss`) is a hint only — **the admin's label, not the trigger, decides positive vs negative** (an activation marked "should have ignored" is a false-accept negative; a near-miss marked "should have activated" is a false-reject positive). Storage mirrors `em_recordings` (filesystem-only, **no DB table / no migration**): untriaged is capped per wake word at `EM_WAKE_CAPTURE_CAP` (default 200, pruned oldest-first) while labelled `positive/`/`negative/` are **never auto-pruned** — they are the training set. All read/label/export endpoints are **admin-only** (raw speech, same bar as `_get_turn_audio`; pinned by `test_deploy.py`); the dashboard triages them under Settings → Training and downloads a `positive/`+`negative/` ZIP that `oww_forge`'s `import` (UI "+ Import labeled dataset…" or `forge.py import`) unpacks into `positive_train/test`+`negative_train/test`, splitting `TEST_FRACTION` (0.1) off for test — the same 90/10 policy as Google-TTS positives. `db.delete_device` cascades capture removal for privacy; the support bundle's allowlist excludes them (pinned by `test_support.py` — no `build()` param and no reference to the captures module/dir). Default OFF: like `saveUtterances`, this writes recognisable speech to disk. The admin labels/relabels/undoes via `em_training_captures.label`, a **move-anywhere** primitive (any bucket → any bucket, idempotent) so a mislabel is correctable rather than permanent; the dashboard's Training tab drives it with keyboard shortcuts (A/I/D/U/Space) and a backlog badge, and `export_zip` carries a `manifest.json` for provenance. The hot-path snapshot decision is the pure `em_training_captures.plan_snapshot` (debounce + slice + clamp), unit-tested without importing `em_controller`; the six REST handlers have a round-trip test (`test_training_captures_api.py`, which stubs `websockets` to import `em_api`). **Scope boundary:** in `owwOnDevice=on` the capture reflects the CONTROLLER's parallel score, so a near-miss only the device crossed (and the controller did not independently clear the near-miss floor on) is not captured — captures record what the controller detects. User guide: `docs/wake-training.md`; design: `docs/superpowers/specs/2026-08-23-wake-capture-labeling-design.md`.
+**Wake-word training captures (`em_training_captures.py`).** Opt-in per device via `saveWakeCaptures` (Config → Wake word, fleet or per-device), selected from the device's local wake stream and uploaded to the controller for storage by wake-word model stem. The device captures debounced activation and near-miss clips; the controller validates, stores, labels, exports, and enforces retention. Storage mirrors `em_recordings` (filesystem-only, **no DB table / no migration**): untriaged is capped per wake word at `EM_WAKE_CAPTURE_CAP` (default 200, pruned oldest-first) while labelled `positive/`/`negative/` are **never auto-pruned** — they are the training set. All read/label/export endpoints are **admin-only** (raw speech, same bar as `_get_turn_audio`; pinned by `test_deploy.py`). The admin labels/relabels/undoes via `em_training_captures.label`, a **move-anywhere** primitive (any bucket → any bucket, idempotent) so a mislabel is correctable rather than permanent; `export_zip` carries a `manifest.json` for provenance. User guide: `docs/wake-training.md`; design: `docs/design/device-only-wakeword-design.md`.
 
 ## Support bundles (`em_support.py`)
 
@@ -1477,7 +1480,7 @@ house, so rows survive with the SSID replaced and the selected network marked.
 
 `config.ConfigMessage` JSON fields (camelCase) are sent from controller to device on connect and on per-device config change. Non-zero fields are applied; zero/nil fields are ignored (partial update). Changes take effect immediately — no restart required.
 
-Configurable parameters: `vadThreshold`, `vadSpeechMs`, `vadSilenceMs`, `owwThreshold`, `owwModel`, `startupVolume`, `bargeInEnabled`, `bargeInThreshold`, `bleProxyEnabled`, `eqBands`, `eqLoudness`, `ledScene`, `ledListenColor`, `ledThinkColor`, `meterAttack`, `meterDecay`, `meterFloor`, `meterGamma`, `meterRef`, `meterCurve`, `wakeArbitrationMs`, `duckDb`, `buttonSingleTapEvent`, `buttonMultiTapMs`, `owwOnDevice`, `saveUtterances`, `saveWakeCaptures`, `wakeCaptureSec` and `wakeNearMissFloor`. The production audio output chain and Amazon AFE microphone processing are fixed; raw capture, beamforming, SpeexDSP, gain, AGC, AEC, noise suppression, and output-protection controls are not production configuration.
+Configurable parameters: `vadThreshold`, `vadSpeechMs`, `vadSilenceMs`, `owwThreshold`, `owwModel`, `startupVolume`, `bargeInEnabled`, `bargeInThreshold`, `bleProxyEnabled`, `eqBands`, `eqLoudness`, `ledScene`, `ledListenColor`, `ledThinkColor`, `meterAttack`, `meterDecay`, `meterFloor`, `meterGamma`, `meterRef`, `meterCurve`, `wakeArbitrationMs`, `duckDb`, `buttonSingleTapEvent`, `buttonMultiTapMs`, `saveUtterances`, `saveWakeCaptures`, `wakeCaptureSec` and `wakeNearMissFloor`. The production audio output chain and Amazon AFE microphone processing are fixed; raw capture, beamforming, SpeexDSP, gain, AGC, AEC, noise suppression, and output-protection controls are not production configuration.
 
 ### Fleet vs device scoping (schema v8)
 

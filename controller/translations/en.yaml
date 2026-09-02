@@ -19,16 +19,6 @@ configuration:
       The name advertised on your local network as
       <name>._emcontroller._tcp.local. Use lowercase letters, numbers, and
       hyphens.
-  oww_model:
-    name: Wake word model
-    description: >-
-      OpenWakeWord model to use, without the _v0.1.onnx suffix.
-      For example: hey_jarvis.
-  oww_threshold:
-    name: Wake word sensitivity
-    description: >-
-      Detection threshold from 0 to 1. Lower values are more sensitive and
-      may produce more false detections. The upstream default is 0.5.
   require_device_tls:
     name: Require encrypted device connections
     description: >-

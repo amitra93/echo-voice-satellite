@@ -38,7 +38,9 @@ These are dependencies rather than vendored code — they are fetched by the
 Dockerfiles and `requirements.txt`, and are not redistributed as source here.
 Listed because they end up in the published container image:
 
-- **ONNX Runtime** (MIT) — wake word inference, controller and device.
+- **ONNX Runtime** (MIT) — wake word and stopword inference on the device;
+  the controller image carries ONNX files and the ARM runtime solely to
+  distribute them to devices and never runs inference itself.
 - **openWakeWord** (Apache-2.0) — wake word models and feature pipeline.
 - **DTLN** (MIT, Nils L. Westhausen) — the two pretrained noise-suppression
   models the controller image downloads at build time, pinned to a commit in

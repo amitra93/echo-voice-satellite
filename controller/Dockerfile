@@ -9,26 +9,15 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl ffmpeg && 
 # Install Python dependencies
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-# GPU=1 swaps the CPU onnxruntime from requirements.txt for the CUDA build
-# (both provide the same `onnxruntime` import, so they can't coexist).
-# Local docker-compose.yml sets it; the published GHCR image is CPU-only.
-#
-# The two packages DO NOT share a version line, so this pin cannot be kept
-# in lockstep with requirements.txt by matching the string. onnxruntime
-# publishes 1.20.1 and no 1.20.2; onnxruntime-gpu publishes 1.20.0 and
-# 1.20.2 and no longer publishes 1.20.1 — it was there when this was
-# written and has since gone. The failure only ever surfaces on a fresh
-# local GPU build (the published image is CPU-only and never runs this
-# line), which is why it sat here unnoticed until 2026-08-10.
-ARG GPU=0
-RUN if [ "$GPU" = "1" ]; then \
-      pip uninstall -y onnxruntime && \
-      pip install --no-cache-dir onnxruntime-gpu==1.20.2; \
-    fi
-# Install openwakeword without deps — tflite-runtime has no Python 3.12
-# x86_64 build; onnxruntime handles inference instead
-RUN pip install --no-cache-dir --no-deps openwakeword==0.6.0 && \
-    python3 -c "import openwakeword; openwakeword.utils.download_models()"
+# Stock ONNX files are vendored only for device distribution. The temporary
+# package is removed after download: the running controller never imports or
+# executes OpenWakeWord or an ONNX runtime.
+RUN pip install --no-cache-dir requests tqdm scikit-learn onnxruntime==1.20.1 && \
+    pip install --no-cache-dir --no-deps openwakeword==0.6.0 && \
+    python3 -c "import openwakeword; openwakeword.utils.download_models()" && \
+    mkdir -p /app/models/oww_assets && \
+    cp -a "$(python3 -c 'import openwakeword, pathlib; print(pathlib.Path(openwakeword.__file__).parent / "resources" / "models")')"/. /app/models/oww_assets/ && \
+    pip uninstall -y openwakeword onnxruntime requests tqdm scikit-learn urllib3 certifi charset-normalizer joblib threadpoolctl
 # Vendor JS dependencies — served locally, no CDN needed at runtime
 RUN mkdir -p /app/static/vendor/fonts && \
     curl -sfL -o /app/static/vendor/react.min.js \
@@ -65,11 +54,8 @@ COPY em_limiter.py .
 COPY em_mbc.py .
 COPY em_scenes.py .
 COPY em_support.py .
-COPY em_shadow.py .
 COPY em_stop.py .
 COPY em_capture_upload.py .
-COPY em_oww_warmup.py .
-COPY em_barge.py .
 COPY em_pki.py .
 COPY em_hostip.py .
 COPY em_ingressauth.py .
@@ -95,7 +81,6 @@ COPY em_clock.py .
 COPY em_sendspin.py .
 COPY em_sync_sim.py .
 COPY em_turn_engine.py .
-COPY em_wake_audio.py .
 COPY em_test_audio.py .
 COPY em_ha_sidechannels.py .
 COPY version.py .

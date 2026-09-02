@@ -128,23 +128,22 @@ def test_api_turn_audio_media_and_config_error_branches(monkeypatch):
 
     live = SimpleNamespace(
         device_id="dev", capabilities=["led_anim"], led_anim_capable=True,
-        sent=[], oww_trigger_capable=False, oww_model_ready=True,
+        sent=[], oww_model_ready=True,
     )
     live.send_control = send_control
     monkeypatch.setattr(em_api, "_hold_back_oww_model", lambda _live, config: (config, None))
     monkeypatch.setattr(em_api.em_scenes, "resolve", lambda _config: {"listening_anim": {"pattern": "solid"}})
     monkeypatch.setattr(em_api.ha_sidechannels, "wake_model", lambda *_: None)
     config = {
-        "owwThreshold": 0.4, "owwModel": "hey", "owwSpeexNs": True,
+        "owwThreshold": 0.4, "owwModel": "hey",
         "saveUtterances": True, "saveWakeCaptures": True, "wakeCaptureSec": 2,
         "wakeNearMissFloor": 0.1, "bargeInEnabled": True, "bargeInThreshold": 0.1,
         "buttonSingleTapEvent": True, "buttonMultiTapMs": 300, "wakeArbitrationMs": 500,
-        "owwOnDevice": "on", "eqBands": [], "eqLoudness": True,
+        "eqBands": [], "eqLoudness": True,
         "limiterEnabled": True, "limiterRelease": 100,
         "bassGuardEnabled": True, "bassGuardDb": 2, "bleProxyEnabled": True,
     }
     run(em_api._apply_live_config("dev", live, config))
-    assert live.oww_on_device == em_api.em_shadow.MODE_SHADOW
     assert live.limiter_enabled and live.bass_guard_enabled and live.ble_proxy_enabled
 
 
@@ -302,7 +301,7 @@ def test_controller_approved_registration_initialises_and_cleans_up(monkeypatch)
     row = {"label": "Kitchen", "approved": 1}
     config = {
         "owwThreshold": 0.4, "owwModel": "hey", "startupVolume": 90,
-        "eqBands": [0.0] * 8, "owwOnDevice": "off", "ledScene": "lcd",
+        "eqBands": [0.0] * 8, "ledScene": "lcd",
     }
     old_devices = controller._devices
     controller._devices = {}
@@ -321,7 +320,6 @@ def test_controller_approved_registration_initialises_and_cleans_up(monkeypatch)
         monkeypatch.setattr(controller.api, "_push_event", noop)
         monkeypatch.setattr(controller, "_push_device_state", noop)
         monkeypatch.setattr(controller, "leds_off", noop)
-        monkeypatch.setattr(controller, "wake_word_listener", fake_wake)
         monkeypatch.setattr(controller.ha_sidechannels, "capabilities", lambda *_: None)
         monkeypatch.setattr(controller.ha_sidechannels, "wake_model", lambda *_: None)
         monkeypatch.setattr(controller.em_scenes, "resolve", lambda *_: {"listening": []})

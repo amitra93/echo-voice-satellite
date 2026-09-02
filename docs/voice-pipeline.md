@@ -2,17 +2,18 @@
 
 EchoMuse uses Amazon's Audio Front End (AFE) as its production device audio
 path. The Dot captures and plays audio through paired OpenSL ES endpoints;
-Amazon's HAL processes the microphone signal, while the controller and Home
-Assistant own wake detection and conversation handling.
+Amazon's HAL processes the microphone signal, while the device itself owns
+wake word and stopword detection and the controller and Home Assistant own
+conversation handling.
 
 ```text
 YOUR VOICE
     |
 OpenSL ES VOICE_RECOGNITION capture (system UID)
     |
-Amazon AFE / HAL -> continuous mono audio -> controller
+Amazon AFE / HAL -> continuous mono audio -> device-side wake word detector
     |
-openWakeWord -> EchoMuse turn engine -> Home Assistant Assist
+wake request/grant -> EchoMuse turn engine -> Home Assistant Assist
     |
 TTS PCM -> controller output shaping -> OpenSL ES playback -> speaker
 ```
@@ -25,19 +26,22 @@ apply its own microphone processing and playback reference handling. EchoMuse
 does not use a local beamformer, raw ALSA capture/playback, SpeexDSP echo
 cancellation, fixed mic gain, or local AGC in the production path.
 
-The device continuously sends mono wake audio over the LAN. This gives the
-controller uninterrupted frames for openWakeWord and lets it record
-near-misses, arbitrate between nearby Dots, and run compatible on-device wake
-word shadow/trigger modes when the device declares those capabilities.
+The device scores its own mic stream continuously with openWakeWord models
+running locally: the wake phrase, the stopword during active turns, and
+near-miss capture selection for opted-in training. No idle microphone audio
+leaves the Dot. When the wake word crosses the threshold, the device asks the
+controller for admission, which arbitrates between nearby Dots — first
+eligible request wins — before any audio is sent.
 
 Privacy mute remains hardware-authoritative: a muted Dot does not send useful
 capture audio, regardless of controller state.
 
 ## On The Controller
 
-The controller scores wake words, picks the first eligible detector in a
-multi-device arbitration window, and creates a turn before Home Assistant is
-contacted. The HACS integration opens one authenticated audio WebSocket for
+The controller never receives idle PCM and never loads or runs a wake or stop
+model. It admits or denies device wake requests, creates a turn before Home
+Assistant is contacted, and only then grants the device permission to stream
+audio. The HACS integration opens one authenticated audio WebSocket for
 that turn, receives microphone PCM, drives Assist, and streams TTS PCM back as
 it is generated.
 

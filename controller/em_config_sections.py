@@ -30,15 +30,15 @@ SECTIONS: dict[str, dict] = {
     "wakeword": {
         "label": "Wake word",
         "keys": [
-            "owwModel", "owwThreshold", "owwSpeexNs",
+            "owwModel", "owwThreshold",
             "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs",
-            "owwOnDevice", "saveWakeCaptures", "wakeCaptureSec",
+            "saveWakeCaptures", "wakeCaptureSec",
             "wakeNearMissFloor",
         ],
     },
     "stopword": {
         "label": "Stop word",
-        "keys": ["stopModel", "stopThreshold"],
+        "keys": ["stopModel", "stopThreshold", "saveStopCaptures", "stopCaptureSec"],
     },
     "microphones": {
         "label": "Microphones",

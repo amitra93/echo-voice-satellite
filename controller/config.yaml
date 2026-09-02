@@ -62,11 +62,6 @@ options:
   server_host: "0.0.0.0"
   server_ip: ""
   mdns_name: "echomuse"
-  oww_model: "hey_jarvis"
-  # Keep in step with em_db.DEFAULT_DEVICE_CONFIG["owwThreshold"] — a fresh
-  # add-on install is precisely the case that default exists for, and
-  # test_addon_default_threshold_matches_the_controller pins the pair.
-  oww_threshold: 0.5
   require_device_tls: false
   device_approval: "strict"
   debug: false
@@ -76,8 +71,6 @@ schema:
   server_host: "str"
   server_ip: "str"
   mdns_name: "match(^[a-z0-9][a-z0-9-]{0,62}$)"
-  oww_model: "str"
-  oww_threshold: "float(0,1)"
   require_device_tls: "bool"
   device_approval: "list(strict|auto)"
   debug: "bool"

@@ -1,8 +1,7 @@
 const { useState, useEffect, useRef, useCallback, useMemo } = React;
 const DashboardLogic = window.EchoMuseDashboardLogic;
 const { ingressPath, isIngress, ingressWebSocketUrl, wwModelLabel, uptime,
-  relTime, deviceState, eventAccent, wifiBand, turnSegments, percentile,
-  onDeviceMode } = DashboardLogic;
+  relTime, deviceState, eventAccent, wifiBand, turnSegments, percentile } = DashboardLogic;
 
 // ─── API ──────────────────────────────────────────────────────────────────────
 
@@ -1919,8 +1918,6 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
                 onChange={(k, v) => setConf(k, v)}
                 disabled={!isAdmin}
                 sections={sections}
-                shadowCapable={!device.connected || !!device.owwShadowCapable}
-                triggerCapable={!device.connected || !!device.owwTriggerCapable}
                 stopwordCapable={!device.connected || !!device.stopwordCapable}
                 mixCapable={!device.connected || !!device.audioMixCapable}
                 holdCapable={!device.connected || !!device.buttonHoldCapable}
@@ -4956,8 +4953,8 @@ const STAGE_MONO = "'DM Mono',monospace";
 // be silently wrong.
 const CONFIG_SECTIONS = {
   "playback": ["eqBands", "eqLoudness", "ttsGainDb", "duckDb", "limiterEnabled", "limiterRelease", "bassGuardEnabled", "bassGuardDb"],
-  "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice", "saveWakeCaptures", "wakeCaptureSec", "wakeNearMissFloor"],
-  "stopword": ["stopModel", "stopThreshold"],
+  "wakeword": ["owwModel", "owwThreshold", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "saveWakeCaptures", "wakeCaptureSec", "wakeNearMissFloor"],
+  "stopword": ["stopModel", "stopThreshold", "saveStopCaptures", "stopCaptureSec"],
   "microphones": ["afeMicGainDb", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs"],
@@ -5066,17 +5063,9 @@ function StageAdvanced({ open, onToggle, disabledStyle, children }) {
   );
 }
 
-// Mirrors em_shadow.normalise_mode: an unrecognised stored value renders as
-// "Controller" rather than leaving every segment unselected, which would look
-// like a control that had lost its value.
 function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
-                             shadowCapable = true, mixCapable = true,
-                             holdCapable = true, triggerCapable = true,
-                             stopwordCapable = true }) {
-  // shadowCapable defaults TRUE because this form is also the fleet-config
-  // view, where there is no single device whose capability could gate a
-  // control. Referencing a `device` here is what blank-screened the Config
-  // tab: the prop does not exist, so `device.connected` threw during render.
+                              mixCapable = true, holdCapable = true,
+                              stopwordCapable = true }) {
   // sections == null means the fleet-config view: nothing to inherit from, so
   // no per-section switches and every control is live.
   const scoped = Array.isArray(sections);
@@ -5277,8 +5266,8 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
 
       {/* 02 WAKE WORD */}
       <Stage n="02" title="Wake word"
-        chips={<ScopeChip tone="controller">Controller</ScopeChip>}
-        desc="openwakeword scores the continuous mic stream on the controller. Sensitivity sets the detection threshold — attempts that score close but miss are counted as near-misses (Status tab)."
+        chips={<ScopeChip tone="device">Echo</ScopeChip>}
+        desc="The Echo scores its local wake stream. Sensitivity sets the detector threshold; install or repair its model from the Updates tab when it reports unavailable."
         scope={scopeEl('wakeword')} dim={secStyle('wakeword')}>
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24, alignItems: 'start' }}>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, ...inputStyle }}>
@@ -5347,7 +5336,6 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
               </div>
             </div>
             <div style={{ marginTop: 8, ...inputStyle }}>
-              <Toggle label="Speex denoise" sub="cleans audio before scoring — try in noisy rooms" value={config.owwSpeexNs ?? false} onChange={v => set('owwSpeexNs', v)}/>
               <Toggle label="Barge-in" sub="wake word interrupts playback — Amazon AFE supplies the echo-cancelled capture path" value={config.bargeInEnabled ?? false} onChange={v => set('bargeInEnabled', v)}/>
               <Slider label="Barge threshold" sub="wake confidence needed during playback — raise it if a response cuts itself short" value={config.bargeInThreshold ?? 0.05} min={0.05} max={0.9} step={0.05} formatValue={v => v.toFixed(2)} onChange={v => set('bargeInThreshold', v)}/>
               <Slider label="Near-miss floor" sub="minimum score to count as a near-miss and log/capture — raise if picking up too much background speech" value={nearMissFloor} min={0.01} max={0.95} step={0.01} formatValue={v => v.toFixed(2)} onChange={v => set('wakeNearMissFloor', Number(v.toFixed(2)))}/>
@@ -5368,37 +5356,6 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
                 </div>
               )}
               <Slider label="Arbitration window" sub="ms that the first Echo to hear you silences the others — no added delay; 0 disables" value={config.wakeArbitrationMs ?? 700} min={0} max={2000} step={50} unit="ms" onChange={v => set('wakeArbitrationMs', v)}/>
-              {/* Three modes, so a select rather than a toggle. Each option is
-                  offered only when the device says it can do it — capability,
-                  not firmware version, because a control that silently does
-                  nothing reads as a broken feature rather than an unsupported
-                  one. "Trigger" needs oww_trigger on top of oww_shadow: shadow
-                  shipped first and there is firmware in the field that scores
-                  and reports without being able to act on it. */}
-              <Select
-                label="Wake word detection"
-                sub={!shadowCapable
-                  ? 'needs newer firmware on this Echo — the controller listens for now'
-                  : (config.owwOnDevice ?? 'off') === 'on'
-                    ? 'the Echo decides — no network hop before it hears you, and it keeps working through a controller restart. The controller still scores alongside it, so Activity shows whether they agreed'
-                    : (config.owwOnDevice ?? 'off') === 'shadow'
-                      ? 'the Echo scores alongside the controller and reports what it would have heard, without acting on it — compare in Activity before trusting it'
-                      : 'the controller listens; the Echo just streams audio'}
-                value={onDeviceMode(config)}
-                options={[
-                  { value: 'off',    label: 'Controller' },
-                  { value: 'shadow', label: 'Both (compare)', disabled: !shadowCapable },
-                  // Needs the runtime + models installed as well as the
-                  // capability, which the Updates tab does — hence the hint
-                  // rather than a hard block we cannot verify from here.
-                  { value: 'on',     label: 'On device',      disabled: !triggerCapable },
-                ]}
-                onChange={v => set('owwOnDevice', v)}/>
-              {(config.owwOnDevice ?? 'off') !== 'off' && shadowCapable && (
-                <div className="em-label" style={{ marginTop: 6, color: 'var(--muted)' }}>
-                  Needs the wake word runtime installed on this Echo (Updates tab) — costs ~0.4 of a core while it runs.
-                </div>
-              )}
                <Toggle label="Save wake captures" sub="keeps short clips of activations and near-misses to label and retrain — writes speech to disk; review under Settings → Training" value={config.saveWakeCaptures ?? false} onChange={v => set('saveWakeCaptures', v)}/>
               {(config.saveWakeCaptures ?? false) && (
                 <Slider label="Capture length" sub="seconds of audio before each detection to keep" value={config.wakeCaptureSec ?? 2.0} min={0.5} max={5.0} step={0.5} unit="s" onChange={v => set('wakeCaptureSec', v)}/>
@@ -5428,6 +5385,10 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
           <Slider label="Stop threshold" sub="confidence required during thinking and voice playback; one calibrated threshold is used in both phases"
             value={Number(Number(config.stopThreshold ?? 0.75).toFixed(2))} min={0.01} max={1} step={0.01}
             formatValue={v => v.toFixed(2)} onChange={v => set('stopThreshold', Number(v.toFixed(2)))}/>
+          <Toggle label="Save stop captures" sub="keeps short clips of stop attempts and near-misses to label and retrain — writes speech to disk; review under Settings → Training" value={config.saveStopCaptures ?? false} onChange={v => set('saveStopCaptures', v)}/>
+          {(config.saveStopCaptures ?? false) && (
+            <Slider label="Capture length" sub="seconds of audio before each detection to keep" value={config.stopCaptureSec ?? 2.0} min={0.5} max={5.0} step={0.5} unit="s" onChange={v => set('stopCaptureSec', v)}/>
+          )}
           {!stopwordCapable && (
             <div className="em-label" style={{ color: 'var(--error)', marginTop: -8 }}>Unsupported firmware: this Echo does not declare the required stopword capability.</div>
           )}

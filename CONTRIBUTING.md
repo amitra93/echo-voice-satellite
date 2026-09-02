@@ -26,7 +26,7 @@ cd device && go test ./internal/... ./pkg/... && go vet ./internal/... ./pkg/...
 Both run in CI on every push. **Please add a test if your change is pure
 logic** — the controller suite keeps heavy runtime imports isolated, so decisions
 that need coverage get extracted into their own module: see `em_button`,
-`em_linkauth`, `em_turnclock`, `em_barge`. Following that pattern is the
+`em_linkauth`, `em_turnclock`, `em_runbarrier`. Following that pattern is the
 single easiest way to get a change reviewed quickly.
 
 Hardware-dependent code is not testable on the host and nobody expects you to

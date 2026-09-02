@@ -38,14 +38,6 @@ log = logging.getLogger("echomuse.db")
 # ─── Default device config ────────────────────────────────────────────────────
 
 DEFAULT_DEVICE_CONFIG = {
-    # owwOnDevice: on-device wake word scoring. "off" or "shadow".
-    # Shadow scores the wake stream on the device and reports what it WOULD
-    # have detected, without acting on it, so the two can be compared on the
-    # same audio. Default off and it should stay that way: it costs ~38% of one
-    # core permanently on top of the ~18-20% mic-pipeline baseline, and it
-    # needs ONNX Runtime plus the models installed on the device out of band
-    # (they are not in the firmware). Enable on ONE device at a time.
-    "owwOnDevice":      "off",
     # AFE output is already S16 after Amazon's processing; default unity.
     "afeMicGainDb":     0,
     "startupVolume":    85,
@@ -120,6 +112,12 @@ DEFAULT_DEVICE_CONFIG = {
     # Conservative until real post-AFE field captures establish the calibrated
     # value. One threshold applies to thinking and playback by design.
     "stopThreshold":    0.75,
+    # saveStopCaptures: keep short 16kHz clips of the post-AFE audio leading up
+    # to a stop activation or near-miss, for admin labelling just like wake
+    # captures (em_training_captures). Default OFF for the same privacy reason.
+    # stopCaptureSec sets the pre-roll length per clip.
+    "saveStopCaptures": False,
+    "stopCaptureSec":   2.0,
     # Multi-device wake SUPPRESSION window (ms), not a wait. The first
     # device to detect answers immediately; any other device detecting
     # within this window stands down. 0 disables. Costs no latency to
@@ -128,15 +126,6 @@ DEFAULT_DEVICE_CONFIG = {
     # ~200ms (device mic batching is 160ms), and the window also needs to
     # cover a device that hears the winner's TTS a moment later.
     "wakeArbitrationMs": 700,
-    # owwSpeexNs: openwakeword's built-in speexdsp noise suppressor (Q1,
-    # 2026-07-05 review). 16kHz-native, applied controller-side, only to
-    # the wake-word detection path — cannot affect STT audio since STT
-    # never sees it. Defaults False, but no longer for the original reason:
-    # the packaging blocker cleared (pinned speexdsp-ns==0.1.2 in
-    # requirements.txt, imports cleanly in the image), so the noisy-room
-    # A/B this is waiting on is now actually runnable. Off until someone
-    # runs it — not off because it cannot be turned on.
-    "owwSpeexNs":       False,
     # ONLY to the turn audio streamed to HA's STT — the wake stream and
     # all noise-floor measurement stay raw. Helps steady noise (fan, AC,
     # hum) at marginal SNR; does little against competing speech (TV) —
@@ -800,6 +789,11 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '26' WHERE key = 'schema_version';
     """,
+
+    # ── v27 — remove retired controller wake-detector settings ────────────
+    """
+    UPDATE system_config SET value = '27' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -925,7 +919,43 @@ def _fixup_v24(conn) -> None:
             )
 
 
-_MIGRATION_FIXUPS = {11: _fixup_v11, 22: _fixup_v22, 23: _fixup_v23, 24: _fixup_v24}
+_RETIRED_WAKE_CONFIG_KEYS = frozenset({"owwOnDevice", "owwSpeexNs"})
+
+
+def _fixup_v27(conn) -> None:
+    """Remove controller-detector settings from persisted fleet and device config."""
+    row = conn.execute(
+        "SELECT value FROM system_config WHERE key = 'global_device_config'"
+    ).fetchone()
+    if row:
+        try:
+            config = json.loads(row["value"] or "{}") or {}
+        except (json.JSONDecodeError, TypeError):
+            config = None
+        if config is not None:
+            pruned = {k: v for k, v in config.items() if k not in _RETIRED_WAKE_CONFIG_KEYS}
+            if pruned != config:
+                conn.execute(
+                    "UPDATE system_config SET value = ? WHERE key = 'global_device_config'",
+                    (json.dumps(pruned),),
+                )
+    for row in conn.execute("SELECT device_id, config FROM devices"):
+        try:
+            config = json.loads(row["config"] or "{}") or {}
+        except (json.JSONDecodeError, TypeError):
+            continue
+        pruned = {k: v for k, v in config.items() if k not in _RETIRED_WAKE_CONFIG_KEYS}
+        if pruned != config:
+            conn.execute(
+                "UPDATE devices SET config = ? WHERE device_id = ?",
+                (json.dumps(pruned), row["device_id"]),
+            )
+
+
+_MIGRATION_FIXUPS = {
+    11: _fixup_v11, 22: _fixup_v22, 23: _fixup_v23, 24: _fixup_v24,
+    27: _fixup_v27,
+}
 
 # ─── Connection management ────────────────────────────────────────────────────
 

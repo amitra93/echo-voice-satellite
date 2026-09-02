@@ -25,7 +25,7 @@ scoped follow-up rather than a silent omission:
   `db.create_turn`'s row exists (a narrow ordering window), it is not folded
   into that turn's persisted stats.
 - **No on-device shadow-wake correlation via `last_wake_mono`.** The shadow
-  wake-word comparison (`em_shadow.ShadowTracker`) is not yet wired to turns
+  device wake-detector reporting is not yet wired to turns
   created here, so an on-device threshold crossing is not correlated against
   turns run through this engine the way it was under the old backend.
 """
@@ -851,16 +851,25 @@ async def admit_barge(device, request_id: str, score: float, threshold: float,
         None,
     )
     if active is None:
+        # No log call by itself denied without one before this: the only
+        # trace was the wake_deny reaching the device, invisible from server
+        # logs. See _handle_wake_request.deny for the same reasoning.
+        log.info(f"[{device.device_id}] admit_barge denied requestId={request_id} "
+                 "reason=busy (no active turn found)")
         await device.send_control({
             "type": "wake_deny", "requestId": request_id, "reason": "busy",
         })
         return False
     if admission_valid is not None and not admission_valid():
+        log.info(f"[{device.device_id}] admit_barge denied requestId={request_id} "
+                 "reason=disconnected (admission_valid() failed)")
         await device.send_control({
             "type": "wake_deny", "requestId": request_id,
             "reason": "disconnected",
         })
         return False
+    log.info(f"[{device.device_id}] admit_barge: cancelling turn {active.turn_id} "
+             f"for requestId={request_id} score={score:.3f} threshold={threshold:.3f}")
     _end_turn(active, "barged")
     await _push_event({
         "type": "turn.cancel", "device_id": device.device_id,

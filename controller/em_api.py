@@ -68,7 +68,6 @@ import em_training_captures
 import em_volume
 import em_scenes
 import em_sendspin
-import em_shadow
 import em_support
 import em_test_audio
 import em_turn_engine
@@ -1332,8 +1331,6 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
     """
     effective, pending_model = _hold_back_oww_model(live, effective)
     await live.send_control({"type": "config", **effective})
-    if "owwThreshold" in effective:
-        live.oww_threshold = float(effective["owwThreshold"])
     if "owwModel" in effective:
         live.oww_model = effective["owwModel"]
         # Refresh HA's wake-word dropdown.
@@ -1346,38 +1343,20 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         # The device is still on its previous wake word, still scoring
         # locally, still answering. Install, then switch.
         asyncio.create_task(_install_then_switch(device_id, pending_model))
-    if "owwSpeexNs" in effective:
-        live.oww_speex_ns = bool(effective["owwSpeexNs"])
     if "saveUtterances" in effective:
         live.save_utterances = bool(effective["saveUtterances"])
     if "saveWakeCaptures" in effective:
-        # Toggling off clears the rolling ring in the wake listener on its next
-        # frame; nothing to do here but mirror the flag.
         live.save_wake_captures = bool(effective["saveWakeCaptures"])
-    if "wakeCaptureSec" in effective:
-        live.wake_capture_sec = float(effective["wakeCaptureSec"])
-    if "wakeNearMissFloor" in effective:
-        live.wake_near_miss_floor = float(effective["wakeNearMissFloor"])
+    if "saveStopCaptures" in effective:
+        live.save_stop_captures = bool(effective["saveStopCaptures"])
     if "bargeInEnabled" in effective:
         live.barge_in_enabled = bool(effective["bargeInEnabled"])
-    if "bargeInThreshold" in effective:
-        live.barge_threshold = float(effective["bargeInThreshold"])
     if "buttonSingleTapEvent" in effective:
         live.button_single_tap_event = bool(effective["buttonSingleTapEvent"])
     if "buttonMultiTapMs" in effective:
         live.button_multi_tap_ms = int(effective["buttonMultiTapMs"])
     if "wakeArbitrationMs" in effective:
         live.wake_arb_ms = int(effective["wakeArbitrationMs"])
-    if "owwOnDevice" in effective:
-        # Resolved against the CAPABILITY, not taken at face value: "on"
-        # against firmware that cannot trigger would stop this controller
-        # acting on its own detections while waiting for wakes the device has
-        # no code to send, leaving it deaf. em_shadow.effective_mode degrades
-        # that to shadow.
-        live.oww_on_device = em_shadow.effective_mode(
-            effective["owwOnDevice"], live.oww_trigger_capable,
-            getattr(live, "oww_model_ready", True),
-        )
     if "eqBands" in effective:
         live.eq_bands = effective["eqBands"]
     if "eqLoudness" in effective:
@@ -4136,12 +4115,10 @@ def _hold_back_oww_model(live, effective: dict):
     device should end up on once the classifier is installed, or None when the
     change can go straight through.
 
-    A device cannot score a wake word whose classifier it does not have. Under
-    `owwOnDevice=on` the controller has stood down and no longer triggers on
-    its behalf, so telling the device to use a model it lacks produced a device
-    with NO wake word: nothing fired, nothing warned, and the dashboard
-    reported it healthy (#191). Selecting a wake word a device was never
-    provisioned with is an ordinary dashboard action.
+    A device cannot score a wake word whose classifier it does not have.
+    Selecting a wake word a device was never provisioned with is an ordinary
+    dashboard action, so it stays on its current working model while the
+    replacement is installed.
 
     So the device is never told about the new model until the file is there.
     It keeps listening for its CURRENT wake word, on-device, the whole time —
@@ -4149,26 +4126,13 @@ def _hold_back_oww_model(live, effective: dict):
     did not ask for and would not see. If the install fails, the device simply
     stays where it was.
 
-    Only devices that actually score locally are held back. With
-    `owwOnDevice=off` the controller does the scoring and the file on the
-    device is irrelevant, so the change applies immediately — which is the
-    common case, and it stays instant.
-
-    Both the old and the NEW mode are consulted: turning on-device scoring on
-    in the same save that changes the wake word would otherwise slip through
-    on the strength of the old mode being "off".
+    Only request-capable devices are held back; older firmware is explicitly
+    unsupported and cannot safely accept a local-detector configuration.
     """
     new_model = (effective.get("owwModel") or "").strip()
     if not new_model or new_model == live.oww_model:
         return effective, None
-    if not live.oww_shadow_capable:
-        return effective, None
-
-    was_local = live.oww_on_device != em_shadow.MODE_OFF
-    now_local = em_shadow.normalise_mode(
-        effective.get("owwOnDevice", live.oww_on_device)
-    ) != em_shadow.MODE_OFF
-    if not (was_local or now_local):
+    if "wake_request_v1" not in (getattr(live, "capabilities", []) or []):
         return effective, None
 
     held = dict(effective)
@@ -4208,9 +4172,7 @@ async def _install_then_switch(device_id: str, model: str) -> None:
 
     if not result.get("ok"):
         # Deliberately leaves the device where it was: on a wake word it can
-        # actually hear. The controller is scoring the NEW model (fleet config
-        # decides that), so the two disagree until this is resolved — worth
-        # saying loudly, and better than a device that hears nothing.
+        # actually hear. There is no controller detector fallback.
         await _push_log_event(
             device_id, "error", "controller",
             f"Could not install wake word model {model} "
@@ -4246,9 +4208,7 @@ async def reconcile_oww_assets(device_id: str, live) -> None:
     effective = await asyncio.get_running_loop().run_in_executor(
         None, db.get_effective_device_config, device_id
     )
-    if em_shadow.normalise_mode(effective.get("owwOnDevice")) == em_shadow.MODE_OFF:
-        return
-    if not live.oww_shadow_capable:
+    if "wake_request_v1" not in (getattr(live, "capabilities", []) or []):
         return
 
     desired, _ = em_oww_assets.desired_assets(_oww_wanted_models(device_id))
@@ -4258,26 +4218,20 @@ async def reconcile_oww_assets(device_id: str, live) -> None:
         log.info("[api] [%s] oww reconcile: inventory unavailable (%s)", device_id, exc)
         return
     if not state.get("inventory_ok", False):
-        log.info("[api] [%s] oww reconcile: incomplete inventory; leaving mode unchanged", device_id)
+        log.info("[api] [%s] oww reconcile: incomplete inventory", device_id)
         return
 
     missing = em_oww_assets.missing_selected_classifier(desired, state["installed"])
     if missing is None:
-        live.oww_model_ready = True
-        live.oww_on_device = em_shadow.effective_mode(
-            effective.get("owwOnDevice"), live.oww_trigger_capable, model_ready=True,
-        )
         return
 
-    # The configured classifier is known absent or stale. Let the controller
-    # trigger wakes while the background repair puts the device back in service.
+    # The configured classifier is known absent or stale. Keep the detector
+    # unavailable while repair runs; only matching device wake_status can mark
+    # it ready again.
     live.oww_model_ready = False
-    live.oww_on_device = em_shadow.effective_mode(
-        effective.get("owwOnDevice"), live.oww_trigger_capable, model_ready=False,
-    )
     await _push_log_event(
         device_id, "warn", "controller",
-        f"Wake word model {missing} is missing — scoring on the controller while it installs",
+        f"Wake word model {missing} is missing — detector unavailable while it installs",
     )
     try:
         result = await _sync_oww_assets(live, device_id)
@@ -4290,20 +4244,16 @@ async def reconcile_oww_assets(device_id: str, live) -> None:
     if not result.get("ok"):
         await _push_log_event(
             device_id, "error", "controller",
-            f"Could not install {missing} ({result.get('error')}) — scoring remains controller-side",
+            f"Could not install {missing} ({result.get('error')}) — detector remains unavailable",
         )
         return
 
     # A device creates its local scorer from a config push. Re-send only after
-    # the verified asset sync succeeds, never after a failed inventory or repair.
-    live.oww_model_ready = True
-    live.oww_on_device = em_shadow.effective_mode(
-        effective.get("owwOnDevice"), live.oww_trigger_capable, model_ready=True,
-    )
+    # verified asset sync; the following wake_status is the readiness authority.
     await live.send_control({"type": "config", **effective})
     await _push_log_event(
         device_id, "info", "controller",
-        f"Wake word model {missing} installed — scoring locally again",
+        f"Wake word model {missing} installed — waiting for detector readiness",
     )
 
 
@@ -5109,19 +5059,10 @@ def _merge_device(row) -> dict:
         # current control connection came in over the TLS listener (live).
         "linkTokenIssued":  bool(row["token"]) if "token" in row.keys() else False,
         "linkTls":          getattr(live, "secure", False) if live else False,
-        # Q4 fix (2026-07-05 review): near-miss counter — same lifecycle as
-        # the rest of this "Live" section (resets on reconnect, since it
-        # lives on the per-connection Device object, not the DB row).
-        "owwNearMisses":    getattr(live, "oww_near_misses", 0) if live else 0,
-        # What this firmware can be asked to do, by capability rather than by
-        # version comparison. Drives whether the dashboard OFFERS on-device
-        # scoring: a toggle that silently does nothing on old firmware is worse
-        # than no toggle, because it looks like the feature is broken.
-        "owwShadowCapable": getattr(live, "oww_shadow_capable", False) if live else False,
-        # Separate from shadow: firmware in the field scores and reports
-        # without being able to act on it, and offering those "on" produces a
-        # device that never answers.
-        "owwTriggerCapable": getattr(live, "oww_trigger_capable", False) if live else False,
+        # Older firmware stays connected for recovery and update, but cannot
+        # wake because controller-side detection no longer exists.
+        "wakeRequestCapable": getattr(live, "wake_request_capable", False) if live else False,
+        "wakeModelReady": getattr(live, "oww_model_ready", False) if live else False,
         "stopwordCapable": getattr(live, "stopword_capable", False) if live else False,
         "stopModelReady": getattr(live, "stop_model_ready", False) if live else False,
         "audioMixCapable": getattr(live, "audio_mix_capable", False) if live else False,

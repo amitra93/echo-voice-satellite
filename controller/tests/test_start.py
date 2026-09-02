@@ -9,14 +9,12 @@ def test_apply_options_maps_values_without_overwriting_environment(monkeypatch, 
         "server_ip": "option-ip",
         "debug": True,
         "require_device_tls": False,
-        "oww_threshold": 0.42,
         "server_host": "",
         "unknown": "ignored",
     })
     assert em_start.os.environ["SERVER_IP"] == "explicit-ip"
     assert em_start.os.environ["DEBUG"] == "1"
     assert em_start.os.environ["REQUIRE_DEVICE_TLS"] == "0"
-    assert em_start.os.environ["OWW_THRESHOLD"] == "0.42"
     assert "SERVER_HOST" not in em_start.os.environ
     assert "no env var mapped" in capsys.readouterr().out
 

@@ -16,7 +16,7 @@ OpenSL ES VOICE_RECOGNITION recorder (system UID)
         |
 Amazon AFE / AudioFlinger / hardware HAL
         |
-processed mono capture -> WebSocket -> controller wake and turn handling
+processed mono capture -> device-side wake word / stopword detection
 
 controller voice/music PCM -> device renderer -> OpenSL ES player -> HAL -> speaker
 ```
@@ -31,8 +31,10 @@ transaction. Both are required: the HAL needs the paired playback route for
 its own processing. A partial open is an audio startup failure, not a reason
 to use an alternate raw PCM runtime.
 
-The device sends continuous mono wake audio to the controller. The controller
-runs openWakeWord, arbitrates multi-device wakes, and routes voice turns to
+All wake word and stopword processing happens on the device: the Dot scores
+its own mic stream and sends no idle audio to the controller. When the wake
+word crosses the threshold, the device requests admission; the controller
+arbitrates multi-device wakes, grants the turn, and routes voice audio to
 the HACS integration. Home Assistant returns TTS over the per-turn audio
 socket; the controller shapes it and streams 48 kHz mono PCM to the device
 renderer. Voice and music retain separate device buffers so a voice turn can

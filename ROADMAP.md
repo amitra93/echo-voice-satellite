@@ -75,7 +75,7 @@ Example routing:
 - Show the selected backend through LED and dashboard state.
 - Keep model installation install-before-switch and capability-gated.
 
-**Relevant code:** `controller/em_oww_models.py`, `controller/em_oww_assets.py`, `controller/em_shadow.py`, `controller/em_controller.py`, `device/internal/wakeword/`, `hacs/custom_components/echo_voice_satellite/assist_satellite.py`
+**Relevant code:** `controller/em_oww_models.py`, `controller/em_oww_assets.py`, `controller/em_controller.py`, `device/internal/wakeword/`, `hacs/custom_components/echo_voice_satellite/assist_satellite.py`
 
 ### 5. Add An Optional Gemini Live Audio Backend
 
@@ -141,7 +141,10 @@ Echo -> EchoMuse controller -> HACS audio backend
 - Cancel timer.
 - Configured room lights on/off.
 
-Use a small controller-side classifier or focused speech recognizer, with confidence thresholds and normal Assist fallback. These commands should remain local where possible and must not bypass device-sovereign mute behavior.
+Use a small device-side classifier or focused speech recognizer — the same
+pattern as the on-device stopword — with confidence thresholds and normal
+Assist fallback. These commands should remain local where possible and must
+not bypass device-sovereign mute behavior.
 
 **Relevant code:** `controller/em_controller.py`, `controller/em_player.py`, `controller/em_turn_engine.py`, `controller/em_turnclock.py`
 

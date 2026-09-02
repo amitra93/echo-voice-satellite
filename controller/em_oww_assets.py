@@ -117,24 +117,14 @@ def runtime_source(runtime_dir: str | Path = RUNTIME_DIR) -> Path | None:
 
 
 def openwakeword_resources() -> Path | None:
-    """
-    The installed openwakeword package's bundled models directory.
-
-    Imported lazily and tolerantly: this module is unit-tested in an
-    environment that deliberately does not have openwakeword (see CLAUDE.md
-    on keeping the test deps to pytest/numpy/scipy).
-    """
-    try:
-        import openwakeword  # noqa: F401
-    except Exception:
-        return None
-    d = Path(openwakeword.__file__).parent / "resources" / "models"
+    """Stock ONNX assets vendored solely for device distribution."""
+    d = Path("/app/models/oww_assets")
     return d if d.is_dir() else None
 
 
 def classifier_source(oww_model: str,
-                      resources: Path | None,
-                      models_dir: Path | None) -> Path | None:
+                      resources: Path | None = None,
+                      models_dir: Path | None = None) -> Path | None:
     """
     Resolve an `owwModel` config value to the .onnx the DEVICE needs.
 
@@ -147,14 +137,29 @@ def classifier_source(oww_model: str,
     name = (oww_model or "").strip()
     if not name:
         return None
+    if models_dir is None:
+        try:
+            models_dir = em_oww_models.models_dir()
+        except Exception:
+            models_dir = None
     if name == em_oww_models.BUILTIN_STOP_MODEL:
         p = em_oww_models.BUILTIN_STOP_PATH
-        return p if p.is_file() else None
+        if p.is_file():
+            return p
+        # Local deployments keep the administrator-supplied mandatory stop
+        # classifier beside the database. It is equally authoritative when the
+        # image does not bundle a stock stop model.
+        if models_dir is not None:
+            p = models_dir / "stop.onnx"
+            return p if p.is_file() else None
+        return None
     if name.endswith(".onnx"):
         p = Path(name)
         if not p.is_absolute() and models_dir is not None:
             p = models_dir / p.name
         return p if p.is_file() else None
+    if resources is None:
+        resources = openwakeword_resources()
     if resources is None:
         return None
     p = resources / f"{name}.onnx"
@@ -241,7 +246,7 @@ def desired_assets(models: list[str],
     for name in SHARED_NAMES:
         p = (resources / name) if resources else None
         if p is None or not p.is_file():
-            problems.append(f"{name} not found in the installed openwakeword package")
+            problems.append(f"{name} not found in the vendored device assets")
             continue
         assets.append(Asset(name, p, md5_file(p), p.stat().st_size, "shared"))
 
@@ -362,7 +367,7 @@ def missing_selected_classifier(desired: list[Asset],
     inventory could not be read — so callers must not treat "missing" as
     established unless the listing itself succeeded. Standing a device down on
     a failed shell round trip would be the wrong answer, and absence of
-    evidence is not evidence of absence (see em_shadow.effective_mode).
+    evidence is not evidence of absence.
     """
     sel = next((a for a in desired if a.kind == "classifier"), None)
     if sel is None:

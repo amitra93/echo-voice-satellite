@@ -83,14 +83,12 @@ each pass pulls the model further toward your household.
 
 ## Scope notes
 
-- Capture is **controller-side**. It reuses the continuous wake-audio stream the
-  device already sends, so there is no device/firmware change and no extra load
-  on the Echo.
+- Capture is **device-originated**. The device selects activation and near-miss
+  clips from its local wake stream, then uploads opted-in captures to the
+  controller for storage and labeling.
 - The **untriaged** queue is capped per wake word (200 by default, oldest
   dropped; override with `EM_WAKE_CAPTURE_CAP`). Labelled clips are never
   auto-deleted — they are your training set — so export and clear them yourself
   when done.
-- In on-device wake mode (`owwOnDevice: on`), captures reflect what the
-  **controller** scores in parallel. A near-miss that only the device heard
-  (and the controller did not independently cross the near-miss floor on) is
-  not captured.
+- The controller never scores idle wake audio. Captures therefore reflect the
+  device detector's activation and near-miss decisions.

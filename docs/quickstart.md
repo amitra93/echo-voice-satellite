@@ -117,6 +117,10 @@ That's it. The controller is now running two things:
 - a listener that the Dots find automatically on your network (no IP
   configuration needed on the device side)
 
+Wake word and stopword detection run on the Dots themselves — the controller
+never hears your microphone until a Dot asks it for permission to start a
+turn.
+
 ## Step 3 — Create your admin account
 
 **On the Home Assistant add-on** there is nothing to create. Open the

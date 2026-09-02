@@ -1,8 +1,10 @@
 # EchoMuse
 
-Runs the EchoMuse controller — wake word detection, fleet dashboard, and
+Runs the EchoMuse controller — fleet dashboard, turn admission, and
 Home Assistant integration for rooted Echo Dot 2nd Gen devices — as a Home
-Assistant add-on instead of a separate docker-compose deployment.
+Assistant add-on instead of a separate docker-compose deployment. Wake word
+and stopword detection run entirely on the devices; the controller never
+receives idle microphone audio and never scores a wake or stop model.
 
 ## Installation
 

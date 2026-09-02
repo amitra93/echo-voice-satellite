@@ -7,12 +7,10 @@ a NEAR-MISS, so an admin can listen and label each one "should have activated"
 (positive) or "should have ignored" (negative), and hand the labelled result to
 oww_forge for retraining.
 
-The audio is captured entirely controller-side. The device already streams the
-always-on wake stream (16kHz mono S16_LE) continuously, and the OWW listener in
-em_controller already scores it and detects near-misses — so a small per-device
-rolling ring buffer there is all the pre-roll this needs. No device firmware
-change, no OTA, no new wire protocol. See
-docs/design/2026-08-23-wake-capture-labeling-design.md.
+Current firmware selects clips beside its local detector and uploads them over
+the data plane. The legacy controller-side ring remains temporarily for older
+firmware until the device-only wake migration removes that path. See
+docs/design/device-only-wakeword-design.md.
 
 Storage mirrors em_recordings and em_oww_models: files live under
 `training_captures/` beside the SQLite DB, inside the persisted Docker volume.
@@ -275,26 +273,31 @@ def _find_uploaded(model: str, device_id: str, capture_id: str,
 
 
 def save_uploaded(model: str, device_id: str, metadata: dict, pcm: bytes,
-                  db_path: str | None = None, cap: int = UNTRIAGED_CAP) -> str | None:
+                  db_path: str | None = None, cap: int = UNTRIAGED_CAP,
+                  with_status: bool = False):
     """Durably commit an uploaded capture; exact duplicates return its name."""
+    def result(name, created):
+        return (name, created) if with_status else name
+
     safe = em_recordings.safe_device_id(device_id)
     capture_id = metadata.get("captureId")
     kind = metadata.get("kind")
     score = metadata.get("score")
     directory = _bucket_dir(model, "untriaged", db_path)
     if safe is None or not isinstance(capture_id, str) or kind not in {"act", "miss"}:
-        return None
+        return result(None, False)
     if directory is None or not pcm:
-        return None
+        return result(None, False)
     with _UPLOAD_LOCK:
         existing = _find_uploaded(model, safe, capture_id, db_path)
         if existing is not None:
             existing_meta = _read_meta(existing)
-            return existing.name if existing_meta == {**metadata, "device_id": safe} else None
+            name = existing.name if existing_meta == {**metadata, "device_id": safe} else None
+            return result(name, False)
         ts_ms = int(time.time() * 1000)
         name = filename(safe, ts_ms, kind, score)
         if name is None:
-            return None
+            return result(None, False)
         directory.mkdir(parents=True, exist_ok=True)
         path = directory / name
         while path.exists():
@@ -326,9 +329,9 @@ def save_uploaded(model: str, device_id: str, metadata: dict, pcm: bytes,
             path.unlink(missing_ok=True)
             meta.unlink(missing_ok=True)
             log.warning("[training] uploaded capture commit failed: %s", exc)
-            return None
+            return result(None, False)
         prune_untriaged(model, db_path=db_path, cap=cap)
-        return name
+        return result(name, True)
 
 
 def _list_names(directory: Path | None) -> list[dict]:

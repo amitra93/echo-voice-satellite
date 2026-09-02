@@ -202,8 +202,8 @@ Why this over Model 2 (controller fetches a `tts_proxy` URL):
   is trivial (linear interpolation is fine for TTS — narrowband speech; the
   fork's v1 device runtime already uses a 24→48 linear interp).
 - **Audio WS is the single full-duplex transport.** Mic up, TTS down, same
-  socket, concurrently. `/api/events` stays JSON-only. Barge-in stays
-  controller-side (`_barge_watcher` + `speaker_flush`).
+  socket, concurrently. `/api/events` stays JSON-only. Device-originated
+  barge-in cancels playback through the ordinary turn admission path.
 - **Decode runs where the stream already lives.** ffmpeg in the integration
   consumes an in-process `ResultStream`, not an HTTP fetch.
 
@@ -494,7 +494,7 @@ LEDs light via `led_anim` control messages. Only the mic input is synthetic.
    - Set `device.oww_paused` (routes to `voice_queue`, consistent with real wake).
    - Set `device.last_wake = {model, score: 0.9, threshold: 0.5, noise_floor}`
      (synthetic wake detail for the trace/Activity tab).
-   - Set `device.last_wake_mono = em_shadow.now()` (for shadow correlation).
+    - Record the synthetic wake details for the trace and Activity tab.
 4. Call `_run_voice_locked(device, trigger_label="test_turn", is_wakeword=True)`:
    - This acquires `voice_lock`, sets `device.listening=True`, sends
      `led_anim` listening (LEDs light up green on the Echo), pushes device state.

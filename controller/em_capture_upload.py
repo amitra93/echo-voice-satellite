@@ -31,10 +31,9 @@ class CompletedCapture:
 
 
 def _number(value, name: str) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError) as exc:
-        raise CaptureProtocolError(f"invalid {name}") from exc
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise CaptureProtocolError(f"invalid {name}")
+    number = float(value)
     if not math.isfinite(number) or not 0 <= number <= 1:
         raise CaptureProtocolError(f"invalid {name}")
     return number
@@ -82,7 +81,9 @@ def validate_metadata(metadata: dict) -> dict:
         raise CaptureProtocolError("inconsistent completeness")
     if not isinstance(metadata.get("bargeThresholdActive"), bool):
         raise CaptureProtocolError("invalid barge flag")
-    return dict(metadata)
+    validated = dict(metadata)
+    validated.update(score=score, threshold=threshold, nearMissFloor=floor)
+    return validated
 
 
 @dataclass

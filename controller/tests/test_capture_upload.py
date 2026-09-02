@@ -53,6 +53,21 @@ def test_valid_upload_round_trip():
     assert len(completed.pcm) == 2 * upload.FRAME_BYTES
 
 
+@pytest.mark.parametrize("field", ["score", "threshold", "nearMissFloor"])
+def test_numeric_provenance_fields_reject_strings_and_booleans(field):
+    for value in ["0.8", True]:
+        with pytest.raises(upload.CaptureProtocolError):
+            upload.Receiver().feed(begin(metadata(**{field: value})))
+
+
+def test_parser_recovers_after_bad_frame():
+    receiver = upload.Receiver()
+    receiver.feed(begin())
+    with pytest.raises(upload.CaptureProtocolError):
+        receiver.feed(pcm(1))
+    assert complete(receiver).metadata["captureId"] == "boot:1"
+
+
 @pytest.mark.parametrize("bad", [
     lambda: b"",
     lambda: begin(metadata(kind="other")),
@@ -96,6 +111,14 @@ def test_partial_out_of_order_oversized_and_digest_mismatch_are_rejected():
         receiver.feed(bad_end)
 
 
+def test_end_rejects_duration_that_does_not_match_metadata():
+    receiver = upload.Receiver()
+    receiver.feed(begin(metadata(actualPrerollMs=160, complete=True)))
+    receiver.feed(pcm(0))
+    with pytest.raises(upload.CaptureProtocolError):
+        receiver.feed(end([bytes([1]) * upload.FRAME_BYTES]))
+
+
 def test_uploaded_capture_is_durable_deduplicated_and_sidecars_follow_lifecycle(tmp_path):
     db_path = str(tmp_path / "db.sqlite")
     completed = complete()
@@ -105,7 +128,15 @@ def test_uploaded_capture_is_durable_deduplicated_and_sidecars_follow_lifecycle(
     assert path is not None and captures._meta_path(path).is_file()
 
     assert captures.save_uploaded("wake", "device", completed.metadata, completed.pcm, db_path) == name
-    assert len(captures.list_captures("wake", "untriaged", db_path)) == 1
+    assert captures.save_uploaded(
+        "wake", "device", completed.metadata, completed.pcm, db_path,
+        with_status=True,
+    ) == (name, False)
+    assert captures.save_uploaded(
+        "wake", "device", metadata(captureId="boot:created"), completed.pcm,
+        db_path, with_status=True,
+    )[1] is True
+    assert len(captures.list_captures("wake", "untriaged", db_path)) == 2
 
     assert captures.label("wake", name, "positive", db_path)
     moved = captures.resolve("wake", name, "positive", db_path)
@@ -126,6 +157,20 @@ def test_conflicting_duplicate_is_not_acknowledgeable(tmp_path):
     assert captures.save_uploaded("wake", "device", completed.metadata, completed.pcm, db_path)
     conflict = dict(completed.metadata, score=0.9)
     assert captures.save_uploaded("wake", "device", conflict, completed.pcm, db_path) is None
+
+
+def test_failed_durable_write_leaves_no_capture(monkeypatch, tmp_path):
+    db_path = str(tmp_path / "db.sqlite")
+
+    def fail_fsync(*_args):
+        raise OSError("simulated full disk")
+
+    monkeypatch.setattr(captures, "_fsync_file", fail_fsync)
+    completed = complete()
+    assert captures.save_uploaded(
+        "wake", "device", completed.metadata, completed.pcm, db_path
+    ) is None
+    assert captures.list_captures("wake", "untriaged", db_path) == []
 
 
 def test_prune_and_device_delete_remove_uploaded_sidecars(tmp_path):

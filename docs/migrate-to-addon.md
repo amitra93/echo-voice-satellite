@@ -85,8 +85,6 @@ screen and you will re-enter these by hand:
 | `SERVER_IP` | **Server IP** |
 | `SERVER_HOST` | **Server host** |
 | `MDNS_NAME` | **mDNS name** |
-| `OWW_MODEL` | **Wake word model** |
-| `OWW_THRESHOLD` | **Wake word threshold** |
 | `DEVICE_APPROVAL` | **Device approval** |
 | `REQUIRE_DEVICE_TLS` | **Require device TLS** |
 | `DEBUG` | **Debug** |

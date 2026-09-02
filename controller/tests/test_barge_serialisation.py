@@ -23,12 +23,9 @@ exactly the tool the barge-in-abort follow-up in `em_turn_engine.py`'s module
 docstring will need — but nothing currently instantiates it, and the wiring
 tests that used to pin the ESPHome-specific call sites (`self._barrier.
 begin_turn()`, `VoiceAssistantRequest(start=False)`, the RUN_START/RUN_END
-discriminator) were pinning source that no longer exists. Only
-`test_barge_serialises_in_both_phases` survives from that section: it checks
-`em_controller.py`'s `_barge_watcher`, which is unchanged and still calls
-`turn_engine.abort_ha_run`/`cancel_voice_turn(abort_ha=True)` on a barge —
-those calls are today a documented no-op on the HA side (same gap), but the
-controller's own intent to serialise is still real and still worth pinning.
+discriminator) were pinning source that no longer exists. Device wake
+admission now owns the barge path: it calls `turn_engine.admit_barge`, which
+cancels the exact active turn before routing the replacement request.
 """
 
 from pathlib import Path
@@ -170,4 +167,3 @@ def test_barge_uses_device_wake_admission():
     assert "wake_request" in CONTROLLER_SRC
     assert "turn.cancel" in TURN_ENGINE_SRC
     assert "speaker_flush" in TURN_ENGINE_SRC
-    assert "asyncio.create_task(\n                        _barge_watcher" not in CONTROLLER_SRC
