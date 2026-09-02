@@ -23,6 +23,7 @@ package shadow
 
 import (
 	"io"
+	"log"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -429,6 +430,9 @@ func (s *Scorer) run() {
 		bargeThreshold := s.bargeThreshold > 0 && threshold == s.bargeThreshold
 		s.mu.Unlock()
 
+		if score > 0.01 {
+			log.Printf("[wake] score=%.4f threshold=%.2f crossed=%v seq=%d barge=%v", score, threshold, crossed, frame.sequence, bargeThreshold)
+		}
 		if onScore != nil {
 			onScore(ScoreEvent{
 				Score: score, Threshold: threshold, At: now,
@@ -451,6 +455,9 @@ func (s *Scorer) run() {
 			if err != nil {
 				s.recordErr(err)
 				continue
+			}
+			if headScore > 0.01 {
+				log.Printf("[stopword] score=%.4f threshold=%.2f seq=%d crossed=%v", headScore, h.Threshold, frame.sequence, headScore >= h.Threshold && now.Sub(h.lastCross) >= s.refract)
 			}
 			if headScore < h.Threshold || now.Sub(h.lastCross) < s.refract {
 				continue

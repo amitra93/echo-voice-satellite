@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -108,4 +109,102 @@ func TestCaptureUploaderStopsWithItsConnectionAndRetriesUnackedCapture(t *testin
 	if item := manager.NextReady(); item == nil {
 		t.Fatal("unacknowledged capture was not retried after reconnect")
 	}
+}
+
+func TestLiveSTTPreemptsCaptureAfterCurrentChunk(t *testing.T) {
+	var pcmFrames atomic.Int32
+	var endFrames atomic.Int32
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			_, frame, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			if len(frame) == 0 {
+				continue
+			}
+			switch frame[0] {
+			case frameTypeCapturePCM:
+				pcmFrames.Add(1)
+			case frameTypeCaptureEnd:
+				endFrames.Add(1)
+			}
+		}
+	}))
+	defer server.Close()
+	conn, _, err := websocket.DefaultDialer.Dial(
+		"ws://"+strings.TrimPrefix(server.URL, "http://"), nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	ring := capture.New(capture.DefaultFrames)
+	manager := capture.NewManager(ring)
+	manager.Configure(capture.Settings{
+		Enabled: true, Frames: 3, NearMissFloor: 0.1, Model: "wake",
+		ClassifierMD5: "0123456789abcdef0123456789abcdef",
+	})
+	for sequence := uint16(1); sequence <= 3; sequence++ {
+		ring.Push(sequence, make([]byte, captureFrameBytes))
+	}
+	manager.Observe(shadow.ScoreEvent{
+		Score: 0.8, Threshold: 0.5, Sequence: 3, Crossed: true,
+	})
+	manager.BindRequest(3, "wake:stt")
+	manager.Deny("wake:stt")
+	d := &DataClient{conn: conn, captureManager: manager}
+	preempted := make(chan struct{})
+	var yielded atomic.Bool
+	originalYield := captureYield
+	captureYield = func() {
+		if yielded.CompareAndSwap(false, true) {
+			d.wakeMu.Lock()
+			d.wakeGranted = true
+			d.wakeMu.Unlock()
+			close(preempted)
+		}
+	}
+	t.Cleanup(func() { captureYield = originalYield })
+	done := make(chan struct{})
+	uploaderDone := make(chan struct{})
+	go func() {
+		d.runCaptureUploader(context.Background(), done, conn)
+		close(uploaderDone)
+	}()
+	select {
+	case <-preempted:
+	case <-time.After(time.Second):
+		t.Fatal("STT did not preempt active capture upload")
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := pcmFrames.Load(); got != 1 || endFrames.Load() != 0 {
+		t.Fatalf("capture advanced during STT: pcm=%d end=%d", got, endFrames.Load())
+	}
+	d.wakeMu.Lock()
+	d.wakeGranted = false
+	d.wakeMu.Unlock()
+	select {
+	case <-time.After(time.Second):
+		t.Fatal("capture did not resume after STT")
+	case <-func() <-chan struct{} {
+		finished := make(chan struct{})
+		go func() {
+			for endFrames.Load() == 0 {
+				time.Sleep(time.Millisecond)
+			}
+			close(finished)
+		}()
+		return finished
+	}():
+	}
+	close(done)
+	<-uploaderDone
 }

@@ -7,10 +7,8 @@ package config
 
 import (
 	"encoding/json"
-	"log"
 	"os"
 	"strconv"
-	"strings"
 	"sync"
 )
 
@@ -60,21 +58,6 @@ type Device struct {
 	// reasoning as the LED meter response curve — not something to discover
 	// via a firmware OTA per attempt.
 	DuckDb float64
-	// OwwOnDevice selects on-device wake word scoring: "off", "shadow" or
-	// "on".
-	//
-	// Shadow scores the wake stream locally and reports what it would have
-	// detected, without acting on it, so device and controller can be
-	// compared on the same audio. "on" additionally lets the device TRIGGER
-	// the turn: the crossing is sent as an oww_wake message and the
-	// controller starts the turn on the device's word rather than its own.
-	//
-	// The controller keeps scoring in "on" mode — its detections no longer
-	// trigger, but they still record whether it agreed, so the comparison
-	// that justified shipping this keeps running with the roles inverted.
-	// It is also what keeps barge-in working unchanged, since that is
-	// scored controller-side over the turn's own audio.
-	OwwOnDevice string
 	// StopModel and StopThreshold configure the locally-scored mandatory stop
 	// classifier. The controller arms it separately per response.
 	StopModel         string
@@ -82,6 +65,8 @@ type Device struct {
 	SaveWakeCaptures  bool
 	WakeCaptureSec    float64
 	WakeNearMissFloor float64
+	SaveStopCaptures  bool
+	StopCaptureSec    float64
 
 	// AfeMicGainDb is a fixed digital gain applied to Amazon AFE's already
 	// processed S16 capture before it is sent to the controller. 0 = unity.
@@ -134,12 +119,13 @@ func (d *Device) loadDefaults() {
 	d.LimiterRelease = 150
 	d.OwwThreshold = envFloat("OWW_THRESHOLD", 0.5)
 	d.OwwModel = envStr("OWW_MODEL", "hey_jarvis_v0.1")
-	d.OwwOnDevice = normaliseOnDevice(envStr("OWW_ON_DEVICE", OnDeviceOff))
 	d.StopModel = envStr("STOP_MODEL", "")
 	d.StopThreshold = envFloat("STOP_THRESHOLD", 0.5)
 	d.SaveWakeCaptures = envBool("SAVE_WAKE_CAPTURES", false)
 	d.WakeCaptureSec = clampFloat(envFloat("WAKE_CAPTURE_SEC", 2.0), 0.08, 5.0)
 	d.WakeNearMissFloor = clampFloat(envFloat("WAKE_NEAR_MISS_FLOOR", 0.05), 0, 1)
+	d.SaveStopCaptures = envBool("SAVE_STOP_CAPTURES", false)
+	d.StopCaptureSec = clampFloat(envFloat("STOP_CAPTURE_SEC", 2.0), 0.08, 5.0)
 	d.BargeInThreshold = envFloat("BARGE_IN_THRESHOLD", 0.05)
 	d.DuckDb = envFloat("DUCK_DB", -18)
 	d.AfeMicGainDb = clampAfeMicGainDb(envInt("AFE_MIC_GAIN_DB", 0))
@@ -174,9 +160,6 @@ func (d *Device) Apply(msg ConfigMessage) {
 	if msg.OwwModel != "" {
 		d.OwwModel = msg.OwwModel
 	}
-	if msg.OwwOnDevice != "" {
-		d.OwwOnDevice = normaliseOnDevice(msg.OwwOnDevice)
-	}
 	if msg.StopModel != "" {
 		d.StopModel = msg.StopModel
 	}
@@ -191,6 +174,12 @@ func (d *Device) Apply(msg ConfigMessage) {
 	}
 	if msg.WakeNearMissFloor != nil {
 		d.WakeNearMissFloor = clampFloat(*msg.WakeNearMissFloor, 0, 1)
+	}
+	if msg.SaveStopCaptures != nil {
+		d.SaveStopCaptures = *msg.SaveStopCaptures
+	}
+	if msg.StopCaptureSec > 0 {
+		d.StopCaptureSec = clampFloat(msg.StopCaptureSec, 0.08, 5.0)
 	}
 	if msg.BargeInEnabled != nil {
 		d.BargeInEnabled = *msg.BargeInEnabled
@@ -264,6 +253,7 @@ func (d *Device) Snapshot() ConfigMessage {
 	bargeInEnabled := d.BargeInEnabled
 	saveWakeCaptures := d.SaveWakeCaptures
 	wakeNearMissFloor := d.WakeNearMissFloor
+	saveStopCaptures := d.SaveStopCaptures
 	afeMicGainDb := d.AfeMicGainDb
 	bleProxyEnabled := false
 	if d.BleProxyEnabled != nil {
@@ -275,12 +265,13 @@ func (d *Device) Snapshot() ConfigMessage {
 		VadSilenceMs:      d.VadSilenceMs,
 		OwwThreshold:      d.OwwThreshold,
 		OwwModel:          d.OwwModel,
-		OwwOnDevice:       d.OwwOnDevice,
 		StopModel:         d.StopModel,
 		StopThreshold:     d.StopThreshold,
 		SaveWakeCaptures:  &saveWakeCaptures,
 		WakeCaptureSec:    d.WakeCaptureSec,
 		WakeNearMissFloor: &wakeNearMissFloor,
+		SaveStopCaptures:  &saveStopCaptures,
+		StopCaptureSec:    d.StopCaptureSec,
 		BargeInEnabled:    &bargeInEnabled,
 		BargeInThreshold:  d.BargeInThreshold,
 		StartupVolume:     d.StartupVolume,
@@ -321,12 +312,13 @@ type ConfigMessage struct {
 	VadSilenceMs      int       `json:"vadSilenceMs,omitempty"`
 	OwwThreshold      float64   `json:"owwThreshold,omitempty"`
 	OwwModel          string    `json:"owwModel,omitempty"`
-	OwwOnDevice       string    `json:"owwOnDevice,omitempty"`
 	StopModel         string    `json:"stopModel,omitempty"`
 	StopThreshold     float64   `json:"stopThreshold,omitempty"`
 	SaveWakeCaptures  *bool     `json:"saveWakeCaptures,omitempty"`
 	WakeCaptureSec    float64   `json:"wakeCaptureSec,omitempty"`
 	WakeNearMissFloor *float64  `json:"wakeNearMissFloor,omitempty"`
+	SaveStopCaptures  *bool     `json:"saveStopCaptures,omitempty"`
+	StopCaptureSec    float64   `json:"stopCaptureSec,omitempty"`
 	BargeInEnabled    *bool     `json:"bargeInEnabled,omitempty"`
 	BargeInThreshold  float64   `json:"bargeInThreshold,omitempty"`
 	DuckDb            *float64  `json:"duckDb,omitempty"`
@@ -359,37 +351,6 @@ func clampFloat(value, low, high float64) float64 {
 		return high
 	}
 	return value
-}
-
-// On-device wake word modes.
-const (
-	OnDeviceOff    = "off"
-	OnDeviceShadow = "shadow"
-	OnDeviceOn     = "on"
-)
-
-// normaliseOnDevice maps a pushed value onto a known mode. Anything
-// unrecognised becomes "off": a device receiving a mode it cannot honour must
-// not guess, because the two plausible guesses are "score but do nothing" and
-// "start triggering turns", and one of those is a live behaviour change on a
-// device that cannot deliver it.
-//
-// That rule is why firmware predating "on" is safe to leave in the field: it
-// normalises the value away and keeps scoring in shadow. The controller does
-// not rely on that — it gates the setting on the oww_trigger capability — but
-// the device must not depend on the controller being careful.
-func normaliseOnDevice(v string) string {
-	switch strings.ToLower(strings.TrimSpace(v)) {
-	case OnDeviceShadow:
-		return OnDeviceShadow
-	case OnDeviceOn:
-		return OnDeviceOn
-	case "", OnDeviceOff:
-		return OnDeviceOff
-	default:
-		log.Printf("[config] unknown owwOnDevice %q — treating as %q", v, OnDeviceOff)
-		return OnDeviceOff
-	}
 }
 
 // ─── env helpers ──────────────────────────────────────────────────────────────

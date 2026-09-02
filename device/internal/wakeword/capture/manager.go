@@ -66,6 +66,7 @@ type Manager struct {
 	decisions      map[string]bool
 	candidate      *candidate
 	timer          *time.Timer
+	timerEpoch     uint64
 	activationSeen bool
 	notify         chan struct{}
 	nonce          string
@@ -86,6 +87,12 @@ func NewManager(ring *Ring) *Manager {
 }
 
 func (m *Manager) Notify() <-chan struct{} { return m.notify }
+
+func (m *Manager) Enabled() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.settings.Enabled
+}
 
 func (m *Manager) Configure(settings Settings) {
 	if settings.Frames < 1 {
@@ -116,6 +123,7 @@ func (m *Manager) Clear() {
 }
 
 func (m *Manager) clearLocked() {
+	m.timerEpoch++
 	if m.timer != nil {
 		m.timer.Stop()
 	}
@@ -145,7 +153,9 @@ func (m *Manager) Observe(event shadow.ScoreEvent) {
 		if m.timer != nil {
 			m.timer.Stop()
 		}
-		m.timer = time.AfterFunc(m.debounce, m.endUtterance)
+		m.timerEpoch++
+		epoch := m.timerEpoch
+		m.timer = time.AfterFunc(m.debounce, func() { m.endUtterance(epoch) })
 		m.enqueueLocked(m.snapshotLocked("act", event, false))
 		return
 	}
@@ -159,13 +169,18 @@ func (m *Manager) Observe(event shadow.ScoreEvent) {
 		m.candidate = &candidate{event: event}
 	}
 	if m.timer == nil {
-		m.timer = time.AfterFunc(m.debounce, m.endUtterance)
+		m.timerEpoch++
+		epoch := m.timerEpoch
+		m.timer = time.AfterFunc(m.debounce, func() { m.endUtterance(epoch) })
 	}
 }
 
-func (m *Manager) endUtterance() {
+func (m *Manager) endUtterance(epoch uint64) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if epoch != m.timerEpoch {
+		return
+	}
 	if !m.activationSeen && m.candidate != nil && m.settings.Enabled {
 		m.enqueueLocked(m.snapshotLocked("miss", m.candidate.event, true))
 	}
@@ -248,6 +263,34 @@ func (m *Manager) BindRequest(sequence uint16, requestID string) {
 					m.signalLocked()
 				}
 			}
+			return
+		}
+	}
+}
+
+func (m *Manager) DropActivation(sequence uint16) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := len(m.queue) - 1; i >= 0; i-- {
+		capture := m.queue[i]
+		if capture.Metadata.Kind == "act" && capture.Metadata.ActivationSeq == sequence && capture.requestID == "" {
+			for j := range capture.PCM {
+				capture.PCM[j] = 0
+			}
+			m.queue = append(m.queue[:i], m.queue[i+1:]...)
+			return
+		}
+	}
+}
+
+func (m *Manager) ReleaseActivation(sequence uint16) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := len(m.queue) - 1; i >= 0; i-- {
+		capture := m.queue[i]
+		if capture.Metadata.Kind == "act" && capture.Metadata.ActivationSeq == sequence && capture.requestID == "" {
+			capture.ready = true
+			m.signalLocked()
 			return
 		}
 	}

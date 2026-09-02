@@ -173,6 +173,81 @@ func TestClientCloseCompletesHelperRequest(t *testing.T) {
 	}
 }
 
+func TestClientOpenCapturesHelperPid(t *testing.T) {
+	requestReader, requestWriter := io.Pipe()
+	responseReader, responseWriter := io.Pipe()
+	c := &Client{
+		in:      requestWriter,
+		out:     responseReader,
+		pending: make(map[uint32]chan callResult),
+		done:    make(chan struct{}),
+	}
+	go c.readLoop()
+	go func() {
+		request, err := ReadFrame(requestReader)
+		if err != nil {
+			return
+		}
+		payload := mustJSON(t, map[string]any{"ok": true, "pid": 4242})
+		_ = (Frame{Type: Response, RequestID: request.RequestID, Payload: payload}).WriteFrame(responseWriter)
+	}()
+
+	if err := c.Open(OpenOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if c.pid != 4242 {
+		t.Fatalf("pid = %d, want 4242", c.pid)
+	}
+}
+
+// TestClientCloseKillsHelperThatNeverExits reproduces the fault that orphaned
+// a real device's AFE helper for days: a helper stuck inside a blocked
+// native call never answers the close request and never exits on EOF, so
+// without a bound Close would hang forever right along with it — and the
+// process would keep holding the audio session it never released. The real
+// helper is never our child (su hands it to magiskd), so this stands in a
+// real, killable OS process for "the pid Open reported" and checks Close
+// reaches it directly rather than only touching its own cmd.Process.
+func TestClientCloseKillsHelperThatNeverExits(t *testing.T) {
+	old := closeTimeout
+	closeTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { closeTimeout = old })
+
+	requestReader, requestWriter := io.Pipe()
+	responseReader, _ := io.Pipe() // never written to: the helper never answers and never EOFs
+	cmd := exec.Command("sleep", "5")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	c := &Client{
+		cmd:     cmd,
+		in:      requestWriter,
+		out:     responseReader,
+		pending: make(map[uint32]chan callResult),
+		done:    make(chan struct{}),
+		pid:     cmd.Process.Pid,
+	}
+	go c.readLoop()
+	go func() {
+		_, _ = ReadFrame(requestReader) // drain the close request; never respond
+	}()
+
+	closeDone := make(chan error, 1)
+	go func() { closeDone <- c.Close() }()
+	select {
+	case err := <-closeDone:
+		if err == nil {
+			t.Fatal("Close() = nil, want an error reporting the kill")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close() did not return once the helper became unresponsive")
+	}
+
+	if cmd.ProcessState == nil || cmd.ProcessState.Success() {
+		t.Fatalf("helper process state = %v, want killed", cmd.ProcessState)
+	}
+}
+
 func TestStartReportsHelperLaunchFailure(t *testing.T) {
 	dir := t.TempDir()
 	if err := os.WriteFile(dir+"/su", []byte("not executable"), 0o644); err != nil {

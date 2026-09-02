@@ -63,9 +63,9 @@ func ModelStem(owwModel string) string {
 // Scorer.
 //
 // A missing library or model returns an error and is NOT a failure of the
-// device: shadow mode is off until someone installs them, the caller logs it
-// once and carries on with controller-side wake word. That is the whole reason
-// the runtime is dlopen'd rather than linked.
+// device: wake detection is unavailable until someone installs them, and the
+// caller logs the error. That is the whole reason the runtime is dlopen'd
+// rather than linked.
 func Open(owwModel string, threshold float32, onCross func(score, threshold float32, at time.Time, sequence uint16)) (*Scorer, error) {
 	dir := Dir()
 	stem := ModelStem(owwModel)

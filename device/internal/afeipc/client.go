@@ -6,10 +6,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"os"
 	"os/exec"
 	"sync"
+	"syscall"
+	"time"
 )
+
+// closeTimeout bounds how long Close waits for the helper to answer the
+// close request and then to actually exit, before giving up and killing it.
+// A var, not a const, so a test can shrink it rather than spend real
+// wall-clock seconds proving the timeout fires.
+var closeTimeout = 3 * time.Second
 
 // Client multiplexes requests over the helper's ordered byte stream. Capture
 // reads and player writes must overlap or the 80ms capture cadence would
@@ -24,6 +33,7 @@ type Client struct {
 	closed  bool
 	pending map[uint32]chan callResult
 	done    chan struct{}
+	pid     int // helper's own kernel pid, reported in the Open response; 0 until known
 }
 type callResult struct {
 	payload []byte
@@ -76,8 +86,22 @@ func (c *Client) Open(o OpenOptions) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.call(Open, payload)
-	return err
+	response, err := c.call(Open, payload)
+	if err != nil {
+		return err
+	}
+	var opened struct {
+		Pid int `json:"pid"`
+	}
+	// A missing or unparsable pid just leaves it 0 (unknown) — Close falls
+	// back to killing our local process handle in that case, the same as
+	// before this field existed.
+	if json.Unmarshal(response, &opened) == nil && opened.Pid > 0 {
+		c.mu.Lock()
+		c.pid = opened.Pid
+		c.mu.Unlock()
+	}
+	return nil
 }
 func (c *Client) StartRecorder() error          { _, err := c.call(StartRecorder, nil); return err }
 func (c *Client) StopRecorder() error           { _, err := c.call(StopRecorder, nil); return err }
@@ -157,14 +181,36 @@ func (c *Client) readLoop() {
 	}
 }
 
+// Close asks the helper to shut down, then waits for it to actually exit.
+// Both waits are bounded: ReadRecorder blocks inside a native call for as
+// long as the process runs, dispatched on its own goroutine per request (see
+// helper.go), so a recorder that never received real audio — the AudioFlinger
+// session held by an unrelated stuck process, the case this was written
+// after — leaves that goroutine blocked forever. That in turn blocks
+// runHelper's h.requests.Wait(), so the helper never reaches its own
+// deferred cleanup and never exits on EOF: without a bound here, Close would
+// hang forever right along with it, and so would the caller's shutdown path.
+// A helper that misses the deadline is killed outright instead.
 func (c *Client) Close() error {
 	c.mu.Lock()
 	already := c.closed
+	pid := c.pid
 	c.mu.Unlock()
 	if already {
 		return nil
 	}
-	_, _ = c.call(Close, nil)
+
+	callDone := make(chan struct{})
+	go func() {
+		_, _ = c.call(Close, nil)
+		close(callDone)
+	}()
+	select {
+	case <-callDone:
+	case <-time.After(closeTimeout):
+		log.Printf("afeipc: helper did not answer close within %s — closing anyway", closeTimeout)
+	}
+
 	c.mu.Lock()
 	if !c.closed {
 		c.closed = true
@@ -173,5 +219,32 @@ func (c *Client) Close() error {
 	c.mu.Unlock()
 	_ = c.in.Close()
 	_ = c.out.Close()
-	return c.cmd.Wait()
+
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- c.cmd.Wait() }()
+	select {
+	case err := <-waitDone:
+		return err
+	case <-time.After(closeTimeout):
+	}
+
+	// su hands the real helper to magiskd rather than keeping it as our
+	// child, so cmd.Process is only the local su stub — killing it is not
+	// guaranteed to reach the actual process holding the audio session, and
+	// that ambiguity is exactly how one was left running for days. The pid
+	// the helper reported at Open can be killed directly because the daemon
+	// runs as root, regardless of how su and magiskd relayed it.
+	log.Printf("afeipc: helper did not exit within %s after close — killing it (pid=%d)", closeTimeout, pid)
+	if pid > 0 {
+		_ = syscall.Kill(pid, syscall.SIGKILL)
+	}
+	if c.cmd.Process != nil {
+		_ = c.cmd.Process.Kill()
+	}
+	select {
+	case err := <-waitDone:
+		return err
+	case <-time.After(closeTimeout):
+		return fmt.Errorf("afeipc: helper did not exit even after SIGKILL")
+	}
 }

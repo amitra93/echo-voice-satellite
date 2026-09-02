@@ -80,30 +80,6 @@ func TestClampAfeMicGainDb(t *testing.T) {
 	}
 }
 
-// ─── normaliseOnDevice ──────────────────────────────────────────────────────
-
-func TestNormaliseOnDevice(t *testing.T) {
-	cases := []struct {
-		in, want string
-	}{
-		{"off", OnDeviceOff},
-		{"", OnDeviceOff},
-		{"shadow", OnDeviceShadow},
-		{"  Shadow  ", OnDeviceShadow},
-		{"ON", OnDeviceOn},
-		{"on", OnDeviceOn},
-		// Unrecognised must degrade to off, never guess at shadow or on —
-		// see the doc comment on normaliseOnDevice for why.
-		{"bogus", OnDeviceOff},
-		{"trigger", OnDeviceOff},
-	}
-	for _, c := range cases {
-		if got := normaliseOnDevice(c.in); got != c.want {
-			t.Errorf("normaliseOnDevice(%q) = %q, want %q", c.in, got, c.want)
-		}
-	}
-}
-
 // ─── Device.Apply ───────────────────────────────────────────────────────────
 
 func TestApplyIgnoresZeroFields(t *testing.T) {
@@ -211,14 +187,6 @@ func TestApplyClampsAfeMicGainDb(t *testing.T) {
 	d.Apply(ConfigMessage{AfeMicGainDb: intPtr(100)})
 	if d.AfeMicGainDb != 24 {
 		t.Fatalf("Apply did not clamp AfeMicGainDb: got %d, want 24", d.AfeMicGainDb)
-	}
-}
-
-func TestApplyNormalisesOwwOnDevice(t *testing.T) {
-	d := &Device{initialised: true}
-	d.Apply(ConfigMessage{OwwOnDevice: "not-a-real-mode"})
-	if d.OwwOnDevice != OnDeviceOff {
-		t.Fatalf("Apply did not normalise OwwOnDevice: got %q, want %q", d.OwwOnDevice, OnDeviceOff)
 	}
 }
 

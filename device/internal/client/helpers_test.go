@@ -204,7 +204,7 @@ func TestSendStatsDropsSafelyWhenDisconnected(t *testing.T) {
 		WifiSsid: "Home", LinkSpeedMbps: 100, WifiFreqMhz: 5180,
 		WifiBssid: "00:11:22:33:44:55", TxBytes: 1, RxBytes: 2,
 		TxErrors: 3, TxDropped: 4, RxCrcErrors: 5, Ble: "ble",
-		OwwShadow: "shadow", AmbientLux: new(int), CPUTempC: &temp,
+		WakeDetector: "detector", AmbientLux: new(int), CPUTempC: &temp,
 		MaxTempC: &temp, CoresOnline: 2, CoresTotal: 4, ThermalCoreLimit: 4,
 	})
 }

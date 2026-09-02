@@ -255,13 +255,13 @@ func (d *DataClient) GrantMic(requestID string, activationSeq uint16, replay boo
 }
 
 func (d *DataClient) ConfigureWakeCaptures(enabled bool, seconds, floor float64, model, checksum string) {
-	hadInFlight := !enabled && d.captureManager.HasInFlight()
+	wasEnabled := d.captureManager.Enabled()
 	frames := int(seconds * 1000 / capture.FrameMs)
 	d.captureManager.Configure(capture.Settings{
 		Enabled: enabled, Frames: frames, NearMissFloor: float32(floor),
 		Model: shadow.ModelStem(model), ClassifierMD5: checksum,
 	})
-	if hadInFlight {
+	if wasEnabled && !enabled {
 		d.connMu.Lock()
 		if d.conn != nil {
 			d.conn.Close()
@@ -276,6 +276,14 @@ func (d *DataClient) ObserveWakeScore(event shadow.ScoreEvent) {
 
 func (d *DataClient) BindActivationRequest(sequence uint16, requestID string) {
 	d.captureManager.BindRequest(sequence, requestID)
+}
+
+func (d *DataClient) DropActivationCapture(sequence uint16) {
+	d.captureManager.DropActivation(sequence)
+}
+
+func (d *DataClient) ReleaseActivationCapture(sequence uint16) {
+	d.captureManager.ReleaseActivation(sequence)
 }
 
 func (d *DataClient) GrantCapture(requestID string)    { d.captureManager.Grant(requestID) }

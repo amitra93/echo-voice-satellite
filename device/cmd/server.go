@@ -155,10 +155,12 @@ func main() {
 	controlClient.OnWakeGrant(func(requestID, turnID, source string, activationSeq uint16, expires time.Time) {
 		if s.IsMuted() {
 			log.Printf("[wake] grant %s ignored — device is muted", requestID)
+			dataClient.DenyCapture(requestID)
 			return
 		}
 		if source == "wakeword" && dataClient.ShadowScorer() == nil {
 			log.Printf("[wake] grant %s ignored — detector unavailable", requestID)
+			dataClient.DenyCapture(requestID)
 			return
 		}
 		if !dataClient.GrantMic(requestID, activationSeq, source == "wakeword", expires) {
@@ -309,7 +311,7 @@ func main() {
 		go func() {
 			st := collectStats()
 			st.Ble = bleScanner.Stats()
-			st.OwwShadow = shadowStats(dataClient)
+			st.WakeDetector = shadowStats(dataClient)
 			controlClient.SendStats(st)
 		}()
 		// Deliver any unacknowledged WiFi change outcome (including the
@@ -334,7 +336,7 @@ func main() {
 		}
 		applyBleConfig(bleScanner)
 		applyOutputChainConfig(pcmSpeaker)
-		applyShadowConfig(dataClient, controlClient, pcmSpeaker, s)
+		applyWakeConfig(dataClient, controlClient, pcmSpeaker, s)
 		snap := config.Get().Snapshot()
 		dataClient.ConfigureWakeCaptures(
 			snap.SaveWakeCaptures != nil && *snap.SaveWakeCaptures,
@@ -358,8 +360,13 @@ func main() {
 	dataClient.OnStopDetected(func(arm stopword.Arm, score, threshold float32, at time.Time) {
 		// The local flush is authoritative; the controller notification below
 		// is intentionally best effort and must not delay silence.
+		//
+		// No LED cue here on purpose: during TTS the meter anim owns the
+		// ring, and painting over it reads as a green flash BETWEEN the
+		// "stop" and the audio actually stopping. The flush cuts playback,
+		// the meter goes quiet with it, and turn-end cleanup (or the anim
+		// TTL) retires the ring.
 		pcmSpeaker.Flush()
-		s.StartAnim(server.AnimSpec{Pattern: "pulse", Colors: [][3]uint8{{0, 180, 80}}, PeriodMs: 180, TTLSec: 1})
 		ageMs := time.Since(at).Milliseconds()
 		log.Printf("[stopword] accepted generation %d score %.3f", arm.Generation, score)
 		controlClient.SendStopDetected(arm.TurnID, arm.Generation, arm.Phase, score, threshold, ageMs)
@@ -537,7 +544,7 @@ func main() {
 		for range ticker.C {
 			st := collectStats()
 			st.Ble = bleScanner.Stats()
-			st.OwwShadow = shadowStats(dataClient)
+			st.WakeDetector = shadowStats(dataClient)
 			controlClient.SendStats(st)
 			if tick%10 == 0 {
 				var ms runtime.MemStats
@@ -921,14 +928,13 @@ func applyOutputChainConfig(spk *speaker.PcmSpeaker) {
 // applyBleConfig starts/stops the BLE proxy scanner from the current
 // effective config. SetEnabled is idempotent, so calling it on every config
 // push is free.
-// shadowState remembers what the live scorer was built for, so a config push
-// that changes neither the mode nor the model does not rebuild it. Rebuilding
+// wakeState remembers what the live scorer was built for, so a config push
+// that changes neither the model nor the stop model does not rebuild it. Rebuilding
 // means reloading a 12MB runtime and starting a fresh ~1.28s not-ready window,
 // and config pushes arrive on every reconnect — so "idempotent unless something
 // changed" is the difference between a stable shadow run and one that is
 // perpetually warming up.
-var shadowState struct {
-	mode      string
+var wakeState struct {
 	model     string
 	stopModel string
 	lastErr   string
@@ -952,7 +958,7 @@ func applyStopConfig(dc *client.DataClient) {
 		dc.SetSharedStop(false)
 		return
 	}
-	// A combined scorer is installed by applyShadowConfig when local wake
+	// A combined scorer is installed by applyWakeConfig when local wake
 	// scoring is enabled. Never replace it with a second feature pipeline.
 	if dc.SharedStop() {
 		stopState.model, stopState.lastErr = snap.StopModel, ""
@@ -987,7 +993,7 @@ func reportStopStatus(dc *client.DataClient, cc *client.ControlClient) {
 	ready := dc.SharedStop() || dc.StopScorer() != nil
 	errMsg := stopState.lastErr
 	if !ready && snap.StopModel != "" && errMsg == "" {
-		errMsg = shadowState.lastErr
+		errMsg = wakeState.lastErr
 	}
 	if !ready && snap.StopModel != "" && errMsg == "" {
 		errMsg = "stop scorer unavailable"
@@ -995,30 +1001,18 @@ func reportStopStatus(dc *client.DataClient, cc *client.ControlClient) {
 	cc.SendStopStatus(ready, snap.StopModel, errMsg)
 }
 
-// applyShadowConfig starts, stops or re-points on-device wake word scoring from
-// the current effective config.
+// applyWakeConfig starts or re-points mandatory on-device wake word scoring.
 //
 // Failure to load makes local wake detection unavailable. It is logged once per
 // distinct reason and reported explicitly; there is no controller-side fallback.
-func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
+func applyWakeConfig(dc *client.DataClient, cc *client.ControlClient,
 	spk *speaker.PcmSpeaker, srv *server.Server) {
 	snap := config.Get().Snapshot()
-	mode, model := snap.OwwOnDevice, snap.OwwModel
+	model := snap.OwwModel
 	threshold := float32(snap.OwwThreshold)
 
-	if mode == config.OnDeviceOff {
-		if dc.ShadowScorer() != nil {
-			dc.SetShadowScorer(nil)
-			log.Printf("[shadow] on-device wake word disabled")
-		}
-		shadowState.mode, shadowState.model, shadowState.stopModel, shadowState.lastErr = mode, model, "", ""
-		dc.SetSharedStop(false)
-		cc.SendWakeStatus(false, model, "", "local wake detection disabled")
-		return
-	}
-
-	// Already running for this model: thresholds and the mode change live.
-	if sc := dc.ShadowScorer(); sc != nil && shadowState.model == model && shadowState.stopModel == snap.StopModel {
+	// Already running for this model: thresholds change live.
+	if sc := dc.ShadowScorer(); sc != nil && wakeState.model == model && wakeState.stopModel == snap.StopModel {
 		sc.SetThreshold(threshold)
 		sc.SetScoreCallback(dc.ObserveWakeScore)
 		if snap.BargeInEnabled != nil && *snap.BargeInEnabled && spk != nil {
@@ -1026,18 +1020,10 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 		} else {
 			sc.SetBargeThreshold(0, nil)
 		}
-		if shadowState.mode != mode {
-			shadowState.mode = mode
-			log.Printf("[shadow] mode now %q (%s)", mode, actsOnCrossings(mode))
-		}
 		cc.SendWakeStatus(true, model, shadow.ClassifierMD5(model), "")
 		return
 	}
 
-	// The mode is read at CROSSING time, not baked in here, so flipping
-	// between "shadow" and "on" costs nothing: the scorer is identical in
-	// both and rebuilding it would reload a 12MB runtime and open a fresh
-	// ~1.28s not-ready window every time someone changed their mind.
 	var sc *shadow.Scorer
 	var err error
 	if snap.StopModel != "" {
@@ -1052,12 +1038,12 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 		})
 	}
 	if err != nil {
-		if msg := err.Error(); msg != shadowState.lastErr {
-			shadowState.lastErr = msg
+		if msg := err.Error(); msg != wakeState.lastErr {
+			wakeState.lastErr = msg
 			log.Printf("[shadow] not started: %v", err)
 		}
 		dc.SetShadowScorer(nil)
-		shadowState.mode, shadowState.model, shadowState.stopModel = mode, model, snap.StopModel
+		wakeState.model, wakeState.stopModel = model, snap.StopModel
 		dc.SetSharedStop(false)
 		cc.SendWakeStatus(false, model, "", err.Error())
 		return
@@ -1076,20 +1062,9 @@ func applyShadowConfig(dc *client.DataClient, cc *client.ControlClient,
 	} else {
 		dc.SetSharedStop(false)
 	}
-	shadowState.mode, shadowState.model, shadowState.stopModel, shadowState.lastErr = mode, model, snap.StopModel, ""
+	wakeState.model, wakeState.stopModel, wakeState.lastErr = model, snap.StopModel, ""
 	cc.SendWakeStatus(true, model, shadow.ClassifierMD5(model), "")
-	log.Printf("[shadow] on-device wake word scoring (%s, threshold %.2f) — %s",
-		sc.Info(), threshold, actsOnCrossings(mode))
-}
-
-// actsOnCrossings describes what a crossing will DO, for the log line. The
-// distinction is the whole difference between the two live modes and is not
-// otherwise visible on the device.
-func actsOnCrossings(mode string) string {
-	if mode == config.OnDeviceOn {
-		return "triggering turns"
-	}
-	return "reporting only, not triggering"
+	log.Printf("[wake] local detection ready (%s, threshold %.2f)", sc.Info(), threshold)
 }
 
 // onWakeCrossing sends an admission request. It never changes LEDs or starts
@@ -1110,11 +1085,9 @@ func actsOnCrossings(mode string) string {
 func onWakeCrossing(dc *client.DataClient, cc *client.ControlClient, srv *server.Server,
 	score, crossed float32, at time.Time, activationSeq uint16) {
 	ageMs := time.Since(at).Milliseconds()
-	if config.Get().Snapshot().OwwOnDevice != config.OnDeviceOn {
-		return
-	}
 	if srv != nil && srv.IsMuted() {
 		log.Printf("[shadow] wake %.3f suppressed — muted", score)
+		dc.DropActivationCapture(activationSeq)
 		return
 	}
 	requestID := cc.SendWakeRequest(config.Get().Snapshot().OwwModel, score, crossed, ageMs, activationSeq)

@@ -183,7 +183,7 @@ func TestUseAfterCloseFails(t *testing.T) {
 // TestOpenMissingLibraryFails is the one test here that needs no ONNX Runtime,
 // and it covers the property the whole dlopen design exists for: a device with
 // no libonnxruntime.so must get a clean error, not a link failure at exec and
-// not a crash. The firmware keeps running with controller-side wake word.
+// not a crash. The firmware keeps running with wake detection unavailable.
 func TestOpenMissingLibraryFails(t *testing.T) {
 	_, err := ort.Open(filepath.Join(t.TempDir(), "libonnxruntime.so"))
 	if err == nil {

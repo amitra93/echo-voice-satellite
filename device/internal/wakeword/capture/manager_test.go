@@ -38,6 +38,40 @@ func TestPeakNearMissWinsDebounceWindow(t *testing.T) {
 	}
 }
 
+func TestCaptureSettingsClampFrameWindow(t *testing.T) {
+	m := NewManager(New(DefaultFrames))
+	m.Configure(Settings{Enabled: true, Frames: 0})
+	if got := m.settings.Frames; got != 1 {
+		t.Fatalf("minimum capture window = %d, want 1", got)
+	}
+	m.Configure(Settings{Enabled: true, Frames: 999})
+	if got := m.settings.Frames; got != 62 {
+		t.Fatalf("maximum capture window = %d, want 62", got)
+	}
+}
+
+func TestActivationSnapshotRecordsSafeIncompleteSuffix(t *testing.T) {
+	ring := New(8)
+	m := NewManager(ring)
+	m.Configure(Settings{
+		Enabled: true, Frames: 3, NearMissFloor: 0.1,
+		Model: "wake", ClassifierMD5: "0123456789abcdef0123456789abcdef",
+	})
+	for _, sequence := range []uint16{10, 12} {
+		ring.Push(sequence, []byte{byte(sequence)})
+	}
+	m.Observe(shadow.ScoreEvent{Score: 0.8, Threshold: 0.5, Sequence: 12, Crossed: true})
+	m.BindRequest(12, "wake:incomplete")
+	m.Deny("wake:incomplete")
+	item := m.NextReady()
+	if item == nil {
+		t.Fatal("incomplete activation was not retained")
+	}
+	if item.Metadata.ActualPrerollMs != FrameMs || item.Metadata.Complete {
+		t.Fatalf("incomplete metadata = %+v", item.Metadata)
+	}
+}
+
 func TestActivationSuppressesPendingNearMissAndWaitsForDecision(t *testing.T) {
 	m := testManager(t)
 	m.Observe(shadow.ScoreEvent{Score: 0.3, Threshold: 0.5, Sequence: 15})
@@ -106,6 +140,59 @@ func TestActivationBelowNearMissFloorIsStillRetained(t *testing.T) {
 	m.Deny("wake:barge")
 	if item := m.NextReady(); item == nil || item.Metadata.Kind != "act" {
 		t.Fatalf("low-threshold activation was dropped: %#v", item)
+	}
+}
+
+func TestSuppressedActivationIsRemoved(t *testing.T) {
+	m := testManager(t)
+	m.Observe(shadow.ScoreEvent{Score: 0.8, Threshold: 0.5, Sequence: 20, Crossed: true})
+	m.DropActivation(20)
+	if m.Count() != 0 {
+		t.Fatal("suppressed activation remained in the bounded queue")
+	}
+}
+
+func TestNonTriggeringModeActivationUploadsWithoutAdmission(t *testing.T) {
+	m := testManager(t)
+	m.Observe(shadow.ScoreEvent{Score: 0.8, Threshold: 0.5, Sequence: 20, Crossed: true})
+	m.ReleaseActivation(20)
+	if item := m.NextReady(); item == nil || item.Metadata.ActivationSeq != 20 {
+		t.Fatalf("non-triggering activation was not retained: %#v", item)
+	}
+}
+
+func TestRetryInFlightMakesCaptureAvailableAgain(t *testing.T) {
+	m := testManager(t)
+	m.Observe(shadow.ScoreEvent{Score: 0.8, Threshold: 0.5, Sequence: 20, Crossed: true})
+	m.BindRequest(20, "wake:retry")
+	m.Deny("wake:retry")
+	first := m.NextReady()
+	if first == nil {
+		t.Fatal("capture was not claimed")
+	}
+	m.RetryInFlight()
+	second := m.NextReady()
+	if second == nil || second.Metadata.CaptureID != first.Metadata.CaptureID {
+		t.Fatalf("retried capture = %#v", second)
+	}
+}
+
+func TestStaleDebounceCallbackCannotClearNewGeneration(t *testing.T) {
+	m := testManager(t)
+	m.Observe(shadow.ScoreEvent{Score: 0.3, Threshold: 0.5, Sequence: 20})
+	staleEpoch := m.timerEpoch
+	m.Clear()
+	m.Configure(Settings{
+		Enabled: true, Frames: 5, NearMissFloor: 0.1,
+		Model: "wake", ClassifierMD5: "0123456789abcdef0123456789abcdef",
+	})
+	for i := 0; i < 40; i++ {
+		m.ring.Push(uint16(i), []byte{byte(i)})
+	}
+	m.Observe(shadow.ScoreEvent{Score: 0.4, Threshold: 0.5, Sequence: 21})
+	m.endUtterance(staleEpoch)
+	if m.candidate == nil || m.candidate.event.Sequence != 21 {
+		t.Fatal("stale debounce callback cleared the new generation")
 	}
 }
 

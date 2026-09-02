@@ -120,7 +120,16 @@ func (h *helper) handle(request Frame, defaultLib string) error {
 			return fmt.Errorf("player: %w", err)
 		}
 		h.engine, h.recorder, h.player = engine, recorder, player
-		return h.writeJSON(request.RequestID, Response, map[string]any{"ok": true})
+		// The pid rides the Open response, not a separate handshake frame,
+		// because Open is the one call every client already makes before
+		// anything else — no new round trip. The client needs it because it
+		// is the only PID that can be killed directly and reliably: the
+		// helper is not our child (su hands it to magiskd, which parents it
+		// itself), so our own cmd.Process is a different, local process, and
+		// whether killing it also reaches the real helper depends on
+		// magiskd behaviour we don't control. Running as root, the daemon
+		// can SIGKILL this pid regardless of that plumbing.
+		return h.writeJSON(request.RequestID, Response, map[string]any{"ok": true, "pid": os.Getpid()})
 	case StartRecorder:
 		if h.recorder == nil {
 			return errors.New("recorder is not open")

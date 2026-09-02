@@ -47,12 +47,12 @@ type DeviceStats struct {
 	CoresOnline      int      `json:"coresOnline,omitempty"`
 	CoresTotal       int      `json:"coresTotal,omitempty"`
 	ThermalCoreLimit int      `json:"thermalCoreLimit,omitempty"`
-	// OwwShadow carries the on-device wake word window summary
+	// WakeDetector carries the on-device wake detector window summary.
 	// (shadow.Stats), nil when shadow mode is off. Riding the existing 30s
 	// tick keeps the DB cost of on-device scoring at one upsert per 30s —
 	// the same cost class as every other counter here, and the reason
 	// per-frame scores are never sent.
-	OwwShadow interface{} `json:"owwShadow,omitempty"`
+	WakeDetector interface{} `json:"wakeDetector,omitempty"`
 }
 
 // SendStats sends a stats message to the controller.
@@ -76,7 +76,7 @@ func (c *ControlClient) SendStats(s DeviceStats) {
 		"txDropped":      s.TxDropped,
 		"rxCrcErrors":    s.RxCrcErrors,
 		"ble":              s.Ble,
-		"owwShadow":        s.OwwShadow,
+		"wakeDetector":     s.WakeDetector,
 		"ambientLux":       s.AmbientLux,
 		"cpuTempC":         s.CPUTempC,
 		"maxTempC":         s.MaxTempC,

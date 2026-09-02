@@ -320,11 +320,7 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 		// what a device can be asked to do. A version comparison has to encode
 		// knowledge of our release history in the controller and gets it wrong
 		// the first time someone runs a dev build; a capability is the device
-		// stating what it implements. "oww_shadow" says this firmware can score
-		// the wake word locally (internal/wakeword/shadow) — the controller
-		// uses it to decide whether owwOnDevice is even offerable, so an older
-		// device shows "needs newer firmware" rather than a toggle that
-		// silently does nothing.
+		// stating what it implements.
 		"capabilities": capabilities(),
 		// Why the ambient light sensor is or is not available. A capability
 		// list says WHAT a device has; when the answer is "nothing", nobody
@@ -873,15 +869,8 @@ func capabilities() []string {
 	// pausing. Without it the controller must keep the pause/resume path —
 	// a device that cannot mix would simply never play the 0x04 stream.
 	//
-	// "oww_trigger": this firmware can act on its own wake detection, not
-	// just report it. It is separate from "oww_shadow" on purpose — shadow
-	// shipped first and there are devices in the field announcing it that
-	// cannot trigger, so offering them owwOnDevice="on" would produce a
-	// device that scores, stays silent, and looks broken. Announcing a
-	// capability the firmware has, rather than inferring one from a version
-	// string, is the rule the whole registration follows.
 	caps := []string{"mic", "speaker", "leds", "led_anim", "buttons", "test_audio",
-		"oww_shadow", "oww_trigger", "wake_request_v1", "stopword", "button_hold", "audio_mix", "sendspin_native", "output_chain"}
+		"wake_request_v1", "stopword", "button_hold", "audio_mix", "sendspin_native", "output_chain"}
 	if als.Present() {
 		caps = append(caps, "ambient_light")
 	}
@@ -997,52 +986,6 @@ func (c *ControlClient) SendPlaybackStats(periods, underruns uint64, stats inter
 		"periods":   periods,
 		"underruns": underruns,
 		"stats":     stats,
-	})
-}
-
-// SendOwwShadowCross reports that on-device shadow scoring reached the wake
-// threshold. It is a report, not a request: the controller correlates it
-// against its own detection for the same audio and stores the comparison, and
-// nothing on either side triggers a turn from it.
-//
-// Sent immediately rather than batched onto the 30s stats tick because the
-// whole value is in the TIMING — the controller matches it against its own wake
-// within a window, and a report that arrives up to 30s late cannot be matched
-// to anything. Crossings are rare (a refractory period collapses each utterance
-// to one), so this stays far inside the project's per-event cost class.
-// ageMs is how long ago the crossing happened, measured on the device's
-// monotonic clock: an Echo's wall clock is unreliable before NTP, so an
-// absolute device timestamp would be worse than useless.
-func (c *ControlClient) SendOwwShadowCross(score float32, ageMs int64) {
-	_ = c.writeJSON(map[string]interface{}{
-		"type":  "oww_shadow_cross",
-		"score": score,
-		"ageMs": ageMs,
-	})
-}
-
-// SendOwwWake asks the controller to start a voice turn, because on-device
-// scoring crossed the wake threshold and owwOnDevice is "on".
-//
-// The difference from SendOwwShadowCross is only what the controller does with
-// it, but the difference matters enough to be its own message type: a crossing
-// is a measurement and may be dropped freely, while this one starts a turn and
-// a receiver must be able to tell the two apart without consulting the config
-// it thinks the device has. The threshold rides along because the controller
-// records the bar a wake actually cleared, and during barge-in that is the
-// lower one.
-//
-// ageMs is how long ago the crossing happened on the device's monotonic clock,
-// for the same reason as shadow crossings: an Echo's wall clock is unreliable
-// before NTP. The controller needs it to compare claims across devices without
-// network delay deciding which room answers.
-func (c *ControlClient) SendOwwWake(score, threshold float32, ageMs int64, activationSeq uint16) {
-	_ = c.writeJSON(map[string]interface{}{
-		"type":          "oww_wake",
-		"score":         score,
-		"threshold":     threshold,
-		"ageMs":         ageMs,
-		"activationSeq": activationSeq,
 	})
 }
 

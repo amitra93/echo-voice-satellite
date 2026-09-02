@@ -5,11 +5,14 @@ import (
 	"crypto/md5"
 	"encoding/binary"
 	"encoding/json"
+	"runtime"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/wilbowes/EchoMuse/internal/wakeword/capture"
 )
+
+var captureYield = runtime.Gosched
 
 const (
 	frameTypeCaptureBegin  = byte(0x10)
@@ -132,6 +135,7 @@ func (d *DataClient) runCaptureUploader(ctx context.Context, done <-chan struct{
 			}
 			digest.Write(pcm)
 			bytes += uint32(len(pcm))
+			captureYield()
 		}
 		var sum [md5.Size]byte
 		copy(sum[:], digest.Sum(nil))
