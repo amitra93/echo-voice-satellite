@@ -72,14 +72,17 @@ python -m pytest tests/        # needs: pytest numpy scipy pyyaml aiohttp — no
 python -m pytest tests/ --cov=. --cov-report=term-missing   # needs: pytest-cov
 ```
 
-**Pre-commit:** Always run both suites before every `git commit`:
+**Pre-commit:** Always run all four suites before every `git commit`:
 
 ```bash
 cd device && go test ./internal/... ./pkg/...   # host Go, same scope as CI
 cd controller && python -m pytest tests/         # covers node dashboard_logic.test.mjs
+cd hacs && python -m pytest tests/               # 189 tests, only aiohttp required
+cd oww_forge && python -m unittest discover -s tests -v  # 75 tests, needs numpy pyyaml aiohttp
 ```
 
-Do not commit or push with failing tests.
+Do not commit or push with failing tests (4 skipped in oww_forge for
+optional pyarrow/torch is expected).
 
 Most of the controller test suite covers pure-logic modules — the bulk of
 `em_*.py` is now built as small decision functions with their own tests
