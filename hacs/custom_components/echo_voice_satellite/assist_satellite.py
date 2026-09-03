@@ -39,6 +39,7 @@ from homeassistant.components.assist_satellite import (
 from .client import ControllerError
 from .const import DOMAIN
 from .entities import EchoCoordinatorEntity, add_dynamic_entities
+from .stt import CorrelatedMicStream, _partial_callback_var
 from .tts_stream import TTSIncompatible, stream_result_to_audio
 
 _LOGGER = logging.getLogger(__name__)
@@ -240,6 +241,42 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
             and self._active_channel is channel
         )
 
+    def _on_stt_partial(self, text: str) -> None:
+        # Ownership-token guard mirrors every other async callback in this
+        # file (_owns_turn, assist_satellite.py:236-241) — a partial arriving
+        # after a barge-in cancel or a new turn must not touch the wrong turn's
+        # state, same reasoning as _async_pipeline_event's early-return guards.
+        # This direct entry is used by tests that call it without a
+        # CorrelatedMicStream; the pipeline path below uses a closure that
+        # captures the expected turn instead of reading current.
+        turn_id, token, channel = self._active_turn_id, self._active_turn_token, self._active_channel
+        if turn_id is None or token is None or not self._owns_turn(turn_id, token, channel):
+            return
+        self.hass.async_create_task(
+            self.client.async_turn_action(turn_id, "transcript", {"text": text, "is_final": False})
+        )
+
+    def _bound_partial_callback(self, turn_id: int, token: object, channel) -> Any:
+        """Return a per-stream on_partial that is pinned to one turn.
+
+        Captures the turn this stream belongs to at construction time, so a
+        partial arriving after barge-in (when a replacement turn is already
+        active) is dropped rather than misattributed to the new turn.  This
+        is the same ownership model ``_async_pipeline_event`` uses — the
+        caller binds ``(turn_id, token, channel)`` at task creation and the
+        handler re-checks ``_owns_turn`` with those captured values at
+        execution time.
+        """
+
+        def _on_partial(text: str) -> None:
+            if not self._owns_turn(turn_id, token, channel):
+                return
+            self.hass.async_create_task(
+                self.client.async_turn_action(turn_id, "transcript", {"text": text, "is_final": False})
+            )
+
+        return _on_partial
+
     async def _run_wake_pipeline(
         self, channel, turn_id: int | None = None, token: object | None = None,
         timer_speech: bool = False,
@@ -251,22 +288,35 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
             token = self._active_turn_token
         if turn_id is None or token is None or not self._owns_turn(turn_id, token, channel):
             return
+        # Pin the partial callback to this turn's identity, not to whatever
+        # happens to be current when the interim arrives (see
+        # _bound_partial_callback docstring).
+        bound_on_partial = self._bound_partial_callback(turn_id, token, channel)
+        wrapped = CorrelatedMicStream(channel.mic_frames(), on_partial=bound_on_partial)
+        # Publish the callback via ContextVar so it survives the pipeline's
+        # process_enhance_audio wrapping (which yields a new async_generator,
+        # not our CorrelatedMicStream, so isinstance() in stt.py would be False).
+        ctx_token = _partial_callback_var.set(bound_on_partial)
         try:
-            if timer_speech:
-                await super().async_accept_pipeline_from_satellite(
-                    channel.mic_frames(), end_stage=PipelineStage.STT
-                )
-            else:
-                await super().async_accept_pipeline_from_satellite(channel.mic_frames())
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            _LOGGER.exception("Pipeline failed for %s", self.device_id)
-        finally:
-            if self._pipeline_task is asyncio.current_task():
-                self._pipeline_task = None
-            if not self._owns_turn(turn_id, token, channel):
-                return
+            try:
+                if timer_speech:
+                    await super().async_accept_pipeline_from_satellite(
+                        wrapped,
+                        end_stage=PipelineStage.STT,
+                    )
+                else:
+                    await super().async_accept_pipeline_from_satellite(
+                        wrapped
+                    )
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                _LOGGER.exception("Pipeline failed for %s", self.device_id)
+            finally:
+                if self._pipeline_task is asyncio.current_task():
+                    self._pipeline_task = None
+                if not self._owns_turn(turn_id, token, channel):
+                    return
             if self._tts_task is not None and self._tts_turn_token is token:
                 await asyncio.gather(self._tts_task, return_exceptions=True)
             elif self._owns_turn(turn_id, token, channel):
@@ -282,6 +332,8 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
                     await self.client.async_turn_action(turn_id, "tts/end")
                 except ControllerError:
                     pass
+        finally:
+            _partial_callback_var.reset(ctx_token)
 
     @property
     def is_on(self) -> bool:
