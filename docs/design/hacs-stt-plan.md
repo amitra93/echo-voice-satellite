@@ -1,6 +1,6 @@
 # HACS-Owned Streaming STT via Gemini 3.5 Transcribe — Design Plan
 
-**Status:** Proposed, not implemented. This is Option A from the
+**Status:** Implemented (phases 1–7 complete, 2026-09-02). This is Option A from the
 brainstorm that produced it — a custom `stt` platform inside the
 `echo_voice_satellite` HACS integration, correlated to the active turn via an
 in-process callback rather than `PipelineEvent` or `hass.bus`.
@@ -886,3 +886,176 @@ habit CLAUDE.md uses throughout this codebase for rejected alternatives.
   exact `SpeechToTextEntity` property names for the pinned HA version — HA
   core API surface, not Gemini API surface — noted where it comes up in the
   `stt.py` section.
+
+## Implementation phases
+
+"Sequencing" above establishes the two halves are independent and gives a
+3-step order. This section is the granular breakdown of *how* to get through
+each step without a long stretch of red or untestable code — every phase
+below ships a working, test-covered tree; none depends on a later phase to be
+correct in the meantime. Phase numbers are a recommended order, not a
+strict dependency chain except where a phase explicitly says otherwise.
+
+### Phase 1 — HA-side test scaffolding
+
+No production code. Prerequisite for Phases 4 and 5's own tests, and cheap
+enough to do first so nothing later is blocked waiting on it.
+
+- Add a minimal `homeassistant.components.stt` fake to `hacs/tests/conftest.py`
+  — `SpeechToTextEntity`, `SpeechResult`, `SpeechResultState`,
+  `SpeechAudioProcessing` — the same "fake the module, don't install it"
+  pattern already used for `pipeline.PipelineEventType`/`PipelineEvent`
+  (`conftest.py:105-109`).
+- Add a fake Gemini Live client fixture: an async context manager whose
+  `receive()` yields a canned interim/interim/final sequence, mirroring the
+  role `test_stop_cancellation.py`/`test_assist_satellite.py`'s fake
+  `PipelineEvent` objects already play for the pipeline.
+
+**Exit criteria:** `hacs/tests` still passes with zero behavior change; the
+new fakes are unused until Phase 4.
+
+### Phase 2 — Controller-side `is_final` handling
+
+Independent of every other phase — correct today, with zero devices sending
+partials, and stays correct once they start. This is "Sequencing" step 2,
+and per that section's own reasoning it can ship *before* any HA-side code
+exists: a fleet with zero partials still exercises `is_final: True` through
+the same gated path. Doing it first also means the controller is ready the
+moment Phase 5 starts sending `is_final: False` for real, instead of racing
+it.
+
+- `em_turn_engine.py`: gate `turn.transcript_mono` on `body.get("is_final",
+  True)` rather than the current unconditional first-write-wins.
+- `em_turn_engine.py`: add the `log.debug("[%s] partial transcript
+  text=%r", ...)` line for `is_final: False`, landing inside the existing
+  `_LOG_DROP` coverage (`"text="`) with no new redaction code.
+- Decide and implement `on_transcript`'s semantics for partials
+  (`_run_timer_speech_turn` in `em_controller.py`) — fire on first partial,
+  per "Controller-side changes" above.
+- Tests: `tests/test_phase1_turn_engine.py` gains the `is_final: False` case
+  (asserts `transcript_mono` untouched) alongside the existing `True` case;
+  `test_transcript_callback_only_runs_for_recognized_speech` gains an
+  `is_final` case either way; `tests/test_support.py` gains a case pinning
+  that the new partial-transcript log line is dropped whole by
+  `sanitise_log`.
+
+**Exit criteria:** controller suite (`cd controller && python -m pytest
+tests/`) green; a manually-posted `transcript {is_final: false}` REST call
+against a dev controller logs at DEBUG, doesn't touch `stt_latency_ms`, and
+is absent from a support bundle. No HACS code has been touched yet.
+
+### Phase 3 — Gemini credentials and options flow (no `stt.py` yet)
+
+Plumbing only — installable and saveable, but nothing reads these values
+yet, so this phase is inert by construction, the same property "Sequencing"
+step 1 already relies on.
+
+- `const.py`: the four `CONF_GEMINI_API_KEY` / `CONF_CUSTOM_VOCABULARY` /
+  `CONF_TRANSCRIPTION_MODE` / `CONF_LANGUAGE_CODES` keys.
+- `manifest.json`: pinned `google-genai` requirement.
+- `config_flow.py`: `EchoVoiceSatelliteOptionsFlow`, `_async_validate_gemini_key`,
+  and `async_get_options_flow` wired onto `EchoVoiceSatelliteConfigFlow`.
+- Tests: `test_config_flow.py` gains the options-flow coverage described in
+  "Testing" above — valid save, round-trip of empty/default fields, a
+  rejected key re-shows the form with an error and creates nothing, and a
+  blank key is accepted with no validation attempt.
+
+**Exit criteria:** an installed integration shows a working `Configure`
+button with all four fields, validates a real key against Gemini at save
+time, and persists a blank key as the (currently no-op) off state. No `stt`
+platform exists yet, so nothing in HA's STT-provider list changes.
+
+### Phase 4 — `stt.py`: `GeminiTranscribeEntity`, final-only
+
+The entity becomes selectable and functional as an ordinary
+(non-streaming-to-the-controller) STT provider — this is a legitimate,
+shippable increment on its own: a user can pick "Gemini" in their pipeline's
+STT dropdown and get a final transcript, same as any other provider, before
+partials exist anywhere. Depends on Phase 3 (reads the `CONF_*` keys) and
+Phase 1 (for its own tests).
+
+- `stt.py` (new): `GeminiTranscribeEntity` — the `supported_*` properties,
+  the `audio_processing` override (`requires_external_vad=False`),
+  `_parse_language_codes`, and `async_process_audio_stream` exactly as
+  specified above, **except** the `isinstance(stream, CorrelatedMicStream)`
+  branch is a guaranteed no-op in this phase, since nothing yet wraps the
+  stream — interim results are computed and discarded, only the final
+  `SpeechResult` is returned. This is safe precisely because of the
+  `isinstance` guard already designed into the method; no temporary code
+  path is needed to disable partial delivery for this phase.
+- `const.py`: `PLATFORMS` gains `"stt"`.
+- Tests: `test_stt.py` (new) — the `audio_processing.requires_external_vad
+  is False` assertion (flagged above as the single highest-value test in
+  this plan), the fresh-options-per-call test, the missing/blank-API-key
+  reaches-Gemini's-own-auth-failure test, and `_parse_language_codes`'s own
+  pure-function cases.
+
+**Exit criteria:** `hacs/tests` green including `test_stt.py`; a real HA
+instance with a valid Gemini key set in the options flow can select
+"Gemini" as a pipeline's STT engine and complete a turn with a correct final
+transcript. No partials are sent to the controller yet — behaviorally
+identical, from the controller's point of view, to any other STT provider.
+
+### Phase 5 — `assist_satellite.py`: partial-transcript wiring
+
+Completes the pipeline end to end. Depends on Phase 2 (controller must
+already handle `is_final: False` correctly) and Phase 4 (the entity must
+already exist and work for finals).
+
+- `assist_satellite.py`: `CorrelatedMicStream` wrapper type; `_run_wake_pipeline`
+  wraps `channel.mic_frames()` in it before calling
+  `async_accept_pipeline_from_satellite`; new `_on_stt_partial` with the
+  `_owns_turn` ownership-token guard.
+- Tests: `test_assist_satellite.py` gains the case asserting `_on_stt_partial`
+  is a no-op once `_owns_turn` fails (barge-in mid-partial), mirroring
+  `test_late_pipeline_event_cannot_touch_a_replaced_turn`.
+
+**Exit criteria:** a real turn against a device with Gemini selected produces
+one or more `transcript {is_final: false}` calls followed by exactly one
+`{is_final: true}`, visible as DEBUG log lines on the controller (Phase 2);
+a barge-in mid-utterance produces no partial from the superseded turn.
+
+### Phase 6 — Pre-existing log-redaction gap (found, not introduced, by this plan)
+
+Separable bugfix, independent of every phase above — safe to land any time,
+including before Phase 1. Called out as its own phase rather than folded
+silently into Phase 2 because it's a correctness fix to *existing* behavior,
+not new work this plan's design requires, and deserves its own review
+attention and changelog line.
+
+- `em_controller.py`'s `_run_timer_speech_turn` `on_transcript` callback logs
+  the transcript at `log.info` with no `_LOG_DROP` marker match
+  (`"STT transcript:"` matches none of `"STT result"`/`"text="`/
+  `"Utterance saved"`/`"stt_text"`). Either drop it to `log.debug` or add a
+  matching `_LOG_DROP` marker — either closes the gap.
+- Test: extend the existing `test_support.py` log-redaction coverage with a
+  case for this exact line shape, the same "pin by test, not by
+  construction" reasoning already applied to Phase 2's new line.
+
+**Exit criteria:** a support bundle built from a controller that has
+recently dismissed a timer via speech contains no transcript text anywhere
+in `controller_log_tail`.
+
+### Phase 7 — Privacy audit and rollout validation
+
+Final gate before calling this done. No new production code expected;
+exists to catch anything Phases 1–6 individually couldn't.
+
+- Manual read-through of `stt.py` and `assist_satellite.py`'s new code
+  confirming no partial or final transcript text is logged at any level —
+  the stricter, no-redaction-layer rule from "Privacy" above, which no
+  automated test in this plan actually enforces (there is no HA-side
+  equivalent of `em_support.sanitise_log` to pin against).
+- Manual end-to-end pass: set a real Gemini key, run several turns, confirm
+  (a) a mid-flight options-flow save takes effect on the *next* turn and not
+  the in-flight one, (b) a cleared API key correctly disables Gemini without
+  removing the integration, (c) a wrong API key fails loudly via
+  `PipelineEventType.ERROR` rather than silently falling back to another
+  provider.
+- Run all four suites named in CLAUDE.md's Pre-commit section (`device` Go
+  tests are unaffected by this plan but still run for the standing rule) and
+  confirm nothing outside `hacs/` and `controller/` regressed.
+
+**Exit criteria:** the checklist above passes by inspection and manual test;
+this plan's `Status` line can move from "Proposed, not implemented" to
+"Implemented."

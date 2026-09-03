@@ -110,6 +110,110 @@ pipeline.PipelineEvent = lambda type, data=None: types.SimpleNamespace(type=type
 pipeline.async_get_pipelines = lambda hass: []
 components.assist_pipeline = pipeline
 
+# ── homeassistant.components.stt ───────────────────────────────────────────
+# Minimal surface for GeminiTranscribeEntity's tests. Sourced against HA
+# core's real homeassistant/components/stt/__init__.py and models.py rather
+# than guessed — only the members this suite (and the plan's stt.py) touch
+# are modelled.
+
+class SpeechAudioProcessing:
+    """Mirrors homeassistant.components.stt.SpeechAudioProcessing.
+
+    Only the fields the plan depends on are modelled; the base class's
+    default has requires_external_vad=True, which is exactly why
+    GeminiTranscribeEntity must override it to False (see docs/design/hacs-stt-plan.md
+    "audio_processing" section).
+    """
+
+    def __init__(
+        self,
+        requires_external_vad: bool = True,
+        prefers_auto_gain_enabled: bool = False,
+        prefers_noise_reduction_enabled: bool = False,
+    ):
+        self.requires_external_vad = requires_external_vad
+        self.prefers_auto_gain_enabled = prefers_auto_gain_enabled
+        self.prefers_noise_reduction_enabled = prefers_noise_reduction_enabled
+
+
+DEFAULT_AUDIO_PROCESSING = SpeechAudioProcessing(
+    requires_external_vad=True,
+    prefers_auto_gain_enabled=False,
+    prefers_noise_reduction_enabled=False,
+)
+
+
+class _SpeechResultState(Enum):
+    SUCCESS = "success"
+    ERROR = "error"
+
+
+class SpeechResult:
+    def __init__(self, text: str | None, result_state: "_SpeechResultState"):
+        self.text = text
+        self.result_state = result_state
+
+
+class SpeechToTextEntity(Entity):
+    """Tiny base matching the real SpeechToTextEntity contract.
+
+    Only what check_metadata() and the supported_* properties need is
+    implemented — enough for the suite to import and subclass without
+    installing the real distribution.
+    """
+
+    @property
+    def supported_languages(self) -> list[str]:
+        return []
+
+    @property
+    def supported_formats(self) -> list[str]:
+        return ["wav"]
+
+    @property
+    def supported_codecs(self) -> list[str]:
+        return ["pcm"]
+
+    @property
+    def supported_bit_rates(self) -> list[int]:
+        return [16]
+
+    @property
+    def supported_sample_rates(self) -> list[int]:
+        return [16000]
+
+    @property
+    def supported_channels(self) -> list[int]:
+        return [1]
+
+    @property
+    def audio_processing(self) -> SpeechAudioProcessing:
+        return DEFAULT_AUDIO_PROCESSING
+
+    def check_metadata(self, metadata) -> None:
+        language = getattr(metadata, "language", None)
+        if language not in self.supported_languages:
+            raise ValueError("stt-provider-unsupported-metadata")
+
+    async def async_process_audio_stream(self, metadata, stream):
+        raise NotImplementedError
+
+
+stt = _module("homeassistant.components.stt")
+stt.SpeechToTextEntity = SpeechToTextEntity
+stt.SpeechResult = SpeechResult
+stt.SpeechResultState = _SpeechResultState
+stt.SpeechAudioProcessing = SpeechAudioProcessing
+stt.DEFAULT_AUDIO_PROCESSING = DEFAULT_AUDIO_PROCESSING
+# Some call sites import from ...stt.models; expose the same names there.
+stt_models = _module("homeassistant.components.stt.models")
+stt_models.SpeechToTextEntity = SpeechToTextEntity
+stt_models.SpeechResult = SpeechResult
+stt_models.SpeechResultState = _SpeechResultState
+stt_models.SpeechAudioProcessing = SpeechAudioProcessing
+stt_models.DEFAULT_AUDIO_PROCESSING = DEFAULT_AUDIO_PROCESSING
+components.stt = stt
+
 tts = _module("homeassistant.components.tts")
 components.tts = tts
 
@@ -170,9 +274,50 @@ class ConfigFlow:
         return {"type": "form", **kwargs}
 
 
+class OptionsFlow:
+    def __init__(self, *args, **kwargs):
+        self.config_entry = None
+        self.hass = None
+
+    def async_create_entry(self, **kwargs):
+        return {"type": "create_entry", **kwargs}
+
+    def async_show_form(self, **kwargs):
+        return {"type": "form", **kwargs}
+
+
 config_entries = _module("homeassistant.config_entries")
 config_entries.ConfigFlow = ConfigFlow
+config_entries.OptionsFlow = OptionsFlow
 ha.config_entries = config_entries
+
+# ── homeassistant.helpers.selector ──────────────────────────────────────
+selector_mod = _module("homeassistant.helpers.selector")
+helpers.selector = selector_mod
+
+
+class TextSelectorConfig:
+    def __init__(self, multiple: bool = False, **kwargs):
+        self.multiple = multiple
+        for k, v in kwargs.items():
+            setattr(self, k, v)
+
+
+class TextSelector:
+    def __init__(self, config=None):
+        self.config = config
+
+    def __call__(self, value):
+        return value
+
+
+selector_mod.TextSelector = TextSelector
+selector_mod.TextSelectorConfig = TextSelectorConfig
+# Some imports use `from homeassistant.components import ...` vs helpers;
+# expose via components as well for safety.
+selector_comp = _module("homeassistant.components.selector")
+selector_comp.TextSelector = TextSelector
+selector_comp.TextSelectorConfig = TextSelectorConfig
 
 
 bluetooth = _module("homeassistant.components.bluetooth")
@@ -216,14 +361,167 @@ def _install_external_stubs():
     })
 
 
+def _install_google_genai_stubs():
+    """Fake google-genai SDK surface used by stt.py's tests.
+
+    Mirrors the real ``google.genai`` + ``google.genai.types`` shape the plan
+    specifies (ai.google.dev/gemini-api/docs/live-api/live-transcribe):
+
+      client = genai.Client(api_key=...)
+      async with client.aio.live.connect(model="gemini-3.5-transcribe-live", config=config) as session:
+          await session.send_realtime_input(audio=types.Blob(data=chunk, mime_type="..."))
+          await session.send_realtime_input(audio_stream_end=True)
+          async for response in session.receive():
+              response.server_content.interim_input_transcription.text
+              response.server_content.input_transcription.text
+
+    No real network I/O — ``receive()`` yields a canned
+    interim/interim/final sequence by default, the same role
+    test_stop_cancellation.py's fake PipelineEvent objects play.
+    Tests that need a different sequence patch the Client or the session's
+    ``_responses`` before or after construction.
+    """
+
+    google_mod = _module("google")
+    genai_mod = _module("google.genai")
+    types_mod = _module("google.genai.types")
+    google_mod.genai = genai_mod
+    genai_mod.types = types_mod
+
+    class Blob:
+        def __init__(self, data=None, mime_type: str | None = None, **kwargs):
+            self.data = data
+            self.mime_type = mime_type
+
+    class AudioTranscriptionConfig:
+        def __init__(self, language_codes=None, mode: str | None = None, custom_vocabulary=None, **kwargs):
+            self.language_codes = language_codes if language_codes is not None else []
+            self.mode = mode
+            self.custom_vocabulary = custom_vocabulary if custom_vocabulary is not None else []
+
+    class LiveConnectConfig:
+        def __init__(
+            self,
+            response_modalities=None,
+            input_audio_transcription=None,
+            **kwargs,
+        ):
+            self.response_modalities = response_modalities
+            self.input_audio_transcription = input_audio_transcription
+            for k, v in kwargs.items():
+                setattr(self, k, v)
+
+    def _make_gemini_response(*, interim: str | None = None, final: str | None = None):
+        interim_ns = types.SimpleNamespace(text=interim) if interim is not None else None
+        final_ns = types.SimpleNamespace(text=final) if final is not None else None
+        server_content = types.SimpleNamespace(
+            interim_input_transcription=interim_ns,
+            input_transcription=final_ns,
+        )
+        return types.SimpleNamespace(server_content=server_content)
+
+    def _default_gemini_responses():
+        return [
+            _make_gemini_response(interim="hello"),
+            _make_gemini_response(interim="hello world"),
+            _make_gemini_response(final="hello world"),
+        ]
+
+    class FakeGeminiLiveSession:
+        """Async context manager whose ``receive()`` yields interim/interim/final."""
+
+        def __init__(self, model: str | None = None, config=None, responses=None, api_key: str = ""):
+            self.model = model
+            self.config = config
+            self._responses = list(responses) if responses is not None else _default_gemini_responses()
+            self._api_key = api_key
+            self.sent: list[dict] = []
+
+        async def __aenter__(self):
+            # Blank/missing key must surface as a Gemini auth failure, not a
+            # KeyError, so stt.py's .get() handling is pinned (see design doc).
+            if not self._api_key or not self._api_key.strip():
+                raise ValueError("missing gemini api key")
+            if "invalid" in self._api_key:
+                raise ValueError("invalid_gemini_key")
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def send_realtime_input(self, audio=None, audio_stream_end: bool = False, **kwargs):
+            self.sent.append({"audio": audio, "audio_stream_end": audio_stream_end})
+
+        async def receive(self):
+            for response in self._responses:
+                yield response
+
+    class _FakeLiveNamespace:
+        def __init__(self, api_key: str = "", responses=None):
+            self._api_key = api_key
+            self._responses = responses
+
+        def connect(self, model=None, config=None):
+            return FakeGeminiLiveSession(
+                model=model, config=config, responses=self._responses, api_key=self._api_key
+            )
+
+    class _FakeModelsNamespace:
+        def __init__(self, api_key: str = ""):
+            self._api_key = api_key
+
+        async def list(self, **kwargs):
+            if not self._api_key or not self._api_key.strip():
+                raise ValueError("missing gemini api key")
+            if self._api_key == "invalid" or "invalid" in self._api_key:
+                raise ValueError("invalid_gemini_key")
+            return []
+
+        def __call__(self, *args, **kwargs):
+            return self.list(*args, **kwargs)
+
+    class _FakeAioNamespace:
+        def __init__(self, api_key: str = "", responses=None):
+            self.live = _FakeLiveNamespace(api_key=api_key, responses=responses)
+            self.models = _FakeModelsNamespace(api_key=api_key)
+
+    class Client:
+        def __init__(self, api_key: str = "", **kwargs):
+            self.api_key = api_key
+            self.aio = _FakeAioNamespace(api_key=api_key)
+            # Sync surface some SDKs expose as client.models
+            self.models = _FakeModelsNamespace(api_key=api_key)
+
+    # Expose on the modules exactly as the real SDK does.
+    types_mod.Blob = Blob
+    types_mod.AudioTranscriptionConfig = AudioTranscriptionConfig
+    types_mod.LiveConnectConfig = LiveConnectConfig
+    types_mod.FakeGeminiLiveSession = FakeGeminiLiveSession
+    types_mod._make_gemini_response = _make_gemini_response
+    types_mod._default_gemini_responses = _default_gemini_responses
+    genai_mod.Client = Client
+    genai_mod.types = types_mod
+    # ``from google import genai`` expects ``google.genai`` to be importable
+    # and ``google.genai.types`` likewise.
+    sys.modules["google"].genai = genai_mod
+
+
 _install_external_stubs()
+_install_google_genai_stubs()
 entity_registry.async_get = lambda hass: types.SimpleNamespace(entities={}, async_remove=lambda entity_id: None)
 
 
 vol = types.ModuleType("voluptuous")
-vol.Required = lambda key, default=None: key
-vol.Schema = lambda value: value
-vol.__getattr__ = lambda name: str
+vol.Required = lambda key, default=None, **kwargs: key
+vol.Optional = lambda key, default=None, **kwargs: key
+vol.In = lambda options: (lambda v: v)
+vol.All = lambda *validators, **kwargs: (lambda v: v)
+vol.Coerce = lambda type_fn: (lambda v: v)
+vol.Range = lambda *a, **kw: (lambda v: v)
+vol.Length = lambda *a, **kw: (lambda v: v)
+vol.Schema = lambda schema, **kwargs: schema
+vol.Invalid = type("Invalid", (Exception,), {})
+vol.MultipleInvalid = type("MultipleInvalid", (Exception,), {})
 sys.modules["voluptuous"] = vol
 
 

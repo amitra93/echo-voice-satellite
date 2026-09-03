@@ -356,8 +356,12 @@ async def turn_action(request: web.Request) -> web.Response:
             body = {}
         text = body.get("text")
         if isinstance(text, str) and text:
+            is_final = body.get("is_final", True)
+            if is_final:
+                turn.transcript_mono = turn.transcript_mono or time.monotonic()
+            else:
+                log.debug("[%s] partial transcript text=%r", turn.device.device_id, text)
             turn.stt_text = text
-            turn.transcript_mono = turn.transcript_mono or time.monotonic()
             if turn.on_transcript is not None:
                 await turn.on_transcript(text)
     elif action == "tts-text":
