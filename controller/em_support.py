@@ -129,7 +129,7 @@ _COUNTER_FIELDS = (
 # Log lines whose source is known to carry speech. Dropped whole rather than
 # sanitised: a partial redaction of a line that quotes a transcript is a bet
 # on the regex, and losing the line costs nothing we cannot get elsewhere.
-_LOG_DROP = ("STT result", "text=", "Utterance saved", "stt_text")
+_LOG_DROP = ("STT result", "text=", "Utterance saved", "stt_text", "STT transcript")
 
 # Quoted strings and URLs. Turn traces quote transcripts; media URLs carry
 # provider paths and session tokens.

@@ -1604,7 +1604,7 @@ async def _run_timer_speech_turn(device: Device, first_frame: bytes) -> None:
 
     async def on_transcript(text: str) -> None:
         if await api.dismiss_timer_alarm(device.device_id):
-            log.info(
+            log.debug(
                 "[%s] Timer alarm dismissed by STT transcript: %r",
                 device.device_id, text,
             )
