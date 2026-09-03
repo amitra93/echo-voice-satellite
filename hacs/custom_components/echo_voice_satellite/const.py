@@ -12,12 +12,18 @@ MIN_HA_VERSION = "2026.8.0"
 CONF_URL = "url"
 CONF_API_KEY = "api_key"
 
+CONF_GEMINI_API_KEY = "gemini_api_key"
+CONF_CUSTOM_VOCABULARY = "gemini_custom_vocabulary"
+CONF_TRANSCRIPTION_MODE = "gemini_transcription_mode"
+CONF_LANGUAGE_CODES = "gemini_language_codes"
+
 PLATFORMS = (
     "assist_satellite",
     "sensor",
     "binary_sensor",
     "select",
     "switch",
+    "stt",
 )
 #
 # "button" is deliberately absent: the momentary Privacy mute button
