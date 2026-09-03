@@ -7,10 +7,11 @@
 
 A fork of https://github.com/wilbowes/EchoMuse that has the following differences (as of August 2026):
 
-*  Streaming STT and TTS integrations.
-*  Devices appear through a custom HACS integration rather than ESPHome. This allows for more control and I will be using this to support Gemini Live in the future.
-*  Audio is routed through Amazon Echo Android APIs, leading to richer and deeper sound.
-*  Changes to `oww_forge` to make wakewor training easier.
+*  **Streaming STT via Gemini 3.5 Transcribe (HACS).** The `echo_voice_satellite` HACS integration now *is* the STT provider: a single `GeminiTranscribeEntity` (`hacs/custom_components/echo_voice_satellite/stt.py`) streams 16 kHz mono PCM to `gemini-3.5-transcribe-live` via the Live API (`google-genai` `LiveConnectConfig` + `AudioTranscriptionConfig`). One Live session per turn provides both interim `interim_input_transcription` (forwarded as `transcript {is_final:false}` via `CorrelatedMicStream` + `ContextVar` — survives `assist_pipeline`'s `process_enhance_audio` wrapping) and final `input_transcription` (returned as `SpeechResult` → `STT_END` → `transcript {is_final:true}`). The controller (`em_turn_engine.py` `transcript` action) gates `transcript_mono`/`stt_latency_ms` on `is_final` and logs partials at `DEBUG text=` (dropped by `em_support._LOG_DROP` in bundles). Selection is opt-in — pick “Gemini Transcribe” as the pipeline’s STT engine. Requires `google-genai>=2.22.0` (empty `AudioTranscriptionConfig` fallback for `1.59.0` installs, vocab ignored until upgraded). See `docs/design/hacs-stt-plan.md` (now **Implemented**) for the full model, VAD (`requires_external_vad=False` → Gemini `Automatic` server VAD), and privacy (HA-side never logs transcript, not even at `DEBUG`).
+*  **Streaming TTS integration via Google Cloud TTS.**
+*  ***Custom HACS integration**: Devices appear through a custom HACS integration rather than ESPHome. This allows for more control and is the transport for Gemini Live (audio + partials + `ConfigEntry` options for key/vocab/mode/language).
+*  **Amazon audio framework** Audio is routed through Amazon Echo Android APIs, leading to richer and deeper sound.
+*  **Better trainer**: Changes to `oww_forge` to make wakeword training easier.
 *  Wake word and stopword detection run entirely on the devices — the controller never receives idle microphone audio and never scores a wake or stop model.
 
 ## Contributing

@@ -171,7 +171,7 @@ authenticated event stream.
    enter the controller URL, for example `http://192.168.1.50:8768`, plus the
    generated API key.
 4. Assign the satellite entity to an Assist pipeline in **Settings → Voice
-   assistants**.
+   assistants**, then set that pipeline’s **STT engine to `Gemini Transcribe`** (`stt.gemini_transcribe` from the same EchoMuse integration, `hacs/custom_components/echo_voice_satellite/stt.py`). The HACS integration *is* the STT provider: one `GeminiTranscribeEntity` per config entry streams 16 kHz mono PCM to `gemini-3.5-transcribe-live` (interim `interim_input_transcription` → `transcript {is_final:false}` via `CorrelatedMicStream` + `ContextVar`, final `input_transcription` → `SpeechResult`). Pick it in the pipeline’s STT dropdown (opt-in, global per pipeline; see `docs/design/hacs-stt-plan.md` **Implemented** and `configuration.md` **Speech-to-text (Gemini)** for `API key`/`mode`/`vocabulary`/`language codes`). Requires `google-genai>=2.22.0` (older `1.59.0` falls back to empty vocab, transcription still works).
 
 Each supported device appears through the integration with an Assist satellite,
 privacy-mute switch, volume controls, firmware/wake-word sensors, action-button

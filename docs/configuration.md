@@ -9,6 +9,7 @@ language.
   uses.
 - **Per-device config** (device page → Config tab): each section carries its
   own **Fleet / Device** switch in its header.
+- **Gemini STT (HACS)** — HA → Settings → Devices & Services → EchoMuse → **Configure** (options flow, not Fleet/Device): `Gemini API key`, `Transcription mode`, `Custom vocabulary`, `Language codes`. These are *per HA config entry*, not per device, and read fresh per turn — see **Speech-to-text (Gemini)** below. Pick the pipeline’s STT engine there too (STT dropdown → `Gemini Transcribe`).
 
 Scoping is **per section**, not all-or-nothing. Leave a section on *Fleet*
 and it keeps following the fleet-wide value, including future changes. Flip
@@ -322,6 +323,21 @@ Three things the device-side detector needs:
 The stopword ("stop" during a response) and barge-in (interrupting by saying
 the wake word over playback) are scored the same way — on the device, against
 the same AFE capture stream.
+
+### Speech-to-text (Gemini 3.5 Transcribe, HACS)
+
+STT is *not* Whisper or Cloud STT — it is the HACS integration’s own `stt.gemini_transcribe` platform (`hacs/custom_components/echo_voice_satellite/stt.py` `GeminiTranscribeEntity`). Per turn it opens one `google-genai` Live session (`gemini-3.5-transcribe-live`, `LiveConnectConfig` + `AudioTranscriptionConfig`) streaming the same 16 kHz mono `MIC_PCM` that the device already sends — no resampling, no shadow copy. `interim_input_transcription` → `transcript {is_final:false}` (logged at `DEBUG text=` on the controller, dropped by `em_support` in bundles), `input_transcription` → `SpeechResult` → `STT_END` → `is_final:true`. This is the only HA-level way to get partials.
+
+Configure in **HA → Settings → Devices & Services → EchoMuse → Configure** (options flow):
+
+- **Gemini API key** — long-lived `genai.Client(api_key=…)`, stored in the config entry (same trust as the controller `api_key`), `models.list()` validated at save → `invalid_gemini_key`. Blank = off (reversible, no `async_reload`).
+- **Transcription mode** `VERBATIM` (default, literal) / `SMART` (disfluencies removed). `VERBATIM` is default because `SMART` changes which words the intent recognizer sees.
+- **Custom vocabulary** — up to 1000 terms (`TextSelector(multiple=True)`, hard `1000`, soft “best up to 100”), e.g. entity/area names. Commas inside a term are preserved.
+- **Language codes** — comma-separated BCP-47 (`_parse_language_codes`, `[]` → Gemini auto-detect 85+). This is *not* the pipeline’s `stt_language` (checked by `check_metadata` before we’re called, broad `~128`-code allowlist so a pipeline set to `en` doesn’t reject `es-ES`).
+
+All four are `vol.Optional` and read fresh per `async_process_audio_stream` call — a mid-flight save takes effect on the *next* turn, the in-flight turn finishes with the old config. Requires `google-genai>=2.22.0` (`AudioTranscriptionConfig` with `language_codes`/`mode`/`custom_vocabulary`); older `1.59.0` installs fall back to empty `AudioTranscriptionConfig` (transcription still works, vocab ignored until upgraded).
+
+Pick the provider per pipeline: **HA → Settings → Voice Assistants → your pipeline → STT engine → Gemini Transcribe** (opt-in, global per pipeline; no per-device switch). The controller stays provider-agnostic (`POST /api/turns/{id}/transcript {text,is_final}` only; `stt_latency_ms` gated on `is_final`).
 
 ---
 

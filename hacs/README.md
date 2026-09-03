@@ -37,6 +37,22 @@ integration talks to the device it manages.
 - A passive Bluetooth remote scanner, if the device's `bleProxyEnabled`
   config is on.
 
+## Speech-to-text via Gemini 3.5 Transcribe (Live)
+
+The integration *is* the STT provider — no separate Whisper/Google Cloud STT needed. A single `stt.gemini_transcribe` entity (`stt.py` `GeminiTranscribeEntity`) is registered per config entry (`const.PLATFORMS` + `stt`) and does double duty for every turn:
+
+- **One Live session per turn** (`genai.Client(api_key=options.get(CONF_GEMINI_API_KEY,""))` → `client.aio.live.connect(model="gemini-3.5-transcribe-live", config=LiveConnectConfig(...))`) streams the same 16 kHz mono `MIC_PCM` (80 ms, 1280 samples, `audio/pcm;rate=16000`) that already flows to HA — no resampling/rechunking, no shadow copy, no second STT call. `interim_input_transcription.text` → `CorrelatedMicStream.on_partial` → `client.async_turn_action(turn_id, "transcript", {is_final:false})`; `input_transcription.text` → `SpeechResult` → `STT_END` → `is_final:true`. This is the only way to get partials today: `assist_pipeline` only has `STT_START`/`VAD`/`STT_END` and `SpeechToTextEntity` only ever returns one `SpeechResult` — HA has no partial plumbing.
+
+- **Correlated, not registered.** `assist_satellite.py` wraps `channel.mic_frames()` as `CorrelatedMicStream(channel.mic_frames(), on_partial=self._bound_partial_callback(turn_id,token,channel))` and publishes the callback via a `ContextVar` (`stt._partial_callback_var`) so it survives `assist_pipeline`’s `process_enhance_audio`/`_speech_to_text_stream` wrapping (which yields a new `async_generator`, so `isinstance(stream, CorrelatedMicStream)` would always be `False` after the enhancer). `_bound_partial_callback` captures `(turn_id,token,channel)` at wrap time and re-checks `_owns_turn` on every interim, so a barge-in that replaces the turn drops stale interims rather than misattributing them.
+
+- **HA VAD is not used.** `GeminiTranscribeEntity.audio_processing` returns `SpeechAudioProcessing(requires_external_vad=False, prefers_auto_gain_enabled=False, prefers_noise_reduction_enabled=False)` — with `MIN_HA_VERSION 2026.8.0` this keeps `VoiceCommandSegmenter` out of the path and makes Gemini’s `Automatic` server VAD (unconfigured `automatic_activity_detection`) the sole start/end detector, with `audio_stream_end` only as a transport courtesy.
+
+- **Configure in HA → Settings → Devices → EchoMuse → Configure** (options flow, not install flow): `Gemini API key` (blank = off, validated via `models.list()` → `invalid_gemini_key`), `Transcription mode` `VERBATIM` (default, literal) / `SMART` (disfluencies removed), `Custom vocabulary` up to 1000 terms (`TextSelector(multiple=True)`, hard `1000`, soft `100`), `Language codes` comma-separated BCP-47 (`_parse_language_codes`, `[]` → auto-detect 85+). All four are `vol.Optional` and read fresh per `async_process_audio_stream` call — a mid-flight save takes effect on the *next* turn, no `async_reload`/`add_update_listener` needed. Requires `google-genai>=2.22.0` (`AudioTranscriptionConfig` with `language_codes`/`mode`/`custom_vocabulary`); older `1.59.0` installs fall back to an empty `AudioTranscriptionConfig` (auto-detect, `VERBATIM`, no vocab) so turns still work.
+
+- **Pick it:** HA → Settings → Voice Assistants → your pipeline → STT engine → `Gemini Transcribe` (opt-in, global per pipeline; no per-device switch). The controller stays provider-agnostic — it only ever sees `POST /api/turns/{id}/transcript {text,is_final}` and gates `stt_latency_ms` on `is_final` (final-only `transcript_mono`).
+
+- **Privacy:** partials terminate at the controller as `DEBUG partial transcript text=` (dropped whole by `em_support._LOG_DROP` `text=` in bundles, never forwarded to the device or `/api/events`). **HA-side never logs transcript text at any level** (`stt.py`/`assist_satellite.py` new code) — there is no HA-side redaction layer to catch it.
+
 ## Full duplex, in this design
 
 "Full duplex" means the audio transport is bidirectional and turn-agnostic:

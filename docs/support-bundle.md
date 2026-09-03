@@ -24,7 +24,7 @@ Excluded, with no option to include them:
 
 | Not included | Why |
 |---|---|
-| **Anything you said** — transcripts, `stt_text`, saved audio | Speech from inside your home. There is no opt-in flag, because a flag is a thing people tick and this one cannot be untickled once the file is public. |
+| **Anything you said** — transcripts (`stt_text`, interim `partial transcript text=`), saved audio | Speech from inside your home, including streaming Gemini partials (`transcript {is_final:false}` → controller `DEBUG partial transcript text=` → whole-line dropped via `text=` in `em_support._LOG_DROP`, never forwarded to the device; HA-side `stt.py`/`assist_satellite.py` partials never logged at any level). There is no opt-in flag, because a flag is a thing people tick and this one cannot be untickled once the file is public. |
 | **Device labels** | You wrote them, and they routinely contain names — "Bedroom - Sam" is a real example. Replaced with `device-1`, `device-2`… |
 | **Network identifiers** — WiFi SSID, BSSID, IP addresses | An SSID is geolocatable from public wardriving databases, so publishing one discloses roughly where you live. |
 | **Credentials** — device tokens, Home Assistant integration keys, password hashes, login sessions | Obvious, but stated so it is checkable. |
@@ -45,11 +45,11 @@ on a regular expression.
 | Firmware version, rollback slot, approval state | Tells us whether a fix is even present on that device. |
 | **Capabilities** (`mic`, `wake_request_v1`, `ambient_light`…) | Decides which Home Assistant entities exist at all. "The light sensor didn't appear" is answered here in one line. |
 | Configuration — thresholds, EQ, LED scenes, wake model | Behaviour, not identity. Keys whose *name* looks credential-shaped are redacted anyway. |
-| Turn metadata — outcome, wake score, stage latencies, underruns | What happened and how long each stage took. No words, just timings and outcomes. |
+| Turn metadata — outcome, wake score, stage latencies (`stt_latency_ms` gated on `is_final`, not first partial), underruns | What happened and how long each stage took. No words, just timings and outcomes. |
 | Hourly metrics per device — CPU, memory, storage, temperature, RSSI, RTT | Trends. Signal strength is included; the network's name is not. |
 | The controller's own CPU (1m/5m/1h), memory, storage and uptime | A device starving for audio can be the host running out of CPU, memory or disk. The three windows separate "busy right now" from "busy earlier", which need different answers. Sizes and counts only, never paths. |
 | Wake counters — near-misses, on-device drops, inference timings | Wake-word behaviour without any audio. |
-| Recent controller log lines, sanitised | What the controller itself was doing — the part that explains most "it did the wrong thing" reports. Quoted text and URLs removed. |
+| Recent controller log lines, sanitised (including `partial transcript text=` at `DEBUG`, whole-line dropped via `text=`; HA-side `stt.py` partials never logged) | What the controller itself was doing — the part that explains most "it did the wrong thing" reports. Quoted text and URLs removed. |
 | Recent per-device log lines, sanitised | What each device reported. Repetitive memory dumps are thinned so they cannot crowd out the rest. |
 
 Roughly the last 24 hours, capped per device.

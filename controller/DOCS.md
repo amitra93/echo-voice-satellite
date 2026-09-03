@@ -22,7 +22,13 @@ receives idle microphone audio and never scores a wake or stop model.
 4. Approve the device in the dashboard once it appears as pending. Generate an
    API key in **Settings → Home Assistant Integration**, install the EchoMuse
    HACS integration, and configure it with this controller URL and key. The
-   integration adds supported approved devices automatically.
+   integration adds supported approved devices automatically. Then in
+   **Home Assistant → Settings → Voice Assistants → your pipeline → STT engine** pick
+   **`Gemini Transcribe`** (`hacs/custom_components/echo_voice_satellite/stt.py`
+   `gemini-3.5-transcribe-live`, streaming partials via `CorrelatedMicStream` +
+   `ContextVar`); configure its `Gemini API key`/`mode`/`vocabulary`/`language codes`
+   in **Devices → EchoMuse → Configure** (requires `google-genai>=2.22.0`; see
+   `docs/design/hacs-stt-plan.md`).
 
 ### The provisioning wizard needs a secure browser context
 

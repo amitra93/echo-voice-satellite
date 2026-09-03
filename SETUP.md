@@ -56,7 +56,7 @@ Device features are negotiated by capability, never version string.
 
 Wake and turn audio use continuous 16 kHz mono PCM frames. The HACS integration
 opens one authenticated per-turn audio WebSocket, receives microphone audio,
-runs Home Assistant Assist, and returns 24 kHz TTS PCM. The controller
+runs Home Assistant Assist **with its own `stt.gemini_transcribe` provider** (`hacs/custom_components/echo_voice_satellite/stt.py` `gemini-3.5-transcribe-live` via `google-genai` Live, one session per turn, `interim_input_transcription` → `transcript {is_final:false}` via `CorrelatedMicStream`+`ContextVar`, `input_transcription` → `SpeechResult`), and returns 24 kHz TTS PCM. The controller
 upsamples that response to 48 kHz mono, applies its output chain, and streams
 it to the device.
 
