@@ -265,6 +265,42 @@ def test_muted_timer_expiry_is_discarded_without_starting_alarm(monkeypatch):
     assert events[-1]["state"] == "idle"
 
 
+def test_dismiss_timer_alarm_endpoint_dismisses_the_ringing_alarm(monkeypatch):
+    em_api._timer_sessions.clear()
+    events = []
+
+    async def push(event):
+        events.append(event)
+
+    monkeypatch.setattr(em_api, "_push_event", push)
+    run(em_api._post_timer_event.__wrapped__(Request(
+        {"event": "finished", "timer_id": "01J", "name": "pizza"},
+        match_info={"id": "controller-dev"},
+    )))
+    events.clear()
+
+    response = run(em_api._post_dismiss_timer_alarm.__wrapped__(Request(
+        match_info={"id": "controller-dev"},
+    )))
+
+    assert json.loads(response.text) == {"device_id": "controller-dev", "dismissed": True}
+    assert events[-1] == {
+        "type": "timer.alarm", "device_id": "controller-dev", "state": "idle",
+        "current": None, "queue": [],
+    }
+
+
+def test_dismiss_timer_alarm_endpoint_is_not_an_error_with_nothing_ringing():
+    em_api._timer_sessions.clear()
+
+    response = run(em_api._post_dismiss_timer_alarm.__wrapped__(Request(
+        match_info={"id": "no-alarm-here"},
+    )))
+
+    assert response.status == 200
+    assert json.loads(response.text) == {"device_id": "no-alarm-here", "dismissed": False}
+
+
 @pytest.mark.parametrize("body", [
     {"event": "unknown", "timer_id": "01J"},
     {"event": "finished"},

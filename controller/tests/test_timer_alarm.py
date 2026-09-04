@@ -1,4 +1,8 @@
 import asyncio
+import inspect
+import time as time_module
+
+import pytest
 
 import em_timer_alarm
 import em_timers
@@ -125,3 +129,57 @@ async def _noop(_device_id):
 
 async def _unused_playback(*_args):
     raise AssertionError("undeliverable alarm must not start playback")
+
+
+def test_em_timer_alarm_never_imports_wall_clock_modules():
+    """Pins the structural property that makes ring timing DST-safe in the
+    first place: em_timer_alarm.py has no `time`/`datetime` import to be
+    tempted to read `time.time()`/`datetime.now()` from at all. Its only
+    clock is `asyncio.get_running_loop().time()` (CLOCK_MONOTONIC), which a
+    system wall-clock adjustment — DST or an NTP correction — never moves.
+    See docs/design/timers-design.md Phase 6's exit criteria and
+    docs/design/timers-implementation-update.md's P2.
+    """
+    source = inspect.getsource(em_timer_alarm)
+    assert "import time" not in source
+    assert "import datetime" not in source
+    assert "from datetime" not in source
+
+
+@pytest.mark.parametrize("jump_seconds", [3600, -3600])
+def test_alarm_ring_duration_is_immune_to_a_wall_clock_dst_jump(monkeypatch, jump_seconds):
+    """max_ring_s=0 means the deadline is already met by the time the very
+    first burst returns, so — absent any wall-clock influence — the alarm
+    dismisses after exactly one burst (the same baseline
+    test_alarm_runner_plays_fifo_alarms_and_announces_each already relies
+    on). Jumping time.time() by a full DST hour, in either direction, mid-
+    ring must not change that: if the safety timeout were ever computed
+    against time.time() instead of the loop's monotonic clock, springing
+    forward would fire it early and falling back would delay it — either
+    would change the burst count observed here.
+    """
+    session = em_timers.AlarmSession()
+    session.apply(_event("pizza"))
+    bursts = 0
+
+    async def playback(_device, _pcm, _cancel):
+        nonlocal bursts
+        bursts += 1
+        real_time = time_module.time
+        monkeypatch.setattr(time_module, "time", lambda: real_time() + jump_seconds)
+
+    monkeypatch.setattr(em_timer_alarm.em_player, "interrupt", _noop)
+    monkeypatch.setattr(em_timer_alarm.em_player, "resume_interrupted", _noop)
+    runner = em_timer_alarm.TimerAlarmRunner(
+        lambda _device_id: "device", playback, max_ring_s=0,
+    )
+    runner._sound_cache = b"pcm"
+
+    async def run():
+        runner.start("device", session)
+        await asyncio.wait_for(runner._tasks["device"], timeout=1)
+
+    asyncio.run(run())
+
+    assert bursts == 1
+    assert session.current is None

@@ -36,6 +36,25 @@ integration talks to the device it manages.
 - `select` — which Assist pipeline this device uses.
 - A passive Bluetooth remote scanner, if the device's `bleProxyEnabled`
   config is on.
+- The satellite registers itself as a native Home Assistant timer device
+  (`HassStartTimer`/`HassPauseTimer`/etc. and Assist API LLM tools all work
+  unmodified), so `set a 10 minute timer` just works. A finished timer rings
+  a continuous chime on the originating Echo with no spoken confirmation in
+  either direction — say `stop`, or tap the action button, to dismiss it. See
+  [`docs/design/timers-design.md`](../docs/design/timers-design.md).
+
+## Timers dashboard card
+
+Add `echo-voice-timers-card` to any Lovelace dashboard to see and manage
+every EchoMuse timer across the fleet — active, paused, and (unlike Home
+Assistant's own timer entities) still visible and dismissable while
+ringing. Backed by `timer_card.py`'s
+`echo_voice_satellite/timers/*` WebSocket commands, not a second `timer.*`
+entity per device. See
+[`docs/design/timers-design.md`](../docs/design/timers-design.md#home-assistant-timer-dashboard)
+for the data contract and
+[`docs/design/timers-implementation-update.md`](../docs/design/timers-implementation-update.md)
+for what's built.
 
 ## Speech-to-text via Gemini 3.5 Transcribe (Live)
 

@@ -92,6 +92,7 @@ class _FakeCoordinator:
 class _FakeHass:
     def __init__(self):
         self.created_tasks = []
+        self.data = {}
 
     def async_create_task(self, coro, name=None):
         task = asyncio.ensure_future(coro)
@@ -172,6 +173,97 @@ def test_all_timer_lifecycle_events_are_forwarded(event_name):
 
     assert client.calls[-1][0:2] == ("timer_event", "A")
     assert client.calls[-1][2]["event"] == event_name
+
+
+def test_delayed_command_timer_events_are_never_forwarded_to_the_controller():
+    """A conversation-command timer ('in 5 minutes turn off the lights') is
+    an HA-native automation, not an audible reminder — see
+    docs/design/timers-design.md's 'Keep delayed-command timers native to
+    Home Assistant' decision. TimerManager still invokes the handler for
+    it, so the filter has to live here, at the point closest to that call.
+    """
+    entity, client, _coord = _make_satellite()
+    timer = type("Timer", (), {
+        "id": "01J", "device_id": "ha-device", "name": None,
+        "created_seconds": 300, "seconds_left": 0, "is_active": False,
+        "conversation_command": "turn off the kitchen lights",
+    })()
+    event = type("Event", (), {"value": "finished"})()
+
+    entity._timer_event(event, timer)
+
+    assert entity.hass.created_tasks == []
+    assert client.calls == []
+
+
+def test_ordinary_timer_events_are_still_forwarded_via_timer_event():
+    async def run():
+        entity, client, _coord = _make_satellite()
+        timer = type("Timer", (), {
+            "id": "01J", "device_id": "ha-device", "name": "pizza",
+            "created_seconds": 600, "seconds_left": 0, "is_active": False,
+            "conversation_command": None,
+        })()
+        event = type("Event", (), {"value": "finished"})()
+
+        entity._timer_event(event, timer)
+        assert len(entity.hass.created_tasks) == 1
+        await asyncio.gather(*entity.hass.created_tasks)
+
+        assert client.calls[-1][0:2] == ("timer_event", "A")
+        assert client.calls[-1][2]["event"] == "finished"
+
+    asyncio.run(run())
+
+
+def test_timer_event_notifies_the_registered_timer_card_hub():
+    """TimerManager has already mutated its own state by the time it calls
+    _timer_event — that call IS the notification — so the card's
+    subscribers should hear about it immediately, not only once the
+    (separately timed) controller forwarding round trip completes."""
+    async def run():
+        from custom_components.echo_voice_satellite.const import DOMAIN
+
+        entity, _client, _coord = _make_satellite()
+        notified = []
+        entity.hass.data[DOMAIN] = {
+            "entry-1": {"timer_card": types.SimpleNamespace(
+                notify_manager_change=lambda: notified.append(True),
+            )},
+        }
+        timer = type("Timer", (), {
+            "id": "01J", "device_id": "ha-device", "name": "pizza",
+            "created_seconds": 600, "seconds_left": 0, "is_active": False,
+            "conversation_command": None,
+        })()
+
+        entity._timer_event(type("Event", (), {"value": "finished"})(), timer)
+        await asyncio.gather(*entity.hass.created_tasks)
+
+        assert notified == [True]
+
+    asyncio.run(run())
+
+
+def test_delayed_command_timer_events_never_notify_the_timer_card_hub_either():
+    from custom_components.echo_voice_satellite.const import DOMAIN
+
+    entity, _client, _coord = _make_satellite()
+    notified = []
+    entity.hass.data[DOMAIN] = {
+        "entry-1": {"timer_card": types.SimpleNamespace(
+            notify_manager_change=lambda: notified.append(True),
+        )},
+    }
+    timer = type("Timer", (), {
+        "id": "01J", "device_id": "ha-device", "name": None,
+        "created_seconds": 300, "seconds_left": 0, "is_active": False,
+        "conversation_command": "turn off the kitchen lights",
+    })()
+
+    entity._timer_event(type("Event", (), {"value": "finished"})(), timer)
+
+    assert notified == []
 
 
 def test_timer_event_forwarding_logs_controller_failure_without_raising(caplog):

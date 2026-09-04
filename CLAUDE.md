@@ -483,6 +483,97 @@ directly rather than the retired race.
   `hacs/.../sensor.py`, gated on `ambient_light`) — lux. A device with no
   sensor reports no reading at all, not 0, because 0 lux is a real reading.
 
+## Timers
+
+Full design: `docs/design/timers-design.md`. Phase-by-phase build status and
+the fixes that followed it: `docs/design/timers-implementation-update.md`.
+Behavioural spec for how a ringing alarm shares the speaker with everything
+else: `docs/audio-states.md` §5.3. Ring animation: `docs/led-ring-states.md`
+§4.6. Test coverage and the manual hardware checklist: `docs/timer-validation.md`.
+
+**Home Assistant owns every timer record; the controller owns nothing but the
+physical alarm.** `HassStartTimer`/`HassCancelTimer`/`HassPauseTimer`/etc. and
+HA's native `TimerManager` are the only timer state that exists — EchoMuse
+never mutates a `TimerInfo`, never overrides an Assist timer intent, and
+never builds a second timer store. `EchoAssistSatellite.async_added_to_hass`
+registers each Echo as an HA timer device
+(`async_register_timer_handler`) and forwards every lifecycle event to the
+controller over `POST /api/devices/{id}/timer-events` — idempotent by
+timer-id+state fingerprint (`em_timers.AlarmSession.apply`), since HA can and
+does redeliver.
+
+**A delayed-command timer (`in five minutes turn off the lights`) must never
+reach the controller.** `TimerInfo.conversation_command` marks these —
+`EchoAssistSatellite._timer_event` checks it and returns before forwarding
+anything, for any event type. This is genuinely enforced at the HACS layer
+and nowhere else: the payload the controller receives never carries
+`conversation_command`, so the controller has no way to make this call
+itself. Forwarding one anyway used to ring the EchoMuse alarm for an
+automation the user never asked to be alerted about — the first bug found
+once the rest of the feature was otherwise complete, and a reminder that
+"forward every lifecycle event" and "forward every event that's actually
+ours" are not the same rule.
+
+**The alarm is a FIFO queue, not a single slot.** `em_timers.AlarmSession`
+holds one `current` ringing timer plus a `queue` of others that finished
+while it rang; dismissing or timing out `current` promotes the next queued
+timer rather than discarding it. Cancelling a still-*running* timer is a
+different HA-owned lifecycle event entirely and never touches this queue.
+
+**Speaker ownership is a lock, not a counter.** The alarm's playback callback
+acquires the *same* `device.speaker_lock` (`asyncio.Lock`) every other
+voice-plane writer does (buffered TTS, streaming TTS, announcements), so a
+second writer blocks on the lock rather than racing a "is anything currently
+playing" flag it could check between two separate operations. An earlier
+`speaker_busy` counter design was replaced before shipping for exactly that
+reason — see `docs/audio-states.md` §5.3 for the full "why a counter isn't
+mutual exclusion" argument. Alarm cancellation is a **separate** per-device
+`asyncio.Event` (`em_timer_alarm.py`), never `Device.cancel_event` — that one
+belongs to voice turns, and dismissing an alarm must never cancel or flush an
+unrelated response.
+
+**No spoken confirmation is ever produced for a timer dismissal, in either
+direction.** The alert itself is a continuous local chime with no
+timer-name announcement — deliberately, so it's audible while the user talks
+over it. Dismissal is equally silent: an action-button tap stops the ring
+immediately and locally, with no Assist turn at all. Speech (with or without
+a wake word) starts an **STT-only** HA pipeline run (`stt_only=True`, ends at
+`PipelineStage.STT` — no intent, no TTS), and only a recognized non-empty
+transcript actually dismisses. A raw RMS-triggered "listen for anything and
+dismiss" version was tried first and discarded: the alarm's own chime tail
+crossed the threshold and dismissed itself, and once that was fixed, plain
+ambient noise still could. Gating on an actual recognized transcript instead
+means a false trigger costs nothing worse than silence — the ring just keeps
+going — rather than either a self-dismissing alarm or an HA voice announcing
+"I've stopped all your timers" for a `stop` nobody said.
+
+**The Lovelace timer card cannot read `TimerManager` alone.**
+`hacs/custom_components/echo_voice_satellite/timer_card.py` is the one place
+that reaches into `TimerManager` internals for ID-addressed card actions
+(pause/resume/change/cancel/start), each exposed as its own WebSocket command
+(`echo_voice_satellite/timers/{list,subscribe,start,pause,resume,change,
+cancel,dismiss}`). The reason it can't just read `TimerManager.timers` is
+that HA's own `FINISHED` event **removes** a timer from `TimerManager` the
+instant it fires — before the controller has even started the physical
+alarm — so a naive card would show nothing for the entire time an alarm is
+actually ringing, which is exactly when a user most wants to see and dismiss
+it from the dashboard. `AlarmPresence` bridges this: the controller's
+`timer.alarm` events (pushed over the existing `/api/events` channel on every
+alarm-state change) carry the still-ringing/queued timer's data including
+its originating device id, and the card merges those in as synthetic
+`ringing`/`queued` rows until the alarm resolves. `dismiss` reaches the
+controller through `POST /api/devices/{id}/timer-alarm/dismiss` — the same
+`dismiss_timer_alarm()` function the button/speech dismissal paths already
+call.
+
+**The alarm's ring/timeout duration is immune to DST by construction, not by
+correction.** `em_timer_alarm.py` has no `time`/`datetime` import at all —
+its only clock is `asyncio.get_running_loop().time()` (`CLOCK_MONOTONIC`),
+which a wall-clock adjustment never moves. `finishes_at` on the timer card's
+active-timer rows is computed fresh from `remaining_seconds` on every
+snapshot rather than stored, for the same reason: nothing here carries a
+wall-clock value across time for a DST transition to skew.
+
 ## Architecture
 
 ### Device → Controller protocol

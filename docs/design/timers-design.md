@@ -450,7 +450,12 @@ finished timer.
 - Muted expiries are discarded locally.
 - A two-minute timeout advances to the next queued finished timer.
 - Delayed-command timers execute through Home Assistant without creating an
-  EchoMuse alarm.
+  EchoMuse alarm. Enforced at the HACS layer
+  (`EchoAssistSatellite._timer_event` drops any event whose
+  `timer.conversation_command` is set, before it ever reaches the
+  controller): the controller's timer-event payload carries no
+  `conversation_command` field, so it has no way to distinguish these on
+  its own and cannot be the enforcement point.
 - An alarm-delivery failure does not wedge the queue.
 - Disconnect and reconnect behavior.
 

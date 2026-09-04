@@ -119,6 +119,24 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
 
     def _timer_event(self, event, timer) -> None:
         """TimerManager invokes handlers synchronously from its event loop."""
+        if timer.conversation_command:
+            # A delayed-command timer ("in five minutes turn off the
+            # lights") is an automation, not an audible reminder — Home
+            # Assistant executes the command itself at expiry. Forwarding
+            # it would ring the EchoMuse alarm for something the user never
+            # asked to be alerted about, and there is nothing to dismiss:
+            # HA never sends this device an intent-visible follow-up.
+            # See docs/design/timers-design.md's "Keep delayed-command
+            # timers native to Home Assistant" decision.
+            return
+        # TimerManager has already mutated its own state by the time it
+        # calls us (this handler IS the notification), so the timer card's
+        # subscribers can be pushed a fresh snapshot immediately — no need
+        # to wait for the controller round trip below.
+        from .timer_card import _hub_for
+        hub = _hub_for(self.hass)
+        if hub is not None:
+            hub.notify_manager_change()
         self.hass.async_create_task(
             self._async_forward_timer_event(event, timer),
             name=f"echo-timer-event-{timer.id}",
@@ -315,8 +333,8 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
             finally:
                 if self._pipeline_task is asyncio.current_task():
                     self._pipeline_task = None
-                if not self._owns_turn(turn_id, token, channel):
-                    return
+            if not self._owns_turn(turn_id, token, channel):
+                return
             if self._tts_task is not None and self._tts_turn_token is token:
                 await asyncio.gather(self._tts_task, return_exceptions=True)
             elif self._owns_turn(turn_id, token, channel):

@@ -162,6 +162,101 @@ def test_async_setup_entry_wires_client_coordinator_and_forwards_platforms(monke
     assert hass.config_entries.forwarded == [(entry, tuple(PLATFORMS))]
 
 
+def test_async_setup_entry_stores_a_timer_card_hub(monkeypatch):
+    from custom_components.echo_voice_satellite.timer_card import TimerCardHub
+
+    _patch_collaborators(monkeypatch)
+    hass = _FakeHass()
+    entry = _FakeEntry()
+
+    asyncio.run(module.async_setup_entry(hass, entry))
+
+    stored = hass.data[DOMAIN][entry.entry_id]
+    assert isinstance(stored["timer_card"], TimerCardHub)
+
+
+def test_async_setup_entry_feeds_timer_alarm_events_to_the_hub_and_ignores_others(monkeypatch):
+    _patch_collaborators(monkeypatch)
+    hass = _FakeHass()
+    entry = _FakeEntry()
+
+    asyncio.run(module.async_setup_entry(hass, entry))
+
+    stored = hass.data[DOMAIN][entry.entry_id]
+    coordinator = stored["coordinator"]
+
+    async def run():
+        await coordinator.emit({"type": "turn.state", "device_id": "A"})
+        assert stored["timer_card"].presence.echomuse_device_for_timer("t1") is None
+
+        await coordinator.emit({
+            "type": "timer.alarm", "device_id": "echomuse-1",
+            "current": {"timer_id": "t1", "ha_device_id": "ha-device"}, "queue": [],
+        })
+        assert stored["timer_card"].presence.echomuse_device_for_timer("t1") == "echomuse-1"
+
+    asyncio.run(run())
+
+
+def test_async_setup_entry_timer_card_hub_resolves_real_ha_accessors(monkeypatch):
+    """The hub's accessors defer their homeassistant imports to call time
+    (see timer_card.py's async_setup_timer_card docstring) — this proves
+    they actually resolve against real-shaped TimerManager/device-registry
+    stand-ins once invoked, not just that construction doesn't crash."""
+    import sys
+    import types as types_mod
+
+    _patch_collaborators(monkeypatch)
+    hass = _FakeHass()
+    entry = _FakeEntry()
+
+    class FakeTimer:
+        id = "t1"
+        name = "pizza"
+        device_id = "ha-device-1"
+        created_seconds = 60
+        seconds_left = 42
+        is_active = True
+        area_name = None
+        conversation_command = None
+
+    class FakeManager:
+        timers = {"t1": FakeTimer()}
+
+    intent_mod = types_mod.ModuleType("homeassistant.components.intent")
+    intent_mod.TIMER_DATA = "intent_timers"
+    monkeypatch.setitem(sys.modules, "homeassistant.components.intent", intent_mod)
+
+    class FakeDeviceEntry:
+        id = "ha-device-1"
+        name_by_user = None
+        name = "Kitchen Echo"
+
+    class FakeRegistry:
+        def async_get(self, device_id):
+            return FakeDeviceEntry() if device_id == "ha-device-1" else None
+
+    device_registry_mod = types_mod.ModuleType("homeassistant.helpers.device_registry")
+    device_registry_mod.async_get = lambda hass: FakeRegistry()
+    device_registry_mod.async_entries_for_config_entry = lambda registry, entry_id: [FakeDeviceEntry()]
+    monkeypatch.setitem(sys.modules, "homeassistant.helpers.device_registry", device_registry_mod)
+
+    asyncio.run(module.async_setup_entry(hass, entry))
+    hass.data["intent_timers"] = FakeManager()
+
+    hub = hass.data[DOMAIN][entry.entry_id]["timer_card"]
+    snapshot = hub.snapshot()
+
+    assert snapshot["timers"] == [{
+        "id": "t1", "device_id": "ha-device-1", "device_name": "Kitchen Echo",
+        "name": "pizza", "state": "active", "duration_seconds": 60,
+        "remaining_seconds": 42,
+        "finishes_at": snapshot["timers"][0]["finishes_at"],
+        "area_name": None,
+    }]
+    assert snapshot["devices"] == [{"device_id": "ha-device-1", "device_name": "Kitchen Echo"}]
+
+
 def test_async_setup_entry_closes_client_and_reraises_on_connect_failure(monkeypatch):
     _patch_collaborators(monkeypatch, connect_error=RuntimeError("no controller"))
     hass = _FakeHass()

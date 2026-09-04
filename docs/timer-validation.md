@@ -9,10 +9,14 @@ cd controller && python -m pytest tests/
 cd ../hacs && python -m pytest tests/
 ```
 
-The suites cover timer lifecycle forwarding, FIFO alarm queues, duplicate
-events, speaker serialization, music interruption/resume, mute/disconnect
-handling, LED state, action-button dismissal, STT-only timer dismissal, and
-the HACS timer-card transport.
+The suites cover timer lifecycle forwarding (including that a delayed-command
+timer is never forwarded at all), FIFO alarm queues, duplicate events,
+speaker serialization, music interruption/resume, mute/disconnect handling,
+LED state, action-button dismissal, STT-only timer dismissal, the timer
+card's full WebSocket command set and ringing/queued presentation bridge
+(`hacs/tests/test_timer_manager.py`, `test_timer_card_hub.py`,
+`test_timer_card.py`), and the alarm's ring/safety-timeout duration being
+immune to a wall-clock (DST) jump (`controller/tests/test_timer_alarm.py`).
 
 ## Hardware Acceptance
 
@@ -35,8 +39,15 @@ each result with the controller and firmware version used.
   and subsequent timers can ring.
 - Test local Assist and the selected LLM pipeline for named timers, duplicate
   names, ordinal references, pause/resume, adjustment, and `cancel all`.
-- Check a DST boundary in the selected timezone. Home Assistant owns expiry;
-  EchoMuse only uses monotonic time for alarm timeout.
+- Test the Lovelace card: creation form (with and without a `device_id`
+  filter configured), pause/resume, +1m/-1m, cancel, and — while a timer is
+  ringing — that it stays visible as "Ringing" and Dismiss actually stops
+  the physical alarm.
+- Check a DST boundary in the selected timezone, letting a real timer expire
+  across it. This is Home Assistant's own `TimerManager` expiry, which
+  EchoMuse does not control; the alarm's own ring/timeout duration on the
+  EchoMuse side is covered by an automated wall-clock-jump test and does not
+  need re-checking here (see Automated Coverage).
 
 ## Known Limitation
 

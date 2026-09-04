@@ -472,6 +472,10 @@ async def create_app() -> web.Application:
         "/api/devices/{id}/timer-events",
         auth.require_integration_or_admin(_post_timer_event),
     )
+    app.router.add_post(
+        "/api/devices/{id}/timer-alarm/dismiss",
+        auth.require_integration_or_admin(_post_dismiss_timer_alarm),
+    )
     app.router.add_post("/api/devices/{id}/test_audio",   _post_test_audio)
     app.router.add_post("/api/devices/{id}/test_turn",    _post_test_turn)
     app.router.add_delete("/api/devices/{id}/test_audio", _delete_test_audio)
@@ -1270,6 +1274,25 @@ async def _post_timer_event(request: web.Request) -> web.Response:
                 _timer_alarm_runner.start(device_id, session)
     log.info("[%s] Timer %s: %s", device_id, timer_id, event)
     return _ok({"accepted": True, "duplicate": False, "timer_id": timer_id})
+
+
+@auth.require_integration_or_admin
+async def _post_dismiss_timer_alarm(request: web.Request) -> web.Response:
+    """
+    POST /api/devices/{id}/timer-alarm/dismiss
+
+    Lets the EchoMuse Lovelace timer card dismiss a ringing alarm remotely,
+    the same effect as a spoken "stop" or an action-button tap on the
+    device itself (`dismiss_timer_alarm` below is the one function all
+    three paths already share). Dismissing a device with nothing currently
+    ringing is not an error — the card only offers this control once it
+    has already been told the alarm is ringing, and a `finished` event and
+    the resulting confirmation race by design; the response says whether
+    anything was actually dismissed rather than asserting it always was.
+    """
+    device_id = request.match_info["id"]
+    dismissed = await dismiss_timer_alarm(device_id)
+    return _ok({"device_id": device_id, "dismissed": dismissed})
 
 
 @auth.require_admin

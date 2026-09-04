@@ -22,69 +22,18 @@ from .const import CONF_API_KEY, CONF_URL, DOMAIN, PLATFORMS
 _LOGGER = logging.getLogger(__name__)
 
 
-def _timer_snapshot(manager) -> list[dict]:
-    """Return the native Assist timers visible to the EchoMuse card."""
-    timers = []
-    for timer in manager.timers.values():
-        if timer.conversation_command:
-            continue
-        timers.append({
-            "id": timer.id,
-            "name": timer.name,
-            "seconds": timer.created_seconds,
-            "seconds_left": timer.seconds_left,
-            "is_active": timer.is_active,
-            "device_id": timer.device_id,
-            "area_name": timer.area_name,
-        })
-    return timers
-
-
-def _timer_action(manager, action: str, timer_id: str) -> bool:
-    """Apply one supported card action to Home Assistant's TimerManager."""
-    if action == "pause":
-        manager.pause_timer(timer_id)
-    elif action == "resume":
-        manager.unpause_timer(timer_id)
-    elif action == "cancel":
-        manager.cancel_timer(timer_id)
-    elif action == "finish":
-        manager._timer_finished(timer_id)
-    else:
-        return False
-    return True
-
-
 async def async_setup(hass, config: dict) -> bool:
+    hass.data.setdefault(DOMAIN, {})
+    from .timer_card import async_register_websocket_commands
+
     try:
-        from homeassistant.components import websocket_api
-        from homeassistant.components.intent import TIMER_DATA
+        async_register_websocket_commands(hass)
     except ImportError:
         # Keep the pure package setup usable by tooling that imports the
-        # integration without Home Assistant's optional websocket modules.
-        hass.data.setdefault(DOMAIN, {})
-        return True
-
-    hass.data.setdefault(DOMAIN, {})
-
-    @websocket_api.websocket_command({"type": "echo_voice_satellite/timers"})
-    @websocket_api.async_response
-    async def _ws_timers(hass, connection, msg):
-        manager = hass.data.get(TIMER_DATA)
-        if manager is None:
-            connection.send_result(msg["id"], {"timers": []})
-            return
-
-        action = msg.get("action")
-        timer_id = msg.get("timer_id")
-        if action and timer_id:
-            if not _timer_action(manager, action, timer_id):
-                connection.send_error(msg["id"], "invalid_action", "Unknown timer action")
-                return
-
-        connection.send_result(msg["id"], {"timers": _timer_snapshot(manager)})
-
-    websocket_api.async_register_command(hass, _ws_timers)
+        # integration without Home Assistant's optional websocket module —
+        # timer_card.py itself has no top-level homeassistant import, only
+        # this call's deferred one.
+        pass
     return True
 
 
@@ -190,6 +139,7 @@ async def async_setup_entry(hass, entry) -> bool:
     from .ble_scanner import register_scanner
     from .client import ControllerClient
     from .coordinator import EchoVoiceSatelliteCoordinator
+    from .timer_card import async_setup_timer_card
 
     _remove_stale_button_entities(hass, entry)
     _remove_stale_volume_number_entities(hass, entry)
@@ -200,6 +150,7 @@ async def async_setup_entry(hass, entry) -> bool:
 
     client = ControllerClient(entry.data[CONF_URL], entry.data[CONF_API_KEY])
     coordinator = EchoVoiceSatelliteCoordinator(hass, client, entry)
+    timer_card_hub = async_setup_timer_card(hass, entry, client)
     ble_scanners: dict[str, tuple] = {}
 
     def _sync_ble_scanners() -> None:
@@ -221,6 +172,10 @@ async def async_setup_entry(hass, entry) -> bool:
             except (KeyError, ValueError):
                 _LOGGER.debug("Dropped malformed BLE advert from %s", event.get("device_id"))
 
+    async def _on_timer_alarm(event: dict) -> None:
+        if event.get("type") == "timer.alarm":
+            timer_card_hub.notify_alarm_event(event)
+
     try:
         await coordinator.async_config_entry_first_refresh()
         await coordinator.async_connect_control()
@@ -231,9 +186,11 @@ async def async_setup_entry(hass, entry) -> bool:
     _sync_ble_scanners()
     coordinator.async_add_listener(_sync_ble_scanners)
     coordinator.async_add_event_listener(_on_event)
+    coordinator.async_add_event_listener(_on_timer_alarm)
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "client": client, "coordinator": coordinator, "ble_scanners": ble_scanners,
+        "timer_card": timer_card_hub,
     }
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True

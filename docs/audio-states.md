@@ -4,8 +4,10 @@ Who owns the speaker, what is on the wire, and what happens when two things
 want it at once.
 
 This exists for the same reason `led-ring-states.md` does. Four things can now
-put audio on a device — a voice response, music, an HA announcement, and (with
-#167) a timer alarm — and each was added on its own, correct in isolation. The
+put audio on a device — a voice response, music, an HA announcement, and a
+timer alarm (see `docs/design/timers-design.md` and
+`docs/design/timers-implementation-update.md` for the timer alarm's own
+design/status) — and each was added on its own, correct in isolation. The
 interactions between them are where the open bugs live: #261 (the duck lifting
 mid-response), #262 (music deferred until a turn ends), #243 (whether the
 output chain belongs device-side at all).
@@ -48,7 +50,7 @@ underneath on its own plane and is ducked rather than displaced.
 |---|---|---|---|---|
 | 1 | Voice turn (wake word or button) | voice | `em_player.interrupt()` — **unconditional**, even with nothing playing | `resume_interrupted()` at turn end |
 | 2 | HA announcement | voice | same `interrupt()` path | announcement playback completes |
-| 3 | Timer alarm ring | voice | `start_timer_alarm()`, bursts gated on `speaker_busy` | dismissal (button / spoken / CANCELLED) or `MAX_RING_S` = 120s | **[proposed #167]** |
+| 3 | Timer alarm ring | voice | `em_timer_alarm.TimerAlarmRunner.start()`, bursts serialized through `device.speaker_lock` (an `asyncio.Lock`, not a counter) | dismissal (action-button tap, an STT-gated `stop` turn, or a wake word — none of which create an Assist response) or `MAX_RING_S` = 120s | **[today]** |
 | 4 | Media / music | music | `em_player.play()` | `stop()` / `pause()` / device gone |
 
 **Ownership is taken unconditionally, and that is deliberate** — not an
@@ -129,26 +131,46 @@ released it" want opposite investigations.
 | F2 | user stops/pauses music, no `audio_mix` | `speaker_flush` | music is on the voice plane there | [today] |
 | F3 | barge-in during a response | `speaker_flush` | cuts the buffered response; the rest is usually still in TCP, so the device discards until it sees the stream's `0x03` | [today] |
 | F4 | voice turn starts over music | **neither** | flushing would discard the buffered audio that makes ducking instant, and on a non-seekable stream it is gone for good | [today] |
-| F5 | alarm dismissed | `speaker_flush` | otherwise the ring plays out of ~5.5s of device buffer | **[proposed #167]** |
+| F5 | alarm dismissed | `speaker_flush` | otherwise the ring plays out of ~5.5s of device buffer | [today] |
 
 The gate for F1/F2 is `em_player.py:481`. **A voice turn must never send
 `music_flush`** — the device's own handler says so (`control.go:520`) and it is
 the whole reason the second plane exists.
 
-### 5.3 Timer alarm **[proposed — #167]**
+### 5.3 Timer alarm **[today]**
+
+Full design and phase-by-phase implementation status:
+`docs/design/timers-design.md`, `docs/design/timers-implementation-update.md`.
 
 | # | Precondition | Action | Status |
 |---|---|---|---|
-| T1 | HA sends `TIMER_FINISHED` | ring starts: looped bursts + amber LED pulse if `led_anim_capable` | [proposed] |
-| T2 | a turn or announcement is playing | burst held off while `device.speaker_busy` is non-zero | [proposed] |
-| T3 | wake word heard over the ring | alert ducked by `DUCK_DB` for `DUCK_HOLD_S` = 12s so the command reaches STT | [proposed] |
-| T4 | dismissal (button, transcript, or `CANCELLED`) | ring stops, `speaker_flush` | [proposed] |
-| T5 | nobody answers | stops at `MAX_RING_S` = 120s | [proposed] |
+| T1 | HA sends a `finished` timer event | `em_timer_alarm.TimerAlarmRunner` starts (only if no alarm is already running for the device): interrupts music, loops chime bursts on `0x02`/`0x03`, and pulses the ring amber (`timer_anim`) if `led_anim_capable` | [today] |
+| T2 | a turn or announcement is already playing | held off structurally, not by a checked flag — the alarm's own playback callback acquires the **same** `device.speaker_lock` every other voice-plane writer does, so it simply waits its turn on the lock | [today] |
+| T3 | speech (with or without a wake word) heard over the ring | the mic stays live for the whole ring with no wake word required; RMS crossing a threshold (only checked during the gap between bursts, after `ALARM_LISTEN_SETTLE_S` past the last chime) starts an **STT-only** HA pipeline run (`stt_only=True`, ends at `PipelineStage.STT`) — no intent, no TTS, so a false trigger produces no spoken response | [today] |
+| T4 | dismissal — action-button tap (immediate, local), or the STT-only turn from T3 returning a non-empty transcript | ring stops, `speaker_flush`, `resume_interrupted()`, FIFO queue advances to the next finished timer if one is queued | [today] |
+| T5 | nobody answers | stops at `MAX_RING_S` = 120s and advances the queue the same as T4 | [today] |
 
-`speaker_busy` is a counter rather than a flag because an announcement can
-overlap a turn's playback, and it is held in a `try/finally` because a
-cancelled turn that leaked it would block every future ring for the life of the
-process.
+**There is no `speaker_busy` counter.** The prior design here used one, and it
+was replaced before shipping for the reason `docs/design/timers-design.md`'s
+"Speaker Ownership" section gives: a counter detects activity, it is not
+mutual exclusion — a response can begin after checking the counter and before
+it starts writing PCM, which permits two writers on `0x02` at once. The
+per-device `device.speaker_lock` (`asyncio.Lock`) that replaced it is held for
+the actual duration of every writer — buffered TTS, streaming TTS, an
+announcement, and the alarm's own bursts — so a second writer blocks on the
+lock rather than racing the first. Alarm cancellation additionally uses its
+own `asyncio.Event` per device (`em_timer_alarm.py`), never
+`Device.cancel_event`, because that event belongs to voice turns and
+dismissing an alarm must never cancel or flush an unrelated response.
+
+**No confirmation TTS is ever produced.** T3's mechanism is deliberately
+narrower than "duck the alert so a normal wake-triggered command gets
+through" — that would still let a false trigger (the chime's own tail, a TV,
+a nearby conversation) run a full Assist turn and speak an unsolicited
+response. Gating dismissal on a recognized non-empty transcript from an
+STT-only pipeline run, instead, means a false trigger produces silence at
+worst — the ring just keeps going — and HA never says "I've stopped all your
+timers" for a `stop` that was never actually said.
 
 ---
 
@@ -177,5 +199,12 @@ process.
 2. **A voice turn never flushes the music plane** (F4 above).
 3. **The mixer saturates, never wraps** (`mix_test.go:149` pins this).
 4. **Playback completion comes from the device**, not from a duration estimate.
-5. **`speaker_busy` is released in a `finally`.** [proposed #167]
+5. **`device.speaker_lock` is released in a `finally`**, for every writer that
+   acquires it, including the timer alarm — a cancelled or crashed holder
+   that leaked the lock would block every future writer, including every
+   later alarm, for the life of the process. [today]
 6. **Frame types are direction-scoped.** `0x04`/`0x05` are not free to reuse.
+7. **A timer alarm's dismissal path must never itself produce a spoken
+   response.** Its speech detector runs an STT-only pipeline stage
+   specifically so a false trigger stays silent instead of running a normal
+   Assist turn against whatever noise was actually heard.

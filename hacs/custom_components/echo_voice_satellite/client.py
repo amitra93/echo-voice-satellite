@@ -111,6 +111,12 @@ class ControllerClient:
         """Forward one Home Assistant timer lifecycle event."""
         return await self._post(f"/api/devices/{device_id}/timer-events", event)
 
+    async def async_dismiss_timer_alarm(self, device_id: str) -> dict[str, Any]:
+        """Dismiss a currently-ringing timer alarm from the EchoMuse timer
+        card — the same effect as a spoken "stop" or an action-button tap
+        on the device itself."""
+        return await self._post(f"/api/devices/{device_id}/timer-alarm/dismiss", {})
+
     async def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
         session = await self._ensure_session()
         try:

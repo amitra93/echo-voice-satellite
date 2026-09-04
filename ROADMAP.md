@@ -47,14 +47,42 @@ extend the existing HA-requested continuation flow.
 
 **Goal:** Match a basic smart-speaker feature users expect without requiring a new wake word.
 
-- Detect a configurable stop word during TTS, announcements, music, and timer ringing.
-- Stop output locally and notify Home Assistant without starting a new turn.
-- Add timer start, update, pause, resume, cancel, and finished events.
-- Persist timers through short controller or Home Assistant disconnects where practical.
-- Add timer LED feedback and a configurable maximum ring duration.
-- Make `stop` work while the device is muted without weakening mute privacy.
+**Native timers are done.** See `docs/design/timers-design.md` and
+`docs/design/timers-implementation-update.md` for the full design and
+phase-by-phase build status; `docs/timer-validation.md` for test coverage
+and the hardware acceptance checklist.
 
-**Relevant code:** `controller/em_turn_engine.py`, `controller/em_player.py`, `device/internal/wakeword/`, `hacs/custom_components/echo_voice_satellite/`
+- ~~Add timer start, update, pause, resume, cancel, and finished events.~~
+  Done — Home Assistant's native `TimerManager`/Assist timer intents are the
+  only timer state; the controller forwards lifecycle events and owns only
+  the physical alarm.
+- ~~Add timer LED feedback and a configurable maximum ring duration.~~ Done —
+  amber pulse while ringing, `MAX_RING_S` = 120s.
+- ~~Make `stop` work while the device is muted without weakening mute
+  privacy.~~ Resolved differently than proposed: a muted device discards a
+  `finished` expiry entirely (no chime, no ring at all), so there is no
+  ringing alarm to stop while muted in the first place.
+- **Persisting timers through disconnects was decided against, not
+  built.** An expiry that cannot reach an offline Echo or controller is
+  discarded locally and never replayed on reconnect — Home Assistant remains
+  the single source of truth for timer state, deliberately, rather than
+  EchoMuse maintaining a second one that could disagree with it.
+- **The generic local stop word remains open.** What shipped is narrower and
+  timer-specific: an STT-only HA pipeline run gated on a recognized
+  transcript, not a wake-free local classifier usable during TTS,
+  announcements, or music generally. A configurable stop word covering all
+  four (TTS, announcements, music, and timer ringing) via a local classifier
+  is still a real gap. One considered direction specifically for timers: a
+  small local streaming recognizer (e.g. Vosk/sherpa-onnx) running
+  controller-side only while a timer alarm is ringing, so dismissal would
+  not need a full HA STT round trip at all — not pursued, since the
+  STT-gated approach already meets the "no unsolicited response" requirement
+  and adds no new inference dependency. See item 7 ("Add Fast Local
+  Commands") below for the wider version covering ordinary playback.
+
+**Relevant code:** `controller/em_timers.py`, `controller/em_timer_alarm.py`,
+`controller/em_turn_engine.py`, `controller/em_player.py`,
+`hacs/custom_components/echo_voice_satellite/`
 
 ### 4. Support Multiple Wake Words With Backend Routing
 

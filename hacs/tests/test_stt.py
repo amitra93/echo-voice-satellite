@@ -913,3 +913,4 @@ def test_correlated_stream_exhaust_raises_stop():
         assert out2 == []
 
     asyncio.run(run())
+

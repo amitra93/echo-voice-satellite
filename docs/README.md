@@ -20,6 +20,10 @@ Deeper technical references live elsewhere:
   and connect it to the controller with an API key.
 - [support-bundle.md](support-bundle.md) — what a support bundle contains,
   what it deliberately excludes, and how to check before you share one.
+- [timer-validation.md](timer-validation.md) — timer feature test coverage:
+  what the automated suites verify (including that the alarm's ring/timeout
+  duration is immune to a DST clock jump) and the hardware acceptance
+  checklist for what they cannot.
 - [rooting.md](rooting.md) — what a device needs before EchoMuse can use it.
   The exploit itself is R0rt1z2's work on XDA Forums and that thread is canon;
   this covers where EchoMuse picks up, and what the wizard does for you.

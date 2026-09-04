@@ -84,6 +84,14 @@ paints the *latest* frame, and the next tick (≤80ms) resumes normally.
 Replacement is atomic via a generation counter — a stale animation goroutine
 can never paint over its successor (`animator.go:45-48`).
 
+**The timer alarm is layer 4, not a new layer.** It sends an ordinary
+`led_anim` (`pattern: pulse`, amber, `ttlSec` 135) the same way listening,
+thinking, and playing do, and is subject to the same suppression, generation
+counter, and dead-man TTL as any other animation — no new arbitration rule
+was needed to add it. See §4.6 and `docs/audio-states.md` §5.3 for its full
+behaviour, and `docs/design/timers-design.md`/
+`docs/design/timers-implementation-update.md` for the design and status.
+
 ---
 
 ## 3. Link availability — three states, not two
@@ -233,6 +241,18 @@ Mute is the reference implementation of principle 5, and its behaviour is
 | L5 | Link silently dead | any | Detected on the next interaction (§3) or by inbound-freshness timeout | [proposed] |
 | L6 | **Speaker stream ends** (EOS received *and* audio channel empty) | PLAYING | **Controller estimates this from wall-clock and clears the ring early on slow links** — measured up to 6.1s premature | [today] |
 | L7 | Speaker stream ends | PLAYING | Device clears / hands back the ring itself, from the signal it already logs (`pcm_speaker.go:309`) | [proposed] |
+
+### 4.6 Timer alarm ring
+
+Rides layer 4 (`led_anim`, `pattern: pulse`) — see the note under §2. Full
+behaviour: `docs/audio-states.md` §5.3.
+
+| # | Event | Ring outcome | Status |
+|---|---|---|---|
+| T1 | HA sends a `finished` timer event and no alarm is already ringing for the device | Amber pulse (`timer_anim`, `ttlSec` 135) starts; suppressed the same as any other animation while MUTED or VOL-DISPLAY | [today] |
+| T2 | Dismissal — action-button tap, or a recognized `stop` from the ring's STT-only speech detector | `leds_off` | [today] |
+| T3 | `MAX_RING_S` (120s) elapses unanswered | `leds_off`, queue advances to the next finished timer, which repeats T1 | [today] |
+| T4 | Controller dies mid-ring | `ttlSec` dead-man clears the pulse — the same protection every other animation has, nothing timer-specific | [today] |
 
 ---
 

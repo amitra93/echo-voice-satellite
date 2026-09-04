@@ -1469,3 +1469,94 @@ are **append-only and in ascending date order** — new work goes at the end.
   controls. Output protection and level handling are fixed in the production
   path, and microphone processing remains owned by the Amazon AFE. The
   current-facing documentation now lists only supported controls.
+
+- 2026-09-03 (**native timers, all six phases, and three bugs found by
+  actually using them**): `docs/design/timers-design.md` shipped end to end —
+  Home Assistant's own `TimerManager`/Assist intents remain the only timer
+  record that exists, the controller owns nothing but the physical alarm
+  (queue, playback, LEDs, local dismissal), and the HACS integration bridges
+  the two. See `docs/design/timers-implementation-update.md` for the
+  phase-by-phase build status this entry summarizes.
+
+  **The alert design changed twice after the first version worked.** It
+  originally spoke the timer's name over the chime and dismissed on a plain
+  wake word. Both were dropped: no spoken confirmation at all — the alert is
+  a continuous local chime, audible while the user talks over it, because a
+  synthesized name added latency and a second TTS surface for no benefit the
+  chime didn't already provide. And wake-only dismissal became "listen for
+  any speech, wake word or not, over the ring" — until testing it live
+  surfaced why that was still wrong twice more.
+
+  **First bug, found by ringing an actual timer: the chime dismissed
+  itself.** RMS-triggered speech detection ran continuously, including while
+  the chime was on the speaker, and the chime's own audio crossed the
+  threshold. Fixed by gating capture on `not device.speaking` — obvious in
+  hindsight, invisible until something actually rang.
+
+  **Second bug, same mechanism, one layer deeper: the chime's *tail* still
+  dismissed it**, ~400ms after `device.speaking` cleared, because the
+  speaker's own physical decay was still audible over the mic when the next
+  capture window opened. `ALARM_LISTEN_SETTLE_S` (400ms, deliberately less
+  than the 750ms inter-burst gap) added a post-chime settle before capture
+  re-arms — this is the kind of gap a design doc can't catch, because it
+  only exists once real hardware is actually ringing and actually listening
+  to itself.
+
+  **Third, and the one that changed the mechanism rather than just tuning
+  it: dismissing on raw RMS worked, but Home Assistant then answered "I've
+  stopped all your timers" out loud** — because the captured audio still
+  ran through a normal Assist turn once speech was detected, and Assist
+  always replies to something. The fix was structural, not a timing
+  constant: route the captured audio through an **STT-only** HA pipeline
+  run (`stt_only=True`, ends at `PipelineStage.STT`, no intent, no TTS) and
+  gate dismissal on a **recognized non-empty transcript**, not on RMS
+  crossing a threshold at all. A false trigger now costs silence — the ring
+  keeps going — instead of either a self-dismissed alarm or an unsolicited
+  spoken reply. Wake-triggered dismissal was folded into the same path,
+  since a wake word during a ring is just another way to start it.
+
+  **Speaker ownership was rebuilt from a counter to a lock before any of
+  this shipped**, for a reason the design doc states plainly and is worth
+  repeating: a counter detects activity, it is not mutual exclusion. A
+  response can begin after checking a counter and before it starts writing
+  PCM — two writers on the same wire. `device.speaker_lock`, held for the
+  actual duration of every writer (buffered TTS, streaming TTS,
+  announcements, and now the alarm), closes that window structurally
+  instead of narrowing it.
+
+  **The Lovelace timer card had to be rebuilt once, for a reason a design
+  review missed and only using the finished feature caught.** The first
+  version read `TimerManager.timers` directly and worked for active/paused
+  timers — and showed nothing at all for a ringing one, because Home
+  Assistant's own `FINISHED` event removes a timer from `TimerManager` the
+  instant it fires, before the controller has even started the physical
+  alarm. The chime would be audible, the LED would be pulsing amber, and the
+  dashboard card would show an empty list. `AlarmPresence`
+  (`hacs/.../timer_card.py`) bridges it: the controller already pushed
+  `timer.alarm` events over the existing `/api/events` channel for exactly
+  this reason, and nothing in HACS was listening for them. The rebuild also
+  replaced one WebSocket command overloaded with an `action` field with the
+  eight the design actually specified, added the `finishes_at`/`device_name`/
+  `state` fields the data contract calls for, and found `TimerManager`'s
+  real `add_time`/`remove_time` methods by reading its source rather than
+  guessing from a `dir()` probe, which had missed them.
+
+  **A quieter, easily-missed bug closed the loop on the whole feature: a
+  delayed-command timer (`in five minutes turn off the lights`) rang the
+  EchoMuse alarm.** The design was explicit that it must not — that command
+  is Home Assistant's own responsibility to execute at expiry, not an
+  audible reminder — but the HACS forwarder had no check for
+  `TimerInfo.conversation_command` and sent every lifecycle event
+  regardless. The fix is one early return in `_timer_event`, and it is
+  enforceable nowhere else: the payload the controller receives never
+  carries that field, so the controller structurally cannot make this call
+  for itself.
+
+  **Last piece: proving the alarm's own two-minute safety timeout survives a
+  DST transition, without waiting for one.** `em_timer_alarm.py` has no
+  `time`/`datetime` import at all — its only clock is
+  `asyncio.get_running_loop().time()` — so the test that matters is not "does
+  it handle a DST jump correctly" but "does jumping wall-clock time by an
+  hour, in either direction, mid-ring change anything about the observed
+  burst count." It doesn't, and now there's a test pinning that it never
+  will without someone noticing.
