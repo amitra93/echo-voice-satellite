@@ -118,6 +118,10 @@ DEFAULT_DEVICE_CONFIG = {
     # stopCaptureSec sets the pre-roll length per clip.
     "saveStopCaptures": False,
     "stopCaptureSec":   2.0,
+    # stopNearMissFloor: minimum stop-model score to register as a near-miss
+    # (stop_miss captures). Mirrors wakeNearMissFloor for the same reason —
+    # below this is background noise, not a near-attempt at the stop word.
+    "stopNearMissFloor": 0.05,
     # Multi-device wake SUPPRESSION window (ms), not a wait. The first
     # device to detect answers immediately; any other device detecting
     # within this window stands down. 0 disables. Costs no latency to

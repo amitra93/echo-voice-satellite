@@ -351,6 +351,18 @@ func main() {
 			shadow.ClassifierMD5(snap.OwwModel),
 		)
 		applyStopConfig(dataClient)
+		dataClient.ConfigureStopCaptures(
+			snap.SaveStopCaptures != nil && *snap.SaveStopCaptures,
+			snap.StopCaptureSec,
+			func() float64 {
+				if snap.StopNearMissFloor != nil {
+					return *snap.StopNearMissFloor
+				}
+				return 0.05
+			}(),
+			snap.StopModel,
+			shadow.ClassifierMD5(snap.StopModel),
+		)
 		reportStopStatus(dataClient, controlClient)
 		if msg.SendspinServer != "" {
 			sendspinManager.Configure(msg.SendspinServer)
@@ -1031,7 +1043,7 @@ func applyWakeConfig(dc *client.DataClient, cc *client.ControlClient,
 			onWakeCrossing(dc, cc, srv, score, crossed, at, sequence)
 		}, snap.StopModel, float32(snap.StopThreshold), dc.StopArmed, func(score, crossed float32, at time.Time, _ uint16) {
 			dc.HandleStopCrossing(score, crossed, at)
-		})
+		}, dc.ObserveStopScore)
 	} else {
 		sc, err = shadow.Open(model, threshold, func(score, crossed float32, at time.Time, sequence uint16) {
 			onWakeCrossing(dc, cc, srv, score, crossed, at, sequence)

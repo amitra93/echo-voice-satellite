@@ -38,7 +38,8 @@ SECTIONS: dict[str, dict] = {
     },
     "stopword": {
         "label": "Stop word",
-        "keys": ["stopModel", "stopThreshold", "saveStopCaptures", "stopCaptureSec"],
+        "keys": ["stopModel", "stopThreshold", "saveStopCaptures", "stopCaptureSec",
+                 "stopNearMissFloor"],
     },
     "microphones": {
         "label": "Microphones",

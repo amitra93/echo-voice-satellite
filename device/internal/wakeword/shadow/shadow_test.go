@@ -455,6 +455,71 @@ func TestExtraHeadSharesFeaturePipelineAndRunsOnlyWhenEnabled(t *testing.T) {
 	}
 }
 
+func TestHeadOnScoreFiresEveryEnabledFrameWithCrossedFlag(t *testing.T) {
+	inf := &fakeInferer{score: 0.9}
+	head := &fixedClassifier{score: 0.1}
+	var enabled atomic.Bool
+	enabled.Store(true)
+
+	var mu sync.Mutex
+	var events []ScoreEvent
+	var crossings int
+	s := NewScorerWithHeads(inf, 0.9, nil, Head{
+		Classifier: head,
+		Threshold:  0.5,
+		Enabled:    enabled.Load,
+		OnCross: func(score, threshold float32, at time.Time, sequence uint16) {
+			mu.Lock()
+			crossings++
+			mu.Unlock()
+		},
+		OnScore: func(e ScoreEvent) {
+			mu.Lock()
+			events = append(events, e)
+			mu.Unlock()
+		},
+	})
+	defer s.Close()
+
+	pushAll(t, s, wakeword.FeatWindow)
+	mu.Lock()
+	events = nil
+	mu.Unlock()
+
+	// Below threshold: OnScore fires, Crossed is false, OnCross does not.
+	head.score = 0.1
+	pushAll(t, s, 1)
+	mu.Lock()
+	if len(events) != 1 || events[0].Crossed || events[0].Score != 0.1 {
+		t.Fatalf("below-threshold event = %#v", events)
+	}
+	if crossings != 0 {
+		t.Fatalf("OnCross fired below threshold: %d", crossings)
+	}
+	mu.Unlock()
+
+	// Above threshold: OnScore reports Crossed true, and OnCross also fires.
+	head.score = 0.8
+	pushAll(t, s, 1)
+	mu.Lock()
+	if len(events) != 2 || !events[1].Crossed || events[1].Score != 0.8 {
+		t.Fatalf("crossing event = %#v", events)
+	}
+	if crossings != 1 {
+		t.Fatalf("OnCross did not fire on crossing: %d", crossings)
+	}
+	mu.Unlock()
+
+	// Disabled: neither callback fires, same as before OnScore existed.
+	enabled.Store(false)
+	pushAll(t, s, 1)
+	mu.Lock()
+	if len(events) != 2 {
+		t.Fatalf("OnScore fired while head disabled: %#v", events)
+	}
+	mu.Unlock()
+}
+
 // processed and peek let tests observe the scorer without racing on state the
 // scorer goroutine owns, and without consuming the counters the way Drain does.
 func (s *Scorer) processed() uint64 {

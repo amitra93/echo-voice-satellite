@@ -52,6 +52,22 @@ type Settings struct {
 	NearMissFloor float32
 	Model         string
 	ClassifierMD5 string
+	// CrossKind and MissKind name the two capture kinds this manager instance
+	// produces, matching em_training_captures.KINDS on the controller. Empty
+	// defaults to "act"/"miss" (wake's kinds) in Configure, so the existing
+	// wake call site needs no change; the stop manager sets these explicitly
+	// to "stop_act"/"stop_miss".
+	CrossKind string
+	MissKind  string
+	// CrossReady marks a crossed-kind capture ready to upload immediately,
+	// skipping the BindRequest/Grant/Deny handshake a wake activation needs.
+	// Multi-device wake arbitration can deny a wake request after the fact,
+	// so a wake "act" clip waits for confirmation it was actually used before
+	// it uploads. A stop crossing has no equivalent ambiguity —
+	// stopword.Manager.Accept already consumed a live, ungranted arm before
+	// HandleStopCrossing runs — so the stop manager sets this true and never
+	// calls the grant/deny methods at all.
+	CrossReady bool
 }
 
 type candidate struct {
@@ -100,6 +116,12 @@ func (m *Manager) Configure(settings Settings) {
 	}
 	if settings.Frames > 62 {
 		settings.Frames = 62
+	}
+	if settings.CrossKind == "" {
+		settings.CrossKind = "act"
+	}
+	if settings.MissKind == "" {
+		settings.MissKind = "miss"
 	}
 	m.mu.Lock()
 	changedIdentity := settings.Model != m.settings.Model || settings.ClassifierMD5 != m.settings.ClassifierMD5
@@ -156,7 +178,7 @@ func (m *Manager) Observe(event shadow.ScoreEvent) {
 		m.timerEpoch++
 		epoch := m.timerEpoch
 		m.timer = time.AfterFunc(m.debounce, func() { m.endUtterance(epoch) })
-		m.enqueueLocked(m.snapshotLocked("act", event, false))
+		m.enqueueLocked(m.snapshotLocked(settings.CrossKind, event, settings.CrossReady))
 		return
 	}
 	if event.Score <= settings.NearMissFloor {
@@ -182,7 +204,7 @@ func (m *Manager) endUtterance(epoch uint64) {
 		return
 	}
 	if !m.activationSeen && m.candidate != nil && m.settings.Enabled {
-		m.enqueueLocked(m.snapshotLocked("miss", m.candidate.event, true))
+		m.enqueueLocked(m.snapshotLocked(m.settings.MissKind, m.candidate.event, true))
 	}
 	m.timer = nil
 	m.candidate = nil
@@ -218,13 +240,15 @@ func (m *Manager) enqueueLocked(capture *Capture) {
 	if capture == nil {
 		return
 	}
+	crossKind := m.settings.CrossKind
+	missKind := m.settings.MissKind
 	if len(m.queue) >= QueueCapacity {
-		if capture.Metadata.Kind != "act" {
+		if capture.Metadata.Kind != crossKind {
 			return
 		}
 		evict := -1
 		for i, queued := range m.queue {
-			if queued.Metadata.Kind == "miss" && !queued.inFlight {
+			if queued.Metadata.Kind == missKind && !queued.inFlight {
 				evict = i
 				break
 			}
@@ -234,9 +258,9 @@ func (m *Manager) enqueueLocked(capture *Capture) {
 		}
 		m.queue = append(m.queue[:evict], m.queue[evict+1:]...)
 	}
-	if capture.Metadata.Kind == "act" {
+	if capture.Metadata.Kind == crossKind {
 		index := 0
-		for index < len(m.queue) && m.queue[index].Metadata.Kind == "act" {
+		for index < len(m.queue) && m.queue[index].Metadata.Kind == crossKind {
 			index++
 		}
 		m.queue = append(m.queue, nil)
@@ -253,9 +277,10 @@ func (m *Manager) enqueueLocked(capture *Capture) {
 func (m *Manager) BindRequest(sequence uint16, requestID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	crossKind := m.settings.CrossKind
 	for i := len(m.queue) - 1; i >= 0; i-- {
 		capture := m.queue[i]
-		if capture.Metadata.Kind == "act" && capture.Metadata.ActivationSeq == sequence && capture.requestID == "" {
+		if capture.Metadata.Kind == crossKind && capture.Metadata.ActivationSeq == sequence && capture.requestID == "" {
 			capture.requestID = requestID
 			if ready, ok := m.decisions[requestID]; ok {
 				capture.ready = ready
@@ -271,9 +296,10 @@ func (m *Manager) BindRequest(sequence uint16, requestID string) {
 func (m *Manager) DropActivation(sequence uint16) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	crossKind := m.settings.CrossKind
 	for i := len(m.queue) - 1; i >= 0; i-- {
 		capture := m.queue[i]
-		if capture.Metadata.Kind == "act" && capture.Metadata.ActivationSeq == sequence && capture.requestID == "" {
+		if capture.Metadata.Kind == crossKind && capture.Metadata.ActivationSeq == sequence && capture.requestID == "" {
 			for j := range capture.PCM {
 				capture.PCM[j] = 0
 			}
@@ -286,9 +312,10 @@ func (m *Manager) DropActivation(sequence uint16) {
 func (m *Manager) ReleaseActivation(sequence uint16) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	crossKind := m.settings.CrossKind
 	for i := len(m.queue) - 1; i >= 0; i-- {
 		capture := m.queue[i]
-		if capture.Metadata.Kind == "act" && capture.Metadata.ActivationSeq == sequence && capture.requestID == "" {
+		if capture.Metadata.Kind == crossKind && capture.Metadata.ActivationSeq == sequence && capture.requestID == "" {
 			capture.ready = true
 			m.signalLocked()
 			return

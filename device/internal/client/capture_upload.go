@@ -76,11 +76,29 @@ func (d *DataClient) writeCaptureFrame(conn *websocket.Conn, frame []byte) error
 	return nil
 }
 
+// notifyChan returns mgr's Notify channel, or nil if mgr is nil. A nil
+// channel case in a select never becomes ready, which is exactly the right
+// behaviour for "this manager was never configured" — some tests construct a
+// DataClient directly and only ever set captureManager.
+func notifyChan(mgr *capture.Manager) <-chan struct{} {
+	if mgr == nil {
+		return nil
+	}
+	return mgr.Notify()
+}
+
 func (d *DataClient) runCaptureUploader(ctx context.Context, done <-chan struct{}, conn *websocket.Conn) {
-	if d.captureManager == nil {
+	if d.captureManager == nil && d.stopCaptureManager == nil {
 		return
 	}
-	defer d.captureManager.RetryInFlight()
+	defer func() {
+		if d.captureManager != nil {
+			d.captureManager.RetryInFlight()
+		}
+		if d.stopCaptureManager != nil {
+			d.stopCaptureManager.RetryInFlight()
+		}
+	}()
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
@@ -89,59 +107,80 @@ func (d *DataClient) runCaptureUploader(ctx context.Context, done <-chan struct{
 			return
 		case <-done:
 			return
-		case <-d.captureManager.Notify():
+		case <-notifyChan(d.captureManager):
+		case <-notifyChan(d.stopCaptureManager):
 		case <-ticker.C:
 		}
 		if d.captureBlocked() {
 			continue
 		}
-		item := d.captureManager.NextReady()
-		if item == nil {
+		// Exactly one capture may be in flight on the wire at a time: the
+		// controller's receiver (em_capture_upload.Receiver) is a single
+		// BEGIN/PCM.../END state machine per connection, so interleaving
+		// frames from a wake capture and a stop capture would corrupt both.
+		// Wake is simply tried first; captures are debounced to roughly one
+		// every few seconds per manager, so there is no real fairness
+		// concern in practice.
+		if d.captureManager != nil && d.uploadNextCapture(ctx, done, conn, d.captureManager) {
 			continue
 		}
-		begin, err := encodeCaptureBegin(item.Metadata)
-		if err != nil || !d.captureManager.Current(item) || d.writeCaptureFrame(conn, begin) != nil {
-			d.captureManager.Retry(item.Metadata.CaptureID)
-			continue
-		}
-		failed := false
-		chunkCount, current := d.captureManager.ChunkCount(item)
-		if !current || chunkCount > int(^uint16(0)) {
-			d.captureManager.Retry(item.Metadata.CaptureID)
-			continue
-		}
-		digest := md5.New()
-		bytes := uint32(0)
-		for index := 0; index < chunkCount; index++ {
-			pcm, current := d.captureManager.Chunk(item, index)
-			if !current {
-				failed = true
-				break
-			}
-			for d.captureBlocked() {
-				select {
-				case <-ctx.Done():
-					d.captureManager.Retry(item.Metadata.CaptureID)
-					return
-				case <-done:
-					d.captureManager.Retry(item.Metadata.CaptureID)
-					return
-				case <-time.After(20 * time.Millisecond):
-				}
-			}
-			if d.writeCaptureFrame(conn, encodeCapturePCM(uint16(index), pcm)) != nil {
-				failed = true
-				break
-			}
-			digest.Write(pcm)
-			bytes += uint32(len(pcm))
-			captureYield()
-		}
-		var sum [md5.Size]byte
-		copy(sum[:], digest.Sum(nil))
-		if failed || !d.captureManager.Current(item) || d.writeCaptureFrame(conn, encodeCaptureEndDigest(uint16(chunkCount), bytes, sum)) != nil {
-			d.captureManager.Retry(item.Metadata.CaptureID)
-			continue
+		if d.stopCaptureManager != nil {
+			d.uploadNextCapture(ctx, done, conn, d.stopCaptureManager)
 		}
 	}
+}
+
+// uploadNextCapture drains and uploads at most one ready capture from mgr.
+// Returns whether an item was found at all — a capture that had to be
+// retried still counts, so the caller does not fall through to the other
+// manager and start a second capture's BEGIN mid-upload.
+func (d *DataClient) uploadNextCapture(ctx context.Context, done <-chan struct{}, conn *websocket.Conn, mgr *capture.Manager) bool {
+	item := mgr.NextReady()
+	if item == nil {
+		return false
+	}
+	begin, err := encodeCaptureBegin(item.Metadata)
+	if err != nil || !mgr.Current(item) || d.writeCaptureFrame(conn, begin) != nil {
+		mgr.Retry(item.Metadata.CaptureID)
+		return true
+	}
+	failed := false
+	chunkCount, current := mgr.ChunkCount(item)
+	if !current || chunkCount > int(^uint16(0)) {
+		mgr.Retry(item.Metadata.CaptureID)
+		return true
+	}
+	digest := md5.New()
+	bytes := uint32(0)
+	for index := 0; index < chunkCount; index++ {
+		pcm, current := mgr.Chunk(item, index)
+		if !current {
+			failed = true
+			break
+		}
+		for d.captureBlocked() {
+			select {
+			case <-ctx.Done():
+				mgr.Retry(item.Metadata.CaptureID)
+				return true
+			case <-done:
+				mgr.Retry(item.Metadata.CaptureID)
+				return true
+			case <-time.After(20 * time.Millisecond):
+			}
+		}
+		if d.writeCaptureFrame(conn, encodeCapturePCM(uint16(index), pcm)) != nil {
+			failed = true
+			break
+		}
+		digest.Write(pcm)
+		bytes += uint32(len(pcm))
+		captureYield()
+	}
+	var sum [md5.Size]byte
+	copy(sum[:], digest.Sum(nil))
+	if failed || !mgr.Current(item) || d.writeCaptureFrame(conn, encodeCaptureEndDigest(uint16(chunkCount), bytes, sum)) != nil {
+		mgr.Retry(item.Metadata.CaptureID)
+	}
+	return true
 }

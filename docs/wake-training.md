@@ -24,6 +24,13 @@ Clips now collect on the controller, grouped by wake word. Nothing is sent
 anywhere; they sit in `training_captures/` beside the database, in the
 persisted volume.
 
+The **stop word** has the identical toggle under **Config → Stop word →
+Save stop captures**, with its own capture length and near-miss floor. Stop
+clips are grouped and labelled the same way, under the stop model's own stem
+(everything from step 2 onward applies unchanged) — the only difference is
+what triggered the clip: a stop activation or a stop near-miss instead of a
+wake one.
+
 Leave it on until you have a useful batch — a few dozen of each label is enough
 to move the model; a few hundred is better.
 

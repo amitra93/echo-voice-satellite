@@ -920,7 +920,7 @@ function TurnObservability({ turns, devices, isAdmin }) {
                   style={{ background:'none', border:0, color:'var(--accent)', cursor:'pointer', fontFamily:mono, fontSize:9, width:72, textAlign:'left', flexShrink:0 }}>
                   {isExpanded ? '▾ Hide' : '▸ Details'}
                 </button>
-                <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--accent)', width: 48, flexShrink: 0 }}>Q#{t.turn_id}</span>
+                <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--accent)', width: 48, flexShrink: 0 }}>{t.turn_id}</span>
                 <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--text2)', width: 105, flexShrink: 0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{device?.label || t.device_id}</span>
                 <span style={{ fontFamily: mono, fontSize: 9, color: 'var(--muted)', width: 115, flexShrink: 0 }}>{date} {time}</span>
                 <div style={{ flex: 1, display: 'flex', height: 14, alignItems: 'stretch' }}>
@@ -4954,7 +4954,7 @@ const STAGE_MONO = "'DM Mono',monospace";
 const CONFIG_SECTIONS = {
   "playback": ["eqBands", "eqLoudness", "ttsGainDb", "duckDb", "limiterEnabled", "limiterRelease", "bassGuardEnabled", "bassGuardDb"],
   "wakeword": ["owwModel", "owwThreshold", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "saveWakeCaptures", "wakeCaptureSec", "wakeNearMissFloor"],
-  "stopword": ["stopModel", "stopThreshold", "saveStopCaptures", "stopCaptureSec"],
+  "stopword": ["stopModel", "stopThreshold", "saveStopCaptures", "stopCaptureSec", "stopNearMissFloor"],
   "microphones": ["afeMicGainDb", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
   "advanced": ["vadThreshold", "vadSpeechMs", "vadSilenceMs", "buttonSingleTapEvent", "buttonMultiTapMs"],
@@ -5144,6 +5144,10 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
   const threshold = Number(Number(config.owwThreshold ?? 0.5).toFixed(2));
   const nearMissFloor = Number(Number(config.wakeNearMissFloor ?? 0.05).toFixed(2));
   const floorConflict = nearMissFloor >= threshold;
+
+  const stopThresholdVal = Number(Number(config.stopThreshold ?? 0.75).toFixed(2));
+  const stopNearMissFloor = Number(Number(config.stopNearMissFloor ?? 0.05).toFixed(2));
+  const stopFloorConflict = stopNearMissFloor >= stopThresholdVal;
 
   const bands = config.eqBands ?? [0,0,0,0,0,0,0,0];
   const RING_SCENES = [
@@ -5383,8 +5387,25 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             <input type="file" accept=".onnx" hidden onChange={e => { uploadStopModel(e.target.files[0]); e.target.value = ''; }}/>
           </label>
           <Slider label="Stop threshold" sub="confidence required during thinking and voice playback; one calibrated threshold is used in both phases"
-            value={Number(Number(config.stopThreshold ?? 0.75).toFixed(2))} min={0.01} max={1} step={0.01}
+            value={stopThresholdVal} min={0.01} max={1} step={0.01}
             formatValue={v => v.toFixed(2)} onChange={v => set('stopThreshold', Number(v.toFixed(2)))}/>
+          <Slider label="Near-miss floor" sub="minimum score to count as a near-miss and log/capture — raise if picking up too much background speech" value={stopNearMissFloor} min={0.01} max={0.95} step={0.01} formatValue={v => v.toFixed(2)} onChange={v => set('stopNearMissFloor', Number(v.toFixed(2)))}/>
+          {stopFloorConflict && (
+            <div style={{
+              fontFamily: mono,
+              fontSize: 10,
+              color: 'var(--error)',
+              marginTop: -10,
+              marginBottom: 16,
+              padding: '6px 10px',
+              borderRadius: 6,
+              background: 'rgba(210, 45, 0, 0.12)',
+              border: '1px solid var(--error)',
+              lineHeight: 1.5,
+            }}>
+              ⚠️ Near-miss floor ({stopNearMissFloor.toFixed(2)}) is ≥ stop threshold ({stopThresholdVal.toFixed(2)}). Near-misses will never record. Lower the near-miss floor or raise the threshold.
+            </div>
+          )}
           <Toggle label="Save stop captures" sub="keeps short clips of stop attempts and near-misses to label and retrain — writes speech to disk; review under Settings → Training" value={config.saveStopCaptures ?? false} onChange={v => set('saveStopCaptures', v)}/>
           {(config.saveStopCaptures ?? false) && (
             <Slider label="Capture length" sub="seconds of audio before each detection to keep" value={config.stopCaptureSec ?? 2.0} min={0.5} max={5.0} step={0.5} unit="s" onChange={v => set('stopCaptureSec', v)}/>

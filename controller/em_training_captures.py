@@ -284,7 +284,13 @@ def save_uploaded(model: str, device_id: str, metadata: dict, pcm: bytes,
     kind = metadata.get("kind")
     score = metadata.get("score")
     directory = _bucket_dir(model, "untriaged", db_path)
-    if safe is None or not isinstance(capture_id, str) or kind not in {"act", "miss"}:
+    # "act"/"miss" are wake kinds; "stop_act"/"stop_miss" are the stop-word
+    # equivalents (em_controller._accept_capture_upload routes both here with
+    # the matching expected_model). false_stop/playback_negative are not
+    # produced by the device wire upload — they reach storage, if at all,
+    # through save() directly — so they stay out of this set on purpose.
+    if (safe is None or not isinstance(capture_id, str)
+            or kind not in {"act", "miss", "stop_act", "stop_miss"}):
         return result(None, False)
     if directory is None or not pcm:
         return result(None, False)

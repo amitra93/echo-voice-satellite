@@ -145,8 +145,12 @@ def test_stop_capture_round_trips_through_training_storage(tmp_path):
     db = str(tmp_path / "echomuse.db")
     pcm = b"\x00\x01" * int(tc.SAMPLE_RATE * 0.2)
     # save_uploaded is the controller's durable path for device uploads.
+    # "stop_act" — not "act" — is what a real stop-model upload sends
+    # (em_training_captures.KINDS); using the wake kind here would pass even
+    # with save_uploaded's old {"act", "miss"}-only check and silently mask
+    # the bug where a genuine stop upload was rejected.
     meta = {
-        "captureId": "stop:1", "kind": "act", "model": "stop",
+        "captureId": "stop:1", "kind": "stop_act", "model": "stop",
         "classifierMd5": "a" * 32, "score": 0.8, "threshold": 0.75,
         "nearMissFloor": 0.05, "activationSeq": 1,
         "requestedPrerollMs": 2000, "actualPrerollMs": 2000,
@@ -166,12 +170,42 @@ def test_stop_capture_round_trips_through_training_storage(tmp_path):
     assert tc.label("stop", name, "untriaged", db_path=db)
 
 
+def test_save_uploaded_accepts_stop_kinds_and_rejects_unknown_ones(tmp_path):
+    """
+    Regression: save_uploaded used to hardcode `kind not in {"act", "miss"}`,
+    silently dropping every stop-model upload (_accept_capture_upload already
+    routed stop_act/stop_miss here correctly — the rejection was invisible
+    below it). false_stop/playback_negative are real KINDS but are not
+    produced by the device wire upload, so they stay rejected here on
+    purpose — only save() writes those directly.
+    """
+    db = str(tmp_path / "echomuse.db")
+    pcm = b"\x00\x01" * int(tc.SAMPLE_RATE * 0.2)
+
+    def meta(capture_id, kind):
+        return {
+            "captureId": capture_id, "kind": kind, "model": "stop",
+            "classifierMd5": "a" * 32, "score": 0.2, "threshold": 0.75,
+            "nearMissFloor": 0.05, "activationSeq": 1,
+            "requestedPrerollMs": 2000, "actualPrerollMs": 2000,
+            "complete": True, "sampleRate": 16000, "sampleWidth": 2,
+            "channels": 1, "frameBytes": 2560, "bargeThresholdActive": False,
+        }
+
+    name = tc.save_uploaded("stop", "dev1", meta("stop:miss", "stop_miss"), pcm, db_path=db)
+    assert name is not None
+    assert tc.parse_filename(name)["kind"] == "stop_miss"
+
+    assert tc.save_uploaded("stop", "dev1", meta("stop:bad", "bogus"), pcm, db_path=db) is None
+    assert tc.save_uploaded("stop", "dev1", meta("stop:fs", "false_stop"), pcm, db_path=db) is None
+
+
 def test_stop_and_wake_captures_coexist_under_different_models(tmp_path):
     db = str(tmp_path / "echomuse.db")
     pcm = b"\x00\x01" * 100
-    for model, cid in [("hey_jarvis", "w:1"), ("stop", "s:1")]:
+    for model, cid, kind in [("hey_jarvis", "w:1", "act"), ("stop", "s:1", "stop_act")]:
         meta = {
-            "captureId": cid, "kind": "act", "model": model,
+            "captureId": cid, "kind": kind, "model": model,
             "classifierMd5": "b" * 32, "score": 0.9, "threshold": 0.5,
             "nearMissFloor": 0.05, "activationSeq": 2,
             "requestedPrerollMs": 2000, "actualPrerollMs": 2000,

@@ -111,7 +111,7 @@ func Open(owwModel string, threshold float32, onCross func(score, threshold floa
 // OpenWithHead loads one shared feature pipeline plus a second classifier head.
 // It is used when local wake and stop scoring are both enabled: loading a second
 // full scorer would duplicate the expensive mel and embedding sessions.
-func OpenWithHead(owwModel string, threshold float32, onCross func(score, threshold float32, at time.Time, sequence uint16), headModel string, headThreshold float32, enabled func() bool, onHeadCross func(score, threshold float32, at time.Time, sequence uint16)) (*Scorer, error) {
+func OpenWithHead(owwModel string, threshold float32, onCross func(score, threshold float32, at time.Time, sequence uint16), headModel string, headThreshold float32, enabled func() bool, onHeadCross func(score, threshold float32, at time.Time, sequence uint16), onHeadScore func(ScoreEvent)) (*Scorer, error) {
 	dir := Dir()
 	wakeStem, headStem := ModelStem(owwModel), ModelStem(headModel)
 	if wakeStem == "" || headStem == "" {
@@ -136,7 +136,7 @@ func OpenWithHead(owwModel string, threshold float32, onCross func(score, thresh
 		_ = inf.Close()
 		return nil, fmt.Errorf("shadow: %w", err)
 	}
-	s := NewScorerWithHeads(inf, threshold, onCross, Head{Classifier: head, Threshold: headThreshold, Enabled: enabled, OnCross: onHeadCross})
+	s := NewScorerWithHeads(inf, threshold, onCross, Head{Classifier: head, Threshold: headThreshold, Enabled: enabled, OnCross: onHeadCross, OnScore: onHeadScore})
 	s.closers = []io.Closer{inf, head}
 	s.info = fmt.Sprintf("onnxruntime %s, wake %s + stop %s, xnnpack=%v", rt.Version(), wakeStem, headStem, inf.XNNPACKActive())
 	return s, nil

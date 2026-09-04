@@ -111,6 +111,119 @@ func TestCaptureUploaderStopsWithItsConnectionAndRetriesUnackedCapture(t *testin
 	}
 }
 
+func TestConfigureStopCapturesUsesStopKindsAndUploadsWithoutGrant(t *testing.T) {
+	d := NewDataClient("stop-capture-test", nil, nil)
+	// Configure first: an identity change (the manager's zero-value settings
+	// to this model/checksum) clears the ring, same as capture.Manager's own
+	// tests do.
+	d.ConfigureStopCaptures(true, 0.08, 0.1, "stop", "0123456789abcdef0123456789abcdef")
+	d.stopRing.Push(1, make([]byte, captureFrameBytes))
+	d.ObserveStopScore(shadow.ScoreEvent{Score: 0.8, Threshold: 0.5, Sequence: 1, Crossed: true})
+	item := d.stopCaptureManager.NextReady()
+	if item == nil || item.Metadata.Kind != "stop_act" {
+		t.Fatalf("stop capture = %#v", item)
+	}
+	// The wake manager must be entirely untouched by a stop-only config push.
+	if d.captureManager.Enabled() {
+		t.Fatal("stop capture config enabled the wake capture manager")
+	}
+}
+
+func TestRunCaptureUploaderServesBothManagersWithoutInterleaving(t *testing.T) {
+	type received struct {
+		kind   string
+		frames int
+		ends   int
+	}
+	results := make(chan received, 2)
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		var current received
+		inCapture := false
+		for {
+			_, frame, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			if len(frame) == 0 {
+				continue
+			}
+			switch frame[0] {
+			case frameTypeCaptureBegin:
+				if inCapture {
+					t.Errorf("BEGIN received while a capture was already open")
+				}
+				inCapture = true
+				var meta capture.Metadata
+				length := int(binary.BigEndian.Uint16(frame[2:4]))
+				if json.Unmarshal(frame[4:4+length], &meta) == nil {
+					current = received{kind: meta.Kind}
+				}
+			case frameTypeCapturePCM:
+				current.frames++
+			case frameTypeCaptureEnd:
+				current.ends++
+				inCapture = false
+				results <- current
+			}
+		}
+	}))
+	defer server.Close()
+	conn, _, err := websocket.DefaultDialer.Dial(
+		"ws://"+strings.TrimPrefix(server.URL, "http://"), nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	d := NewDataClient("dual-capture-test", nil, nil)
+	d.conn = conn
+	d.ConfigureWakeCaptures(true, 0.08, 0.1, "wake", "0123456789abcdef0123456789abcdef")
+	d.ConfigureStopCaptures(true, 0.08, 0.1, "stop", "0123456789abcdef0123456789abcdef")
+	d.localRing.Push(1, make([]byte, captureFrameBytes))
+	d.stopRing.Push(1, make([]byte, captureFrameBytes))
+	d.ObserveWakeScore(shadow.ScoreEvent{Score: 0.2, Threshold: 0.5, Sequence: 1})
+	time.Sleep(15 * time.Millisecond) // clear the wake near-miss debounce window
+	d.ObserveWakeScore(shadow.ScoreEvent{Score: 0.8, Threshold: 0.5, Sequence: 1, Crossed: true})
+	d.captureManager.BindRequest(1, "wake:dual")
+	d.captureManager.Deny("wake:dual")
+	d.ObserveStopScore(shadow.ScoreEvent{Score: 0.8, Threshold: 0.5, Sequence: 1, Crossed: true})
+
+	done := make(chan struct{})
+	uploaderDone := make(chan struct{})
+	go func() {
+		d.runCaptureUploader(context.Background(), done, conn)
+		close(uploaderDone)
+	}()
+	seen := map[string]received{}
+	for i := 0; i < 2; i++ {
+		select {
+		case r := <-results:
+			seen[r.kind] = r
+		case <-time.After(time.Second):
+			t.Fatalf("only received %d of 2 captures: %#v", i, seen)
+		}
+	}
+	close(done)
+	select {
+	case <-uploaderDone:
+	case <-time.After(time.Second):
+		t.Fatal("capture uploader outlived its data connection")
+	}
+	for _, kind := range []string{"act", "stop_act"} {
+		r, ok := seen[kind]
+		if !ok || r.frames != 1 || r.ends != 1 {
+			t.Fatalf("capture %q = %#v (all seen: %#v)", kind, r, seen)
+		}
+	}
+}
+
 func TestLiveSTTPreemptsCaptureAfterCurrentChunk(t *testing.T) {
 	var pcmFrames atomic.Int32
 	var endFrames atomic.Int32

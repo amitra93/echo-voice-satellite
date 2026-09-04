@@ -137,16 +137,17 @@ func TestWakeCaptureConfigSupportsFalseZeroFloorAndClampsDuration(t *testing.T) 
 func TestStopCaptureConfigHandlesEnableAndClampsDuration(t *testing.T) {
 	d := &Device{
 		initialised: true, SaveStopCaptures: true,
-		StopCaptureSec: 2,
+		StopCaptureSec: 2, StopNearMissFloor: 0.2,
 	}
 	d.Apply(ConfigMessage{
 		SaveStopCaptures: boolPtr(false), StopCaptureSec: 99,
+		StopNearMissFloor: floatPtr(0),
 	})
 	snapshot := d.Snapshot()
 	if snapshot.SaveStopCaptures == nil || *snapshot.SaveStopCaptures {
 		t.Fatal("explicit stop capture disable was lost")
 	}
-	if snapshot.StopCaptureSec != 5 {
+	if snapshot.StopCaptureSec != 5 || snapshot.StopNearMissFloor == nil || *snapshot.StopNearMissFloor != 0 {
 		t.Fatalf("stop capture snapshot clamp = %#v", snapshot)
 	}
 	d.Apply(ConfigMessage{SaveStopCaptures: boolPtr(true), StopCaptureSec: 0.01})
@@ -171,6 +172,9 @@ func TestStopCaptureDefaultsArePresent(t *testing.T) {
 	}
 	if snap.StopCaptureSec != 2.0 {
 		t.Fatalf("StopCaptureSec default = %v, want 2.0", snap.StopCaptureSec)
+	}
+	if snap.StopNearMissFloor == nil || *snap.StopNearMissFloor != 0.05 {
+		t.Fatalf("StopNearMissFloor default = %#v, want 0.05", snap.StopNearMissFloor)
 	}
 }
 

@@ -165,6 +165,11 @@ type Head struct {
 	Threshold  float32
 	Enabled    func() bool
 	OnCross    func(score, threshold float32, at time.Time, sequence uint16)
+	// OnScore observes every enabled head evaluation, crossing or not — the
+	// per-frame stream a capture manager needs to build a near-miss window
+	// (candidate tracking, debounce), mirroring the primary scorer's onScore.
+	// Optional; nil is a no-op, same as OnCross.
+	OnScore func(ScoreEvent)
 
 	lastCross time.Time
 }
@@ -456,10 +461,17 @@ func (s *Scorer) run() {
 				s.recordErr(err)
 				continue
 			}
+			crossed := headScore >= h.Threshold && now.Sub(h.lastCross) >= s.refract
 			if headScore > 0.01 {
-				log.Printf("[stopword] score=%.4f threshold=%.2f seq=%d crossed=%v", headScore, h.Threshold, frame.sequence, headScore >= h.Threshold && now.Sub(h.lastCross) >= s.refract)
+				log.Printf("[stopword] score=%.4f threshold=%.2f seq=%d crossed=%v", headScore, h.Threshold, frame.sequence, crossed)
 			}
-			if headScore < h.Threshold || now.Sub(h.lastCross) < s.refract {
+			if h.OnScore != nil {
+				h.OnScore(ScoreEvent{
+					Score: headScore, Threshold: h.Threshold, At: now,
+					Sequence: frame.sequence, Crossed: crossed,
+				})
+			}
+			if !crossed {
 				continue
 			}
 			h.lastCross = now

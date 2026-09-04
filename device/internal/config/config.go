@@ -67,6 +67,7 @@ type Device struct {
 	WakeNearMissFloor float64
 	SaveStopCaptures  bool
 	StopCaptureSec    float64
+	StopNearMissFloor float64
 
 	// AfeMicGainDb is a fixed digital gain applied to Amazon AFE's already
 	// processed S16 capture before it is sent to the controller. 0 = unity.
@@ -126,6 +127,7 @@ func (d *Device) loadDefaults() {
 	d.WakeNearMissFloor = clampFloat(envFloat("WAKE_NEAR_MISS_FLOOR", 0.05), 0, 1)
 	d.SaveStopCaptures = envBool("SAVE_STOP_CAPTURES", false)
 	d.StopCaptureSec = clampFloat(envFloat("STOP_CAPTURE_SEC", 2.0), 0.08, 5.0)
+	d.StopNearMissFloor = clampFloat(envFloat("STOP_NEAR_MISS_FLOOR", 0.05), 0, 1)
 	d.BargeInThreshold = envFloat("BARGE_IN_THRESHOLD", 0.05)
 	d.DuckDb = envFloat("DUCK_DB", -18)
 	d.AfeMicGainDb = clampAfeMicGainDb(envInt("AFE_MIC_GAIN_DB", 0))
@@ -180,6 +182,9 @@ func (d *Device) Apply(msg ConfigMessage) {
 	}
 	if msg.StopCaptureSec > 0 {
 		d.StopCaptureSec = clampFloat(msg.StopCaptureSec, 0.08, 5.0)
+	}
+	if msg.StopNearMissFloor != nil {
+		d.StopNearMissFloor = clampFloat(*msg.StopNearMissFloor, 0, 1)
 	}
 	if msg.BargeInEnabled != nil {
 		d.BargeInEnabled = *msg.BargeInEnabled
@@ -254,6 +259,7 @@ func (d *Device) Snapshot() ConfigMessage {
 	saveWakeCaptures := d.SaveWakeCaptures
 	wakeNearMissFloor := d.WakeNearMissFloor
 	saveStopCaptures := d.SaveStopCaptures
+	stopNearMissFloor := d.StopNearMissFloor
 	afeMicGainDb := d.AfeMicGainDb
 	bleProxyEnabled := false
 	if d.BleProxyEnabled != nil {
@@ -272,6 +278,7 @@ func (d *Device) Snapshot() ConfigMessage {
 		WakeNearMissFloor: &wakeNearMissFloor,
 		SaveStopCaptures:  &saveStopCaptures,
 		StopCaptureSec:    d.StopCaptureSec,
+		StopNearMissFloor: &stopNearMissFloor,
 		BargeInEnabled:    &bargeInEnabled,
 		BargeInThreshold:  d.BargeInThreshold,
 		StartupVolume:     d.StartupVolume,
@@ -319,6 +326,7 @@ type ConfigMessage struct {
 	WakeNearMissFloor *float64  `json:"wakeNearMissFloor,omitempty"`
 	SaveStopCaptures  *bool     `json:"saveStopCaptures,omitempty"`
 	StopCaptureSec    float64   `json:"stopCaptureSec,omitempty"`
+	StopNearMissFloor *float64  `json:"stopNearMissFloor,omitempty"`
 	BargeInEnabled    *bool     `json:"bargeInEnabled,omitempty"`
 	BargeInThreshold  float64   `json:"bargeInThreshold,omitempty"`
 	DuckDb            *float64  `json:"duckDb,omitempty"`

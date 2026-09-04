@@ -220,6 +220,77 @@ func TestActivationEvictsNearMissButNeverAnotherActivation(t *testing.T) {
 	}
 }
 
+// stopManager mirrors testManager but configured the way
+// DataClient.ConfigureStopCaptures configures the stop word's manager
+// instance: distinct kinds, and crossings ready to upload immediately (no
+// BindRequest/Grant/Deny handshake — see Settings.CrossReady).
+func stopManagerForTest(t *testing.T) *Manager {
+	t.Helper()
+	ring := New(DefaultFrames)
+	for i := 0; i < 40; i++ {
+		ring.Push(uint16(i), []byte{byte(i)})
+	}
+	m := NewManager(ring)
+	m.debounce = 5 * time.Millisecond
+	m.Configure(Settings{
+		Enabled: true, Frames: 5, NearMissFloor: 0.1,
+		Model: "stop", ClassifierMD5: "0123456789abcdef0123456789abcdef",
+		CrossKind: "stop_act", MissKind: "stop_miss", CrossReady: true,
+	})
+	for i := 0; i < 40; i++ {
+		ring.Push(uint16(i), []byte{byte(i)})
+	}
+	return m
+}
+
+func TestStopCrossingIsReadyImmediatelyWithoutGrant(t *testing.T) {
+	m := stopManagerForTest(t)
+	m.Observe(shadow.ScoreEvent{Score: 0.8, Threshold: 0.5, Sequence: 20, Crossed: true})
+	item := m.NextReady()
+	if item == nil || item.Metadata.Kind != "stop_act" || item.Metadata.Score != 0.8 {
+		t.Fatalf("stop crossing capture = %#v", item)
+	}
+}
+
+func TestStopNearMissUsesStopMissKind(t *testing.T) {
+	m := stopManagerForTest(t)
+	m.Observe(shadow.ScoreEvent{Score: 0.2, Threshold: 0.5, Sequence: 20})
+	time.Sleep(15 * time.Millisecond)
+	item := m.NextReady()
+	if item == nil || item.Metadata.Kind != "stop_miss" || item.Metadata.Score != 0.2 {
+		t.Fatalf("stop near-miss capture = %#v", item)
+	}
+}
+
+func TestStopQueueEvictsStopMissButNeverStopAct(t *testing.T) {
+	m := stopManagerForTest(t)
+	for i := 0; i < QueueCapacity; i++ {
+		m.Observe(shadow.ScoreEvent{Score: 0.2, Threshold: 0.5, Sequence: uint16(10 + i)})
+		time.Sleep(10 * time.Millisecond)
+	}
+	if m.Count() != QueueCapacity {
+		t.Fatalf("queue = %d misses, want %d", m.Count(), QueueCapacity)
+	}
+	m.Observe(shadow.ScoreEvent{Score: 0.8, Threshold: 0.5, Sequence: 30, Crossed: true})
+	if m.Count() != QueueCapacity || m.queue[0].Metadata.Kind != "stop_act" {
+		t.Fatalf("queue policy = %#v", m.queue)
+	}
+}
+
+// Wake's own manager must be unaffected by the stop kinds existing at
+// all — Configure defaults an empty CrossKind/MissKind to "act"/"miss" so
+// the existing ConfigureWakeCaptures call site needed no change.
+func TestUnconfiguredKindsDefaultToWakeNames(t *testing.T) {
+	m := testManager(t)
+	m.Observe(shadow.ScoreEvent{Score: 0.8, Threshold: 0.5, Sequence: 20, Crossed: true})
+	m.BindRequest(20, "wake:default")
+	m.Deny("wake:default")
+	item := m.NextReady()
+	if item == nil || item.Metadata.Kind != "act" {
+		t.Fatalf("default cross kind = %#v", item)
+	}
+}
+
 func TestDisableClearsAllRetainedPCMAndRetryState(t *testing.T) {
 	m := testManager(t)
 	m.Observe(shadow.ScoreEvent{Score: 0.8, Threshold: 0.5, Sequence: 20, Crossed: true})
