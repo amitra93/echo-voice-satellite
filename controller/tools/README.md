@@ -31,3 +31,10 @@ docker exec echomuse-controller python /tmp/devshell.py "<shell command>" ["<ano
   multi-megabyte files; **deletes the destination first** unless
   `--resume`, since resuming on size alone will append to a different file
   and then report success. Success means md5 agreement, nothing less.
+- **e2e_query_test.py** — drives the audio-upload E2E query test harness
+  (device Test tab's `test_audio`/`test_turn` path) against a real device,
+  using the case catalog in `controller/tests/fixtures/e2e_audio/manifest.json`:
+  `python /tmp/e2e_query_test.py -s <SERIAL> --fixtures-dir /tmp/e2e_audio --all`.
+  `<SERIAL>` is `ro.serialno`, same as `-d` above. See
+  `docs/e2e-query-testing.md` for the full workflow, including generating the
+  fixture corpus first.
