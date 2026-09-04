@@ -144,6 +144,61 @@ func TestIdleMicSendsNothingUntilGrant(t *testing.T) {
 	}
 }
 
+// TestStartMicWhileActiveGrantsContinuationMicStream verifies that calling StartMic
+// on an already-active stream (e.g. continuous AFE under wake_request_v1) acts as a
+// controller-initiated grant so continuation turns un-gate mic frames.
+func TestStartMicWhileActiveGrantsContinuationMicStream(t *testing.T) {
+	mic := newFanoutMic()
+	defer mic.close()
+
+	frames := make(chan []byte, 16)
+	up := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		for {
+			_, payload, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			frames <- payload
+		}
+	}))
+	defer srv.Close()
+	conn, _, err := websocket.DefaultDialer.Dial("ws://"+strings.TrimPrefix(srv.URL, "http://"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	d := NewDataClient("continuation-test", mic, nil)
+	d.conn = conn
+	d.StartMic(false)
+	defer d.StopMic()
+
+	// Initial active state: stream is running, but no grant yet.
+	select {
+	case frame := <-frames:
+		t.Fatalf("idle PCM escaped before grant: %x", frame[:1])
+	case <-time.After(25 * time.Millisecond):
+	}
+
+	// Controller initiates continuation turn by calling StartMic on active stream.
+	d.StartMic(false)
+
+	select {
+	case frame := <-frames:
+		if len(frame) == 0 || frame[0] != frameTypeMic {
+			t.Fatalf("post-continuation frame = %x", frame)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no mic frame delivered after continuation StartMic")
+	}
+}
+
 // TestStreamRestartOverlapIsRaceFree drives the StopMic/StartMic sequence the
 // controller sends after voice turns while AFE mic data is flowing.
 func TestStreamRestartOverlapIsRaceFree(t *testing.T) {

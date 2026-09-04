@@ -216,18 +216,29 @@ type DataClient struct {
 	sharedStop   bool
 	stopManager  stopword.Manager
 	stopCallback func(arm stopword.Arm, score, threshold float32, at time.Time)
+	// stopRing/stopCaptureManager are the stop-word equivalent of
+	// localRing/captureManager, kept as an entirely separate ring rather than
+	// sharing localRing: capture.Manager.Configure clears its ring whenever
+	// its OWN settings identity changes or capture goes disabled, and a wake
+	// capture config push must not be able to blow away audio history the
+	// stop capture manager still needs (or vice versa).
+	stopRing           *capture.Ring
+	stopCaptureManager *capture.Manager
 }
 
 // NewDataClient wires the mandatory Amazon AFE mono mic stream to the speaker.
 func NewDataClient(deviceID string, microphone mic.Subscribable, spk speaker.Speaker) *DataClient {
 	ring := capture.New(capture.DefaultFrames)
+	stopRing := capture.New(capture.DefaultFrames)
 	return &DataClient{
-		deviceID:       deviceID,
-		mic:            microphone,
-		spk:            spk,
-		readyCh:        make(chan string, 1),
-		localRing:      ring,
-		captureManager: capture.NewManager(ring),
+		deviceID:           deviceID,
+		mic:                microphone,
+		spk:                spk,
+		readyCh:            make(chan string, 1),
+		localRing:          ring,
+		captureManager:     capture.NewManager(ring),
+		stopRing:           stopRing,
+		stopCaptureManager: capture.NewManager(stopRing),
 	}
 }
 
@@ -272,6 +283,37 @@ func (d *DataClient) ConfigureWakeCaptures(enabled bool, seconds, floor float64,
 
 func (d *DataClient) ObserveWakeScore(event shadow.ScoreEvent) {
 	d.captureManager.Observe(event)
+}
+
+// ConfigureStopCaptures is ConfigureWakeCaptures for the stop word: same
+// enable/disable-bounces-the-connection behaviour, same frame-count math,
+// distinct kinds ("stop_act"/"stop_miss") and its own queue via
+// stopCaptureManager so it never contends with wake capture state.
+func (d *DataClient) ConfigureStopCaptures(enabled bool, seconds, floor float64, model, checksum string) {
+	wasEnabled := d.stopCaptureManager.Enabled()
+	frames := int(seconds * 1000 / capture.FrameMs)
+	d.stopCaptureManager.Configure(capture.Settings{
+		Enabled: enabled, Frames: frames, NearMissFloor: float32(floor),
+		Model: shadow.ModelStem(model), ClassifierMD5: checksum,
+		// A stop crossing is only ever reported after stopword.Manager.Accept
+		// has already consumed a live, ungranted arm (HandleStopCrossing), so
+		// unlike a wake "act" there is no later grant/deny step to wait for.
+		CrossKind: "stop_act", MissKind: "stop_miss", CrossReady: true,
+	})
+	if wasEnabled && !enabled {
+		d.connMu.Lock()
+		if d.conn != nil {
+			d.conn.Close()
+		}
+		d.connMu.Unlock()
+	}
+}
+
+// ObserveStopScore feeds the stop classifier's per-frame score stream (the
+// Head.OnScore callback while local wake scoring is shared with stop, or the
+// standalone stop scorer's own onScore) into the stop capture manager.
+func (d *DataClient) ObserveStopScore(event shadow.ScoreEvent) {
+	d.stopCaptureManager.Observe(event)
 }
 
 func (d *DataClient) BindActivationRequest(sequence uint16, requestID string) {
@@ -434,7 +476,13 @@ func (d *DataClient) StartMic(lockMic bool) {
 	d.micMu.Lock()
 	defer d.micMu.Unlock()
 	if d.micActive {
-		log.Println("[data] StartMic: already active — ignoring")
+		d.wakeMu.Lock()
+		d.wakeGranted = true
+		d.grantEpoch++
+		d.activeRequestID = "controller:start"
+		d.pendingReplay = nil
+		d.wakeMu.Unlock()
+		log.Println("[data] StartMic: already active — granted controller mic stream")
 		return
 	}
 	d.connMu.Lock()
@@ -736,17 +784,8 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 
 	cfg := config.Get()
 
-	speechCount := 0
-	silenceCount := 0
-	active := false
-	everActive := false // true once active has been true at least once this turn
 	buf := make([]byte, 0, vadOwwChunkBytes*4)
 	detectorBuf := make([]byte, 0, vadOwwChunkBytes*2)
-	// preroll ring — processed mono periods captured while the gate is
-	// closed, oldest first. Flushed into buf at gate open, cleared while
-	// active. Slices are retained (not copied): Process() returns a fresh
-	// allocation each period, so nothing aliases them.
-	preroll := make([][]byte, 0, prerollBudgetMs/160+1) // capacity hint at the real batch cadence
 	var detectorSeq uint16
 	var wireSeq uint16
 	var periodCount uint64 // periodic RMS diagnostic
@@ -833,10 +872,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 	}
 	resetTurnState := func() {
 		stopNoSpeechTimer()
-		speechCount, silenceCount = 0, 0
-		active, everActive, lockMic = false, false, false
 		buf = buf[:0]
-		preroll = preroll[:0]
 	}
 	turnEpoch := uint64(0)
 	finishGrant := func(epoch uint64, sentinel byte) bool {
@@ -865,10 +901,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			return
 
 		case <-noSpeechTimerC:
-			// Timer firing implies active was never true — if it had been,
-			// this case would already be unreachable (timer stopped below).
-			// Unreachable for the local-only stream, since noSpeechTimerC is nil
-			// there and a nil channel never becomes ready.
+			// Safety timeout: if granted turn runs without upstream termination.
 			log.Println("[data] streamMic: no speech detected within timeout — ending turn")
 			finishGrant(turnEpoch, frameTypeNoSpeechTimeout)
 			resetTurnState()
@@ -889,7 +922,6 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			}
 
 			snap := cfg.Snapshot()
-			threshold := snap.VadThreshold
 
 			desiredGainDb := 0
 			if snap.AfeMicGainDb != nil {
@@ -913,6 +945,7 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 				localSequence := detectorSeq
 				detectorSeq++
 				d.localRing.Push(localSequence, frame)
+				d.stopRing.Push(localSequence, frame)
 				if sc := d.ShadowScorer(); sc != nil {
 					sc.PushBytesSequence(frame, localSequence)
 				}
@@ -929,138 +962,27 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 				for _, frame := range replay {
 					sendMic(frame.PCM)
 				}
-				lockMic = true
-				active = true
 			}
 			if !granted {
 				continue
 			}
-			// A grant turns the local detector stream into the bounded turn
-			// stream. This is deliberately decided per frame so the grant can
-			// arrive while the AFE subscription is already running.
-			lockMic = true
-			if noSpeechTimer == nil && !active {
+			if noSpeechTimer == nil {
 				armNoSpeechTimer()
 			}
 
-			// ── Processing pipeline ──────────────────────────────────────
-			// VAD runs on the processed AFE output before it is sent upstream.
-			//
-			// vadThreshold is calibrated in pre-gain (acoustic) units —
-			// the values validated in the v2.6.3 session predate the fixed
-			// mic gain and stay meaningful across gain changes. mono is
-			// post-gain, so scale the threshold up by the same factor
-			// rather than requiring every stored config to be retuned in
-			// lockstep with micGainDb.
-			rms := vadPeriodRMS(mono)
-			speech := rms >= threshold*gainLin
-
-			// Gate windows in units of actual iterations: the mic delivers
-			// whole ALSA-buffer batches (160ms/2560 samples — see the
-			// pipeline note in CLAUDE.md), so divide the configured ms by
-			// the real batch duration. The old /32 assumed 32ms periods and
-			// silently made both windows 5× longer than configured (80ms
-			// speech-to-open was really 320ms; 600ms silence-to-close was
-			// really 2.9s).
-			batchMs := len(mono) / 32 // S16 mono @16kHz: 32 bytes per ms
-			if batchMs < 1 {
-				batchMs = 1
-			}
-			speechNeeded := (snap.VadSpeechMs + batchMs - 1) / batchMs
-			if speechNeeded < 1 {
-				speechNeeded = 1
-			}
-			silenceMax := (snap.VadSilenceMs + batchMs - 1) / batchMs
-			if silenceMax < 1 {
-				silenceMax = 1
-			}
-
-			// Periodic RMS diagnostic — every ~10 min, or within ~16s of
-			// the mic gain clamping a sample (clipping is the one signal
-			// that says micGainDb is too hot for the room, so it's
-			// reported promptly; the %100 bound stops sustained clipping
-			// becoming its own log flood). Was every 100 counts (~16s
-			// measured on-device) while idle capture levels were being
-			// characterised — that job is done (2026-07-07 fleet
-			// analysis) and /tmp/server.log is RAM-backed and unrotated.
+			// Periodic RMS diagnostic
 			if periodCount%3750 == 0 || (afeClipped > 0 && periodCount%100 == 0) {
-				log.Printf("[data] VAD diag: rms=%.5f threshold=%.5f gain=%ddB clipped=%d gate=%v active=%v",
-					rms, threshold*gainLin, gainDb, afeClipped, speech, active)
+				rms := vadPeriodRMS(mono)
+				log.Printf("[data] mic diag: rms=%.5f gain=%ddB clipped=%d",
+					rms, gainDb, afeClipped)
 			}
 			periodCount++
 
-			if !lockMic {
-				continue
-			}
-
-			if speech {
-				silenceCount = 0
-				if !active {
-					speechCount++
-					if speechCount >= speechNeeded {
-						active = true
-						// Gate open — flush the preroll ring ahead of the
-						// current period so the controller receives ~500ms of
-						// pre-onset context (and the true start of speech,
-						// including periods consumed by the speechNeeded
-						// count-up) instead of a hard splice at onset.
-						for _, p := range preroll {
-							buf = append(buf, p...)
-						}
-						preroll = preroll[:0]
-						if !everActive {
-							everActive = true
-							// Speech has genuinely started — the no-speech
-							// grace period no longer applies (if it was ever
-							// armed; nil when !lockMic — see construction
-							// above). Stop the timer; drain per
-							// time.Timer.Stop's documented pattern in case
-							// it raced and already fired.
-							stopNoSpeechTimer()
-						}
-					}
-				}
-			} else {
-				speechCount = 0
-				if active {
-					silenceCount++
-					if silenceCount >= silenceMax {
-						active = false
-						silenceCount = 0
-						if len(buf) > 0 {
-							pad := make([]byte, vadOwwChunkBytes-len(buf)%vadOwwChunkBytes)
-							buf = append(buf, pad...)
-							for len(buf) >= vadOwwChunkBytes {
-								sendMic(buf[:vadOwwChunkBytes])
-								buf = buf[vadOwwChunkBytes:]
-							}
-							buf = buf[:0]
-						}
-						finishGrant(turnEpoch, frameTypeVADEnd)
-						resetTurnState()
-						continue
-					}
-				}
-			}
-
-			if active {
-				buf = append(buf, mono...)
-				for len(buf) >= vadOwwChunkBytes {
-					sendMic(buf[:vadOwwChunkBytes])
-					buf = buf[vadOwwChunkBytes:]
-				}
-			} else {
-				// Gate closed — keep the most recent batches for the next
-				// gate open, capped by duration rather than count.
-				prerollMax := prerollBudgetMs / batchMs
-				if prerollMax < 1 {
-					prerollMax = 1
-				}
-				for len(preroll) >= prerollMax {
-					copy(preroll, preroll[1:])
-					preroll = preroll[:len(preroll)-1]
-				}
-				preroll = append(preroll, mono)
+			// Stream live AFE audio continuously in 80ms chunks while granted
+			buf = append(buf, mono...)
+			for len(buf) >= vadOwwChunkBytes {
+				sendMic(buf[:vadOwwChunkBytes])
+				buf = buf[vadOwwChunkBytes:]
 			}
 		}
 	}

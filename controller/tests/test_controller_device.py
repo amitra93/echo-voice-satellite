@@ -1609,6 +1609,7 @@ def test_run_voice_locked_continuation_uses_fresh_admission_and_keeps_wake_grant
         # continuation must have a fresh deadline, not the stale one
         assert captured["second_admission"] is not captured["first_admission"]
         assert captured["second_admission"]() is True
+        assert "mic_start" in calls
         # The fresh deadline must be live; stale would be disconnected.
         # (mic_stop gating for wake_request_v1 is verified separately
         # via the barge/continuation stream remaining alive.)
