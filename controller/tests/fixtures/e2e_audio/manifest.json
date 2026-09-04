@@ -1,0 +1,336 @@
+{
+  "_comment": "Single source of truth for the E2E query test corpus. generate_fixtures.py reads this to synthesize each case's WAV; controller/tools/e2e_query_test.py reads it to drive and assert each case. Keep both in step by editing only this file — see docs/e2e-query-testing.md.",
+  "version": 1,
+  "cases": [
+    {
+      "id": "N1-general-knowledge",
+      "category": "normal",
+      "kind": "turn",
+      "source": "piper",
+      "phrase": "What is the capital of France?",
+      "fixture": "N1-general-knowledge.wav",
+      "preconditions": {},
+      "expect": {
+        "outcome_in": ["ok"],
+        "stt_contains": ["capital", "france"],
+        "min_tts_chars": 1
+      },
+      "note": "General-knowledge query with a single factual answer. No timer/media side effects."
+    },
+    {
+      "id": "N2-time-query",
+      "category": "normal",
+      "kind": "turn",
+      "source": "piper",
+      "phrase": "What time is it right now?",
+      "fixture": "N2-time-query.wav",
+      "preconditions": {},
+      "expect": {
+        "outcome_in": ["ok"],
+        "stt_contains": ["time"],
+        "min_tts_chars": 1
+      },
+      "note": "Built-in HassGetTime-shaped intent; works on a local Assist pipeline too, useful as a smoke case independent of the LLM."
+    },
+    {
+      "id": "N3-explicit-noop",
+      "category": "normal",
+      "kind": "turn",
+      "source": "piper",
+      "phrase": "Nevermind.",
+      "fixture": "N3-explicit-noop.wav",
+      "preconditions": {},
+      "expect": {
+        "outcome_in": ["ok", "no_tts"],
+        "stt_contains": ["never mind"]
+      },
+      "note": "Verified on hardware 2026-09-03 against the configured LLM-backed pipeline: STT returns 'Never mind.' (two words — match on the phrase, not the one-word 'nevermind') and the pipeline answers conversationally ('Alright! Let me know if you need anything else.') rather than through the built-in HassNevermind intent's silent cancellation. That's a property of this pipeline choosing to chat rather than of the turn engine, so outcome_in still allows the silent no_tts shape a sentence-trigger pipeline would take."
+    },
+    {
+      "id": "N4-silence",
+      "category": "normal",
+      "kind": "turn",
+      "source": "silence",
+      "duration_s": 3.0,
+      "fixture": "N4-silence.wav",
+      "preconditions": {},
+      "expect": {
+        "outcome_in": ["no_speech", "audio_timeout"]
+      },
+      "note": "Nothing but silence. Verified on hardware 2026-09-03: this does NOT take the fast em_turnclock-style no-speech path — STT reaches an endpoint on the empty audio, but the pipeline never calls POST tts/end for the resulting empty transcript, so the turn rides the full em_announce.ANNOUNCE_TIMEOUT_S (120s) backstop before ending as audio_timeout (measured total_ms=123148). That backstop is exactly what stops the turn (and the device's voice_lock) from hanging forever per CLAUDE.md's turn-engine notes, so audio_timeout here is bounded, expected behaviour, not a hang — but a ~2-minute cost for silent audio is worth a closer look on the HACS/pipeline side if it also happens for a real accidental wake with no speech.",
+      "manual_followup": "If this consistently lands on audio_timeout rather than no_speech, check whether the configured pipeline calls tts/end for an empty transcript — see em_turn_engine.py's 'every turn must resolve the TTS side of the rendezvous' note."
+    },
+    {
+      "id": "N5-noise",
+      "category": "normal",
+      "kind": "turn",
+      "source": "noise",
+      "duration_s": 3.0,
+      "fixture": "N5-noise.wav",
+      "preconditions": {},
+      "expect": {
+        "outcome_in": ["no_speech", "ok", "audio_timeout"]
+      },
+      "note": "Low-amplitude white noise, not speech. STT on noise is inherently nondeterministic (Gemini may return nothing, or a garbage guess) — this case is about completing gracefully with no crash or hang, not about a specific transcript. Verified on hardware 2026-09-03: this noise level produced an empty transcript and landed on the same audio_timeout/120s-backstop path as N4-silence (see its note) rather than a fast no_speech."
+    },
+    {
+      "id": "N6-near-max-length",
+      "category": "normal",
+      "kind": "turn",
+      "source": "piper",
+      "phrase": "This is a longer spoken message used only to test that the device and controller can transfer and process audio close to the maximum allowed test query length without truncating it or timing out along the way.",
+      "pad_silence_s": 95,
+      "fixture": "N6-near-max-length.wav",
+      "preconditions": {},
+      "expect": {
+        "outcome_in": ["ok", "no_speech"]
+      },
+      "note": "Speech padded with trailing silence to approach TEST_AUDIO_MAX_SECONDS (120s) without exceeding it. Verifies the upload/convert/transfer path handles a near-boundary file; not a transcript-accuracy check.",
+      "manual_followup": "If this fails at upload with invalid_audio/too_large, the padding target has drifted past the 120s cap — check em_test_audio.TEST_AUDIO_MAX_SECONDS."
+    },
+    {
+      "id": "G-empty-upload",
+      "category": "gating",
+      "kind": "upload_reject",
+      "payload": "empty",
+      "preconditions": {},
+      "expect": {
+        "status": 400,
+        "error_code": "empty_upload"
+      },
+      "note": "Zero-byte upload to POST /test_audio. Negative-path only — no device turn is triggered."
+    },
+    {
+      "id": "G-oversized-upload",
+      "category": "gating",
+      "kind": "upload_reject",
+      "payload": "oversized",
+      "preconditions": {},
+      "expect": {
+        "status": 413,
+        "error_code": "too_large"
+      },
+      "note": "Upload just over TEST_AUDIO_MAX_INPUT (50MB) of junk bytes. Rejected on size before ffmpeg ever runs, so the bytes need not be valid audio."
+    },
+    {
+      "id": "G-muted",
+      "category": "gating",
+      "kind": "reject",
+      "source": "piper",
+      "phrase": "What time is it right now?",
+      "fixture": "G-muted.wav",
+      "preconditions": {"mute": true},
+      "expect": {
+        "endpoint": "test_turn",
+        "status": 409,
+        "error_code": "device_muted"
+      },
+      "note": "Device is muted via POST /api/devices/{id}/media {command: mute_toggle} before the case, and restored afterward. Upload succeeds (test_audio has no mute check); test_turn must refuse."
+    },
+    {
+      "id": "G-busy",
+      "category": "gating",
+      "kind": "busy",
+      "fixture": "N6-near-max-length.wav",
+      "preconditions": {},
+      "expect": {
+        "status": 409,
+        "error_code": "test_turn_busy"
+      },
+      "note": "Reuses the long N6 fixture so the first test_turn is still running when the second one is attempted immediately after. Waits for the first turn to finish before returning."
+    },
+    {
+      "id": "T1-create-named",
+      "category": "timers",
+      "kind": "turn",
+      "source": "piper",
+      "phrase": "Set a timer for two minutes called pasta.",
+      "fixture": "T1-create-named.wav",
+      "preconditions": {},
+      "expect": {
+        "outcome_in": ["ok"],
+        "stt_contains": ["timer", "pasta"],
+        "min_tts_chars": 1
+      },
+      "note": "Named timer create. Confirm in the HA timer card / logbook that a timer named ‘pasta’ actually exists — stt/tts text matching HA understood the request, not that HassStartTimer ran. KNOWN FLAKE (verified on hardware 2026-09-03, root-caused not just observed): the clause boundary before 'called pasta' renders with a real prosodic pause in Piper's synthesis — confirmed by Gemini's OWN transcript inserting a comma there on a passing run ('two minutes, called pasta.') — and depending on real-time network/delivery jitter around that pause, Gemini's live VAD occasionally treats it as end-of-speech and truncates the turn early (observed transcript: 'Set a timer for two minutes.', name silently dropped, outcome still ok). This is in the STT integration's live endpointing, not the turn engine or this harness's sequencing — a settle delay between cases does not fix it. If it reproduces often, rephrasing to avoid a clause boundary right before the name (e.g. naming the timer before stating its duration) is the actionable mitigation; a rerun is the workaround.",
+      "manual_followup": "Check the echo-voice-timers-card or HA logbook for a new 'pasta' timer, then cancel it."
+    },
+    {
+      "id": "T2-create-unnamed",
+      "category": "timers",
+      "kind": "turn",
+      "source": "piper",
+      "phrase": "Set a timer for ninety seconds.",
+      "fixture": "T2-create-unnamed.wav",
+      "preconditions": {},
+      "expect": {
+        "outcome_in": ["ok"],
+        "stt_contains": ["timer"],
+        "min_tts_chars": 1
+      },
+      "note": "Unnamed timer create — per timers-design.md's required system-prompt instruction, the configured LLM should derive a duration-based name (e.g. '90 second timer') rather than a generic 'Timer'.",
+      "manual_followup": "Check the timer card for a duration-derived name, not a bare 'Timer'."
+    },
+    {
+      "id": "T3-cancel-named",
+      "category": "timers",
+      "kind": "turn",
+      "setup_phrases": ["Set a timer for ten minutes called laundry."],
+      "source": "piper",
+      "phrase": "Cancel the laundry timer.",
+      "fixture": "T3-cancel-named.wav",
+      "preconditions": {},
+      "expect": {
+        "outcome_in": ["ok"],
+        "stt_contains": ["cancel", "laundry"],
+        "min_tts_chars": 1
+      },
+      "note": "Two-turn case: creates a named timer, waits for that turn to finish, then cancels it by name. Shares T1-create-named's known live-VAD-endpointing flake — verified on hardware 2026-09-03 with a garbled cross-turn transcript ('Set a 100-minute timer.') where the assertion failed; passed cleanly both in an isolated single-case rerun and in a full-category run on other occasions, consistent with real-time STT timing variance rather than a deterministic bug in either the turn engine or this case's own sequencing."
+    },
+    {
+      "id": "T4-pause-resume",
+      "category": "timers",
+      "kind": "turn",
+      "setup_phrases": ["Set a timer for ten minutes called bread."],
+      "source": "piper",
+      "phrase": "Pause the bread timer.",
+      "fixture": "T4-pause-resume.wav",
+      "preconditions": {},
+      "expect": {
+        "outcome_in": ["ok"],
+        "stt_contains": ["pause", "bread"],
+        "min_tts_chars": 1
+      },
+      "note": "Manually resume ('Unpause the bread timer.') and cancel afterward — this case only exercises the pause half. Shares T1-create-named's known live-VAD-endpointing flake — verified on hardware 2026-09-03 (observed transcript truncated to 'Bread timer.', missing the leading 'Pause the'); passed cleanly on other runs, including isolated single-case reruns."
+    },
+    {
+      "id": "T5-status-ordinal",
+      "category": "timers",
+      "kind": "turn",
+      "setup_phrases": ["Set a timer for five minutes called tea."],
+      "source": "piper",
+      "phrase": "How much time is left on the tea timer?",
+      "fixture": "T5-status-ordinal.wav",
+      "preconditions": {},
+      "expect": {
+        "outcome_in": ["ok"],
+        "min_tts_chars": 1
+      },
+      "note": "HassTimerStatus by name. Per timers-design.md, an ordinal follow-up ('cancel the first one') on an LLM pipeline is best-effort and may be ambiguous with duplicate timers — not covered here since it needs two same-named or same-duration timers to be meaningful; see manual acceptance checklist.",
+      "manual_followup": "Cancel the 'tea' timer afterward."
+    },
+    {
+      "id": "T6-cancel-all",
+      "category": "timers",
+      "kind": "turn",
+      "setup_phrases": [
+        "Set a timer for three minutes called one.",
+        "Set a timer for four minutes called two."
+      ],
+      "source": "piper",
+      "phrase": "Cancel all timers.",
+      "fixture": "T6-cancel-all.wav",
+      "preconditions": {},
+      "expect": {
+        "outcome_in": ["ok"],
+        "stt_contains": ["cancel"],
+        "min_tts_chars": 1
+      },
+      "note": "Three-turn case: two setup timers, then HA-native cancel-all scope."
+    },
+    {
+      "id": "T7-timer-during-music",
+      "category": "timers",
+      "kind": "turn",
+      "source": "piper",
+      "phrase": "Set a timer for one minute called tea.",
+      "fixture": "T7-timer-during-music.wav",
+      "preconditions": {
+        "manual_setup": "Start music playback on this device (HA media player, Sendspin, or the dashboard) before continuing."
+      },
+      "expect": {
+        "outcome_in": ["ok"],
+        "stt_contains": ["timer"],
+        "min_tts_chars": 1
+      },
+      "note": "Voice turn while music plays underneath. The runner cannot start playback itself — confirm audibly that music ducks (audio_mix firmware) or pauses+resumes (older firmware) per audio-states.md, and is never displaced by music_flush.",
+      "manual_followup": "Confirm music ducked/paused correctly and resumed after the reply, and cancel the 'tea' timer."
+    },
+    {
+      "id": "F1-continuation-shaped",
+      "category": "followup",
+      "kind": "turn",
+      "source": "piper",
+      "phrase": "Set a timer.",
+      "fixture": "F1-continuation-shaped.wav",
+      "preconditions": {},
+      "expect": {
+        "outcome_in": ["ok", "no_speech"],
+        "continuation_expected": true
+      },
+      "note": "Deliberately underspecified (no duration/name) so the configured LLM is likely to ask a clarifying follow-up and set continue_conversation. The runner only checks that a second turn with trigger=continuation was raised — it cannot supply the follow-up utterance itself (the device re-arms its LIVE mic, not a second uploaded file), so that second turn will usually end no_speech unless you speak into the room during the continuation window.",
+      "manual_followup": "To exercise the full loop, speak a duration out loud (e.g. 'five minutes') within a few seconds of the reply finishing, then confirm the timer was created."
+    },
+    {
+      "id": "F2-single-shot-no-continuation",
+      "category": "followup",
+      "kind": "turn",
+      "source": "piper",
+      "phrase": "What is the capital of France?",
+      "fixture": "F2-single-shot-no-continuation.wav",
+      "preconditions": {},
+      "expect": {
+        "outcome_in": ["ok"],
+        "continuation_expected": false
+      },
+      "note": "Control case for F1: a fully-resolved question must NOT spawn a continuation turn."
+    },
+    {
+      "id": "M1-play-music",
+      "category": "media",
+      "kind": "turn",
+      "source": "piper",
+      "phrase": "Play some jazz music.",
+      "fixture": "M1-play-music.wav",
+      "preconditions": {},
+      "expect": {
+        "outcome_in": ["ok"],
+        "min_tts_chars": 0
+      },
+      "note": "Whether this actually starts playback depends on a configured media source (Music Assistant/Sendspin); an error-shaped spoken reply is still a passing, gracefully-handled turn. Confirm audibly.",
+      "manual_followup": "Confirm music actually started, and stop it afterward."
+    },
+    {
+      "id": "M2-query-during-music",
+      "category": "media",
+      "kind": "turn",
+      "source": "piper",
+      "phrase": "What is the capital of France?",
+      "fixture": "M2-query-during-music.wav",
+      "preconditions": {
+        "manual_setup": "Start music playback on this device before continuing."
+      },
+      "expect": {
+        "outcome_in": ["ok"],
+        "min_tts_chars": 1
+      },
+      "note": "Same duck/pause invariants as T7, for a non-timer query. Voice must never be attenuated; music_flush must never be sent for a voice turn (audio-states.md).",
+      "manual_followup": "Confirm ducking/pause + resume behavior audibly."
+    },
+    {
+      "id": "M3-stop-music",
+      "category": "media",
+      "kind": "turn",
+      "source": "piper",
+      "phrase": "Stop the music.",
+      "fixture": "M3-stop-music.wav",
+      "preconditions": {
+        "manual_setup": "Start music playback on this device before continuing."
+      },
+      "expect": {
+        "outcome_in": ["ok"]
+      },
+      "note": "Spoken stop command while music plays."
+    }
+  ]
+}

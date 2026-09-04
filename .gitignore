@@ -28,3 +28,8 @@ controller/models/
 *.db
 *.db-wal
 *.db-shm
+
+# E2E query test audio corpus (docs/e2e-query-testing.md) — generated
+# deterministically from manifest.json by generate_fixtures.py, same policy
+# as oww_forge/data: regenerable bytes, not authored content.
+controller/tests/fixtures/e2e_audio/*.wav
