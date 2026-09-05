@@ -340,8 +340,22 @@ def init(devices_ref: dict, shell_pending_ref: dict, shell_dashboard_ref: dict) 
             await em_controller.leds_off(device)
         await em_controller._push_device_state(device)
 
+    async def _push_timer_alarm(device_id: str) -> None:
+        # The runner's own session mutations (unanswered-ring timeout,
+        # undeliverable alarm) publish the same snapshot the event-driven
+        # paths do, so HACS presence and the card retire with the session
+        # instead of ringing forever against an idle controller.
+        session = _timer_sessions.get(device_id)
+        if session is None:
+            return
+        await _push_event({
+            "type": "timer.alarm",
+            "device_id": device_id,
+            **session.snapshot(),
+        })
+
     _timer_alarm_runner = em_timer_alarm.TimerAlarmRunner(
-        _devices.get, _play, on_state=_timer_state
+        _devices.get, _play, on_state=_timer_state, on_changed=_push_timer_alarm
     )
 
 

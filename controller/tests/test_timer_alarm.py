@@ -183,3 +183,59 @@ def test_alarm_ring_duration_is_immune_to_a_wall_clock_dst_jump(monkeypatch, jum
 
     assert bursts == 1
     assert session.current is None
+
+
+def test_unanswered_ring_timeout_notifies_so_consumers_retire(monkeypatch):
+    """Pasta, 18:35: a 120s unanswered ring cleared `current` via
+    timeout_current() with no timer.alarm push, so HACS presence and the
+    card showed "ringing" for an hour against an idle controller — and a
+    later dismiss correctly reported false while the card never cleared.
+    The timeout must publish like every other session mutation."""
+    session = em_timers.AlarmSession()
+    session.apply(_event("pizza"))
+    changed = []
+
+    async def playback(_device, _pcm, _cancel):
+        pass
+
+    async def on_changed(device_id):
+        changed.append(device_id)
+
+    monkeypatch.setattr(em_timer_alarm.em_player, "interrupt", _noop)
+    monkeypatch.setattr(em_timer_alarm.em_player, "resume_interrupted", _noop)
+    runner = em_timer_alarm.TimerAlarmRunner(
+        lambda _device_id: "device", playback,
+        on_changed=on_changed, max_ring_s=0,
+    )
+    runner._sound_cache = b"pcm"
+
+    async def run():
+        runner.start("device", session)
+        await asyncio.wait_for(runner._tasks["device"], timeout=1)
+
+    asyncio.run(run())
+
+    assert session.current is None
+    assert changed == ["device"]
+
+
+def test_undeliverable_alarm_notifies_instead_of_sticking_ringing(monkeypatch):
+    session = em_timers.AlarmSession()
+    session.apply(_event("pizza"))
+    changed = []
+
+    async def on_changed(device_id):
+        changed.append(device_id)
+
+    runner = em_timer_alarm.TimerAlarmRunner(
+        lambda _device_id: None, _unused_playback, on_changed=on_changed,
+    )
+
+    async def run():
+        runner.start("device", session)
+        await asyncio.wait_for(runner._tasks["device"], timeout=1)
+
+    asyncio.run(run())
+
+    assert session.current is None
+    assert changed == ["device"]

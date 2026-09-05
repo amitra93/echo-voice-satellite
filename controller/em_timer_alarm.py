@@ -16,6 +16,13 @@ import em_timers
 
 PlaybackCallback = Callable[[object, bytes, asyncio.Event], Awaitable[None]]
 StateCallback = Callable[[str, bool], Awaitable[None]]
+# Fired after the runner itself mutates the session (unanswered-ring
+# timeout, undeliverable alarm) — the same moments the event-driven paths
+# push a fresh timer.alarm snapshot, and for the same reason: without it
+# downstream consumers (HACS presence, the card) keep showing a "ringing"
+# timer the controller has already dropped, and a later dismiss correctly
+# reports false while the card never clears.
+ChangedCallback = Callable[[str], Awaitable[None]]
 
 
 class TimerAlarmRunner:
@@ -25,12 +32,14 @@ class TimerAlarmRunner:
         playback: PlaybackCallback,
         *,
         on_state: StateCallback | None = None,
+        on_changed: ChangedCallback | None = None,
         sound_file: str = em_timers.ALARM_SOUND_FILE,
         max_ring_s: float = em_timers.MAX_RING_S,
     ) -> None:
         self._get_device = get_device
         self._playback = playback
         self._on_state = on_state
+        self._on_changed = on_changed
         self._sound_file = Path(sound_file)
         self._max_ring_s = max_ring_s
         self._sound_cache: bytes | None = None
@@ -74,16 +83,31 @@ class TimerAlarmRunner:
     async def disconnect(self, device_id: str) -> None:
         await self.stop(device_id)
 
+    async def _notify_changed(self, device_id: str) -> None:
+        if self._on_changed is not None:
+            await self._on_changed(device_id)
+
     async def _run(
         self, device_id: str, session: em_timers.AlarmSession, cancel: asyncio.Event
     ) -> None:
         device = self._get_device(device_id)
         if device is None:
             session.delivery_failed()
+            await self._notify_changed(device_id)
             return
-        pcm = await self._load_sound()
+        try:
+            pcm = await self._load_sound()
+        except OSError:
+            # No ffmpeg / unreadable file: create_subprocess_exec raises
+            # instead of returning empty bytes, and an uncaught raise here
+            # would leave the session ringing with no task left to clear
+            # it — the same silent-stuck shape as the paths below.
+            session.delivery_failed()
+            await self._notify_changed(device_id)
+            return
         if not pcm:
             session.delivery_failed()
+            await self._notify_changed(device_id)
             return
 
         await em_player.interrupt(device_id)
@@ -96,6 +120,7 @@ class TimerAlarmRunner:
                     break
                 if asyncio.get_running_loop().time() >= deadline:
                     session.timeout_current()
+                    await self._notify_changed(device_id)
                     continue
                 await asyncio.sleep(em_timers.BURST_GAP_S)
         finally:
