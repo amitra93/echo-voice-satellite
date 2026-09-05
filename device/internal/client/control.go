@@ -88,6 +88,13 @@ type VolumeSetCallback func(level int)
 type MuteToggleCallback func()
 type StopArmCallback func(turnID string, generation uint64, phase string, expiry time.Duration)
 type StopDisarmCallback func(generation uint64)
+
+// NoSpeechDisarmCallback fires when the controller reports HA already
+// transcribed speech on the live turn ("no_speech_disarm") — the device's
+// 5s no-speech deadline must not end that turn. Wired to
+// DataClient.DisarmNoSpeech; firmware predating the message ignores the
+// unknown type via the default case below, per the capability rule.
+type NoSpeechDisarmCallback func()
 type WakeDecisionCallback func(requestID, turnID, source string, activationSeq uint16, expires time.Time)
 
 type pendingWakeRequest struct {
@@ -121,6 +128,7 @@ type ControlClient struct {
 	muteToggleCallback       MuteToggleCallback
 	stopArmCallback          StopArmCallback
 	stopDisarmCallback       StopDisarmCallback
+	noSpeechDisarmCallback   NoSpeechDisarmCallback
 	speakerFlushCallback     StateCallback
 	musicFlushCallback       StateCallback
 	duckCallback             func(on bool)
@@ -168,24 +176,25 @@ func NewControlClient(
 	}
 }
 
-func (c *ControlClient) OnLEDAnim(cb LEDAnimCallback)             { c.ledAnimCallback = cb }
-func (c *ControlClient) OnDisconnected(cb StateCallback)          { c.disconnectedCallback = cb }
-func (c *ControlClient) OnConnected(cb StateCallback)             { c.connectedCallback = cb }
-func (c *ControlClient) OnPending(cb StateCallback)               { c.pendingCallback = cb }
-func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback) { c.configAppliedCallback = cb }
-func (c *ControlClient) OnVolumeSet(cb VolumeSetCallback)         { c.volumeSetCallback = cb }
-func (c *ControlClient) OnMuteToggle(cb MuteToggleCallback)       { c.muteToggleCallback = cb }
-func (c *ControlClient) OnStopArm(cb StopArmCallback)             { c.stopArmCallback = cb }
-func (c *ControlClient) OnStopDisarm(cb StopDisarmCallback)       { c.stopDisarmCallback = cb }
-func (c *ControlClient) OnSpeakerFlush(cb StateCallback)          { c.speakerFlushCallback = cb }
-func (c *ControlClient) OnMusicFlush(cb StateCallback)            { c.musicFlushCallback = cb }
-func (c *ControlClient) OnDuck(cb func(on bool))                  { c.duckCallback = cb }
-func (c *ControlClient) OnWifiChange(cb WifiChangeCallback)       { c.wifiChangeCallback = cb }
-func (c *ControlClient) OnWifiCommit(cb StateCallback)            { c.wifiCommitCallback = cb }
-func (c *ControlClient) OnWifiScan(cb StateCallback)              { c.wifiScanCallback = cb }
-func (c *ControlClient) OnTestAudio(cb StateCallback)             { c.testAudioCallback = cb }
-func (c *ControlClient) OnTestAudioCleanup(cb StateCallback)      { c.testAudioCleanupCallback = cb }
-func (c *ControlClient) OnWakeGrant(cb WakeDecisionCallback)      { c.wakeGrantCallback = cb }
+func (c *ControlClient) OnLEDAnim(cb LEDAnimCallback)               { c.ledAnimCallback = cb }
+func (c *ControlClient) OnDisconnected(cb StateCallback)            { c.disconnectedCallback = cb }
+func (c *ControlClient) OnConnected(cb StateCallback)               { c.connectedCallback = cb }
+func (c *ControlClient) OnPending(cb StateCallback)                 { c.pendingCallback = cb }
+func (c *ControlClient) OnConfigApplied(cb ConfigAppliedCallback)   { c.configAppliedCallback = cb }
+func (c *ControlClient) OnVolumeSet(cb VolumeSetCallback)           { c.volumeSetCallback = cb }
+func (c *ControlClient) OnMuteToggle(cb MuteToggleCallback)         { c.muteToggleCallback = cb }
+func (c *ControlClient) OnStopArm(cb StopArmCallback)               { c.stopArmCallback = cb }
+func (c *ControlClient) OnStopDisarm(cb StopDisarmCallback)         { c.stopDisarmCallback = cb }
+func (c *ControlClient) OnNoSpeechDisarm(cb NoSpeechDisarmCallback) { c.noSpeechDisarmCallback = cb }
+func (c *ControlClient) OnSpeakerFlush(cb StateCallback)            { c.speakerFlushCallback = cb }
+func (c *ControlClient) OnMusicFlush(cb StateCallback)              { c.musicFlushCallback = cb }
+func (c *ControlClient) OnDuck(cb func(on bool))                    { c.duckCallback = cb }
+func (c *ControlClient) OnWifiChange(cb WifiChangeCallback)         { c.wifiChangeCallback = cb }
+func (c *ControlClient) OnWifiCommit(cb StateCallback)              { c.wifiCommitCallback = cb }
+func (c *ControlClient) OnWifiScan(cb StateCallback)                { c.wifiScanCallback = cb }
+func (c *ControlClient) OnTestAudio(cb StateCallback)               { c.testAudioCallback = cb }
+func (c *ControlClient) OnTestAudioCleanup(cb StateCallback)        { c.testAudioCleanupCallback = cb }
+func (c *ControlClient) OnWakeGrant(cb WakeDecisionCallback)        { c.wakeGrantCallback = cb }
 func (c *ControlClient) OnWakeDeny(cb func(requestID, source, reason string)) {
 	c.wakeDenyCallback = cb
 }
@@ -551,6 +560,11 @@ func (c *ControlClient) connect(ctx context.Context, server *discovery.ServerInf
 			}
 			if err := json.Unmarshal(raw, &msg); err == nil && c.stopDisarmCallback != nil {
 				c.stopDisarmCallback(msg.Generation)
+			}
+
+		case "no_speech_disarm":
+			if c.noSpeechDisarmCallback != nil {
+				c.noSpeechDisarmCallback()
 			}
 
 		case "config":

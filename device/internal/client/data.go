@@ -117,15 +117,15 @@ const (
 	// gate-open.
 	prerollBudgetMs = 512
 
-	// noSpeechTimeout bounds how long streamMic will wait for speech to
-	// ever be detected after a turn starts. If active never becomes true
-	// within this window, the turn ends via frameTypeNoSpeechTimeout rather
-	// than sitting open indefinitely — mirrors Alexa's behaviour of giving
-	// up quickly on a wake word followed by silence, rather than depending
-	// on the upstream pipeline's own (much longer, HA VAD-driven) timeout.
-	// Only guards the "never spoke" case; once active==true this deadline
-	// no longer applies — the existing silenceMax hysteresis owns speech
-	// end-of-turn detection from that point on.
+	// noSpeechTimeout bounds how long a granted turn may run without any
+	// sign of speech before streamMic ends it via frameTypeNoSpeechTimeout
+	// rather than sitting open indefinitely — mirrors Alexa's behaviour of
+	// giving up quickly on a wake word followed by silence, rather than
+	// depending on the upstream pipeline's own (much longer, HA VAD-driven)
+	// timeout. Only guards the "never spoke" case: the controller sends
+	// "no_speech_disarm" with the first transcript partial (see
+	// DisarmNoSpeech), and a disarmed grant is never ended here — HA is
+	// demonstrably transcribing, so end-of-turn is owned upstream.
 	noSpeechTimeout = 5 * time.Second
 )
 
@@ -208,8 +208,16 @@ type DataClient struct {
 	grantEpoch      uint64
 	activeRequestID string
 	pendingReplay   []capture.Frame
-	localRing       *capture.Ring
-	captureManager  *capture.Manager
+	// noSpeechDisarmedEpoch records the grant epoch the controller's
+	// "no_speech_disarm" arrived for (HA already transcribed speech, so
+	// the 5s no-speech deadline no longer applies to that turn).
+	// Compared by epoch, not as a bool, so a stale disarm can never
+	// disarm a LATER turn: every GrantMic bumps grantEpoch, and only
+	// an exact match suppresses the deadline. Guarded by wakeMu with
+	// the rest of the grant state.
+	noSpeechDisarmedEpoch uint64
+	localRing             *capture.Ring
+	captureManager        *capture.Manager
 
 	stopMu       sync.Mutex
 	stopScorer   *shadow.Scorer
@@ -263,6 +271,33 @@ func (d *DataClient) GrantMic(requestID string, activationSeq uint16, replay boo
 	d.grantEpoch++
 	d.activeRequestID = requestID
 	return true
+}
+
+// DisarmNoSpeech records that HA has already heard speech on the current
+// grant (the controller sends "no_speech_disarm" with the first transcript
+// partial), so the 5s no-speech deadline must not end or cut that turn.
+// Turn 650: Gemini had transcribed the full command as partials with its
+// final STT ~1s behind the deadline — ending the turn there answered
+// silence to someone mid-sentence. The device cannot hear HA's partials,
+// so this is the only channel that tells it the deadline lost its meaning.
+//
+// Epoch-scoped: a disarm names the currently granted epoch, and streamMic
+// only honours an exact match. A disarm that arrives after its turn ended
+// (or before any grant) therefore cannot disarm the NEXT turn — the epoch
+// will have moved on by then.
+func (d *DataClient) DisarmNoSpeech() {
+	d.wakeMu.Lock()
+	d.noSpeechDisarmedEpoch = d.grantEpoch
+	d.wakeMu.Unlock()
+	log.Println("[data] no-speech deadline disarmed — upstream heard speech")
+}
+
+// noSpeechDisarmedFor reports whether epoch's no-speech deadline was
+// disarmed. Caller must not hold wakeMu.
+func (d *DataClient) noSpeechDisarmedFor(epoch uint64) bool {
+	d.wakeMu.Lock()
+	defer d.wakeMu.Unlock()
+	return d.noSpeechDisarmedEpoch == epoch && epoch != 0
 }
 
 func (d *DataClient) ConfigureWakeCaptures(enabled bool, seconds, floor float64, model, checksum string) {
@@ -834,11 +869,11 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 		wireSeq++
 	}
 
-	// noSpeechTimer fires if speech is never detected within noSpeechTimeout
-	// of turn start. Stopped (and its channel drained) the instant active
-	// first becomes true — from that point on, end-of-turn is entirely
-	// owned by the existing silenceMax hysteresis below, same as before
-	// this change.
+	// noSpeechTimer fires if a granted turn runs noSpeechTimeout without
+	// the controller reporting transcribed speech (see DisarmNoSpeech).
+	// The firing is then swallowed and the grant stays open — end-of-turn
+	// from that point on is entirely owned upstream (HACS endpoint, or the
+	// controller's own turn timeouts).
 	//
 	// Only armed for a granted bounded turn. The pre-grant local detector stream
 	// must never end because the room is quiet.
@@ -902,6 +937,18 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 
 		case <-noSpeechTimerC:
 			// Safety timeout: if granted turn runs without upstream termination.
+			// Swallowed when the live grant was disarmed (HA transcribed
+			// speech, so ending here would answer silence to someone who
+			// spoke — turn 650). The grant stays open and end-of-turn is
+			// owned upstream; a later grant re-arms under its own epoch.
+			d.wakeMu.Lock()
+			disarmed := d.noSpeechDisarmedEpoch == d.grantEpoch
+			d.wakeMu.Unlock()
+			if disarmed {
+				log.Println("[data] streamMic: no-speech deadline passed but upstream heard speech — keeping turn open")
+				resetTurnState()
+				continue
+			}
 			log.Println("[data] streamMic: no speech detected within timeout — ending turn")
 			finishGrant(turnEpoch, frameTypeNoSpeechTimeout)
 			resetTurnState()
@@ -966,7 +1013,12 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 			if !granted {
 				continue
 			}
-			if noSpeechTimer == nil {
+			// A disarmed epoch stays disarmed: HA already transcribed speech
+			// on this grant, so re-arming would end a live turn on a
+			// deadline whose premise ("nobody spoke") is disproven. A new
+			// grant bumps the epoch and re-arms, since the new turn has no
+			// speech evidence of its own yet.
+			if noSpeechTimer == nil && !d.noSpeechDisarmedFor(epoch) {
 				armNoSpeechTimer()
 			}
 

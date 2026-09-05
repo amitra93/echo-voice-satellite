@@ -345,3 +345,137 @@ func TestVADPeriodRMSAndNoSpeechTimeoutOverride(t *testing.T) {
 		t.Fatalf("default = %v", got)
 	}
 }
+
+// noSpeechGrantResult runs one granted mic stream against a short
+// no-speech deadline and reports what the wire carried.
+type noSpeechGrantResult struct {
+	sentinelTimeout bool
+	micFrames       int
+}
+
+func runNoSpeechGrant(t *testing.T, disarmFirst bool) noSpeechGrantResult {
+	t.Helper()
+	mic := newFanoutMic()
+	defer mic.close()
+
+	frames := make(chan []byte, 64)
+	up := websocket.Upgrader{}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		c, err := up.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer c.Close()
+		for {
+			_, payload, err := c.ReadMessage()
+			if err != nil {
+				return
+			}
+			frames <- payload
+		}
+	}))
+	defer srv.Close()
+	conn, _, err := websocket.DefaultDialer.Dial("ws://"+strings.TrimPrefix(srv.URL, "http://"), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	d := NewDataClient("nospeech-test", mic, nil)
+	d.conn = conn
+	d.StartMic(false)
+	defer d.StopMic()
+	if !d.GrantMic("wake:1", 0, false, time.Now().Add(5*time.Second)) {
+		t.Fatal("grant rejected")
+	}
+	if disarmFirst {
+		// HA transcribed speech on this grant — the controller's
+		// no_speech_disarm arrives before the deadline.
+		d.DisarmNoSpeech()
+	}
+	deadline := time.Now().Add(400 * time.Millisecond)
+	var result noSpeechGrantResult
+	for time.Now().Before(deadline) {
+		select {
+		case frame := <-frames:
+			if len(frame) == 0 || frame[0] != frameTypeMic {
+				continue
+			}
+			if len(frame) == 4 && frame[3] == frameTypeNoSpeechTimeout {
+				result.sentinelTimeout = true
+			} else {
+				result.micFrames++
+			}
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	return result
+}
+
+// TestNoSpeechDeadlineEndsASilentGrant verifies the 5s safety timeout
+// still ends a grant nobody spoke on.
+func TestNoSpeechDeadlineEndsASilentGrant(t *testing.T) {
+	old := noSpeechTimeoutForTest
+	t.Cleanup(func() { noSpeechTimeoutForTest = old })
+	noSpeechTimeoutForTest = 60 * time.Millisecond
+
+	result := runNoSpeechGrant(t, false)
+	if !result.sentinelTimeout {
+		t.Fatal("silent grant produced no no-speech-timeout sentinel")
+	}
+}
+
+// TestNoSpeechDisarmKeepsAGrantedTurnOpen verifies DisarmNoSpeech (turn
+// 650: HA transcribed speech while the device deadline was pending)
+// suppresses the timeout sentinel and keeps mic frames flowing.
+func TestNoSpeechDisarmKeepsAGrantedTurnOpen(t *testing.T) {
+	old := noSpeechTimeoutForTest
+	t.Cleanup(func() { noSpeechTimeoutForTest = old })
+	noSpeechTimeoutForTest = 60 * time.Millisecond
+
+	result := runNoSpeechGrant(t, true)
+	if result.sentinelTimeout {
+		t.Fatal("disarmed grant still ended in a no-speech-timeout sentinel")
+	}
+	if result.micFrames == 0 {
+		t.Fatal("disarmed grant streamed no mic frames")
+	}
+}
+
+// TestNoSpeechDisarmIsScopedToItsGrant verifies a disarm recorded for one
+// grant epoch cannot suppress the deadline of the NEXT grant: epochs move
+// on with every GrantMic, and only an exact match disarms.
+func TestNoSpeechDisarmIsScopedToItsGrant(t *testing.T) {
+	old := noSpeechTimeoutForTest
+	t.Cleanup(func() { noSpeechTimeoutForTest = old })
+	noSpeechTimeoutForTest = 60 * time.Millisecond
+
+	mic := newFanoutMic()
+	defer mic.close()
+	conn, cleanup := dialTestWS(t)
+	defer cleanup()
+
+	d := NewDataClient("nospeech-scope-test", mic, nil)
+	d.connMu.Lock()
+	d.conn = conn
+	d.connMu.Unlock()
+	d.StartMic(false)
+	defer d.StopMic()
+
+	// A stale disarm (no live grant — e.g. the previous turn already
+	// ended) records epoch 0; the next grant bumps to 1 and must still
+	// time out when silent.
+	d.DisarmNoSpeech()
+	d.wakeMu.Lock()
+	recorded := d.noSpeechDisarmedEpoch
+	d.wakeMu.Unlock()
+	if recorded != 0 {
+		t.Fatalf("stale disarm recorded epoch %d, want the pre-grant epoch 0", recorded)
+	}
+	if !d.GrantMic("wake:2", 0, false, time.Now().Add(5*time.Second)) {
+		t.Fatal("grant rejected")
+	}
+	if d.noSpeechDisarmedFor(1) {
+		t.Fatal("stale disarm suppressed a later grant's deadline")
+	}
+}

@@ -387,6 +387,10 @@ func main() {
 		dataClient.ArmStop(turnID, generation, phase, expiry)
 	})
 	controlClient.OnStopDisarm(dataClient.DisarmStop)
+	// HA transcribed speech on the live turn — the 5s no-speech deadline
+	// no longer applies to it (turn 650). Older controllers never send
+	// this; newer devices on older controllers simply never disarm.
+	controlClient.OnNoSpeechDisarm(dataClient.DisarmNoSpeech)
 
 	// Speaker flush — barge-in: cut buffered TTS the moment the controller
 	// hears the wake word during playback.

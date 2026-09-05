@@ -307,6 +307,7 @@ func TestConnectDispatchesControlMessagesAndAppliesConfig(t *testing.T) {
 			map[string]interface{}{"type": "config", "vadThreshold": 0.123, "owwThreshold": 0.321, "stopModel": "stop_v1", "stopThreshold": 0.8},
 			map[string]interface{}{"type": "stop_arm", "turnId": "turn-1", "generation": 3, "phase": "playback", "expiryMs": 1000},
 			map[string]interface{}{"type": "stop_disarm", "generation": 3},
+			map[string]interface{}{"type": "no_speech_disarm"},
 			map[string]interface{}{"type": "wifi_change", "ssid": "Home", "psk": "password"},
 			map[string]interface{}{"type": "wifi_commit"}, map[string]interface{}{"type": "wifi_scan"},
 			map[string]interface{}{"type": "speaker_flush"}, map[string]interface{}{"type": "music_flush"},
@@ -321,7 +322,7 @@ func TestConnectDispatchesControlMessagesAndAppliesConfig(t *testing.T) {
 	}))
 	defer server.Close()
 
-	type events struct{ leds, anim, start, stop, volume, mute, wifi, commit, scan, speaker, music, test, cleanup, config, arm, disarm, capture int }
+	type events struct{ leds, anim, start, stop, volume, mute, wifi, commit, scan, speaker, music, test, cleanup, config, arm, disarm, nospeech, capture int }
 	var e events
 	configSeen := make(chan config.ConfigMessage, 1)
 	testAudioSeen := make(chan struct{}, 1)
@@ -341,6 +342,7 @@ func TestConnectDispatchesControlMessagesAndAppliesConfig(t *testing.T) {
 		}
 		e.disarm++
 	})
+	c.OnNoSpeechDisarm(func() { e.nospeech++ })
 	c.OnWifiChange(func(string, string) { e.wifi++ })
 	c.OnWifiCommit(func() { e.commit++ })
 	c.OnWifiScan(func() { e.scan++ })
@@ -374,7 +376,7 @@ func TestConnectDispatchesControlMessagesAndAppliesConfig(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("test audio callback did not run")
 	}
-	if e != (events{leds: 1, anim: 1, start: 1, stop: 1, volume: 1, mute: 1, wifi: 1, commit: 1, scan: 1, speaker: 1, music: 2, test: 1, cleanup: 1, arm: 1, disarm: 1, capture: 1}) {
+	if e != (events{leds: 1, anim: 1, start: 1, stop: 1, volume: 1, mute: 1, wifi: 1, commit: 1, scan: 1, speaker: 1, music: 2, test: 1, cleanup: 1, arm: 1, disarm: 1, nospeech: 1, capture: 1}) {
 		t.Fatalf("dispatch counts = %+v", e)
 	}
 	if got := config.Get().VadThreshold; got != 0.123 {
