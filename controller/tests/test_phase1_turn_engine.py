@@ -28,6 +28,10 @@ class FakeDevice:
     def __init__(self):
         self.voice_queue = asyncio.Queue()
         self.turn_history = collections.deque(maxlen=50)
+        self.controls = []
+
+    async def send_control(self, msg):
+        self.controls.append(msg)
 
 
 def test_mic_queue_is_forwarded_as_pcm_and_eos():

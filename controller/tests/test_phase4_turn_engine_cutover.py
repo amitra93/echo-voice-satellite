@@ -30,6 +30,10 @@ class FakeDevice:
         self.voice_queue = asyncio.Queue()
         self.turn_history = collections.deque(maxlen=50)
         self.last_wake = None
+        self.controls = []
+
+    async def send_control(self, msg):
+        self.controls.append(msg)
 
 
 def test_constants_match_the_old_esphome_values():
@@ -490,3 +494,130 @@ def test_trigger_voice_turn_writes_null_wake_columns_for_a_button_turn(monkeypat
         if em_db._conn is not None:
             em_db._conn.close()
         em_db._conn, em_db._db_path = old_conn, old_path
+
+
+# ── No-speech downgrade on speech evidence (turn 650) ────────────────────────
+#
+# Turn 650: the device's 5s no-speech deadline fired while HA was still
+# transcribing — 11 partials had already arrived, the full command among
+# them, with the final STT ~1s behind the deadline. Treating the timeout as
+# "nothing said" skipped the TTS wait, so no timer and no answer. A timeout
+# that arrives with partial transcripts in hand is a lost race, not a silent
+# room: it must end the mic side normally (EOS) and wait for HA's response.
+
+class _TranscriptRequest:
+    def __init__(self, tid, body):
+        self.match_info = {"tid": str(tid)}
+        self.path = f"/api/turns/{tid}/transcript"
+        self._body = body
+
+    async def json(self):
+        return self._body
+
+
+def test_no_speech_timeout_with_partials_is_treated_as_normal_end():
+    async def run():
+        device = FakeDevice()
+        turn = engine.Turn(1, device, None, None)
+        turn.socket = FakeSocket()
+        turn.stt_text = "hey apartment, set a timer for 1 minute."
+        await device.voice_queue.put(engine.VAD_SENTINEL_TIMEOUT)
+        await engine._send_mic(turn)
+        assert turn.no_speech is False
+        assert turn.endpoint.is_set()
+        assert [frame.frame_type for frame in turn.socket.frames] == [2]  # MIC_EOS
+
+    asyncio.run(run())
+
+
+def test_no_speech_timeout_without_partials_still_ends_quietly():
+    async def run():
+        device = FakeDevice()
+        turn = engine.Turn(1, device, None, None)
+        turn.socket = FakeSocket()
+        await device.voice_queue.put(engine.VAD_SENTINEL_TIMEOUT)
+        await engine._send_mic(turn)
+        assert turn.no_speech is True
+        assert turn.endpoint.is_set()
+
+    asyncio.run(run())
+
+
+def test_first_partial_transcript_disarms_the_device_deadline():
+    async def run():
+        device = FakeDevice()
+        turn = engine.Turn(7, device, None, None)
+        engine.ENGINE.turns[7] = turn
+        try:
+            await engine.turn_action(_TranscriptRequest(7, {"text": "hey", "is_final": False}))
+            assert device.controls == [{"type": "no_speech_disarm"}]
+            assert turn.no_speech_disarmed is True
+            # One disarm per turn — later partials must not re-send.
+            await engine.turn_action(
+                _TranscriptRequest(7, {"text": "hey apartment", "is_final": False}))
+            assert device.controls == [{"type": "no_speech_disarm"}]
+        finally:
+            engine.ENGINE.turns.pop(7, None)
+
+    asyncio.run(run())
+
+
+def test_final_transcript_disarms_when_no_partial_came_first():
+    async def run():
+        device = FakeDevice()
+        turn = engine.Turn(8, device, None, None)
+        engine.ENGINE.turns[8] = turn
+        try:
+            await engine.turn_action(_TranscriptRequest(8, {"text": "stop"}))
+            assert device.controls == [{"type": "no_speech_disarm"}]
+        finally:
+            engine.ENGINE.turns.pop(8, None)
+
+    asyncio.run(run())
+
+
+def test_empty_transcript_text_does_not_disarm():
+    async def run():
+        device = FakeDevice()
+        turn = engine.Turn(9, device, None, None)
+        engine.ENGINE.turns[9] = turn
+        try:
+            await engine.turn_action(_TranscriptRequest(9, {"text": ""}))
+            assert device.controls == []
+            assert turn.no_speech_disarmed is False
+        finally:
+            engine.ENGINE.turns.pop(9, None)
+
+    asyncio.run(run())
+
+
+def test_run_turn_waits_for_tts_after_a_downgraded_timeout(monkeypatch):
+    async def push(_event):
+        pass
+
+    monkeypatch.setattr(engine, "_push_event", push)
+
+    async def run():
+        device = FakeDevice()
+        played = []
+
+        async def post_turn_play(chunks):
+            async for _ in chunks:
+                pass
+            played.append(True)
+
+        turn = engine.Turn(1, device, None, post_turn_play)
+        turn.socket = FakeSocket()
+        turn.socket_ready.set()
+        # Downgraded timeout: endpoint set by the sentinel path, no_speech
+        # deliberately False because partials had arrived.
+        turn.stt_text = "hey apartment, set a timer for 1 minute."
+        turn.no_speech = False
+        turn.endpoint.set()
+        await turn.tts_queue.put(None)  # HACS tts/end
+        result = await engine._run_turn(turn)
+        return result, played
+
+    result, played = asyncio.run(run())
+    assert result is True
+    assert played == [True]

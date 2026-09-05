@@ -120,8 +120,15 @@ class Turn:
     # Set by _send_mic on VAD_SENTINEL_TIMEOUT — the device never detected
     # speech at all, so there is nothing for HA to have replied to. Read by
     # _run_turn to skip the TTS wait and by the outcome-reporting callers to
-    # record "no_speech" instead of "ok".
+    # record "no_speech" instead of "ok". Deliberately NOT set when partial
+    # transcripts already arrived (see _send_mic): HA demonstrably heard
+    # speech, so the timeout lost a race rather than observing silence.
     no_speech: bool = False
+    # Set once per turn when the first transcript text (partial or final)
+    # arrives, after the device has been told its no-speech deadline no
+    # longer applies ("no_speech_disarm"). Guards against re-sending on
+    # every partial of a long utterance.
+    no_speech_disarmed: bool = False
     # Legacy discard knob retained for callers that still need it. Normal wake
     # turns use initial_audio for sequence-addressed preroll instead.
     preroll_remaining: int = 0
@@ -362,6 +369,15 @@ async def turn_action(request: web.Request) -> web.Response:
             else:
                 log.debug("[%s] partial transcript text=%r", turn.device.device_id, text)
             turn.stt_text = text
+            if not turn.no_speech_disarmed:
+                # First speech evidence this turn: the device's 5s
+                # no-speech deadline no longer applies — it cannot hear
+                # HA's partials, so without this it would end (and, on
+                # newer firmware, stop streaming) a turn HA is actively
+                # transcribing. One message per turn; old firmware
+                # ignores the unknown type, per the capability rule.
+                turn.no_speech_disarmed = True
+                await turn.device.send_control({"type": "no_speech_disarm"})
             if turn.on_transcript is not None:
                 await turn.on_transcript(text)
     elif action == "tts-text":
@@ -410,11 +426,28 @@ async def _send_mic(turn: Turn) -> None:
                 continue
             if payload is None or isinstance(payload, str):
                 if payload == VAD_SENTINEL_TIMEOUT:
-                    # No speech was ever detected — mirrors em_esphome's old
-                    # _no_speech_timeout shortcut: nothing was streamed for HA to
-                    # respond to, so _run_turn skips the TTS round-trip entirely
-                    # rather than waiting out a response that isn't coming.
-                    turn.no_speech = True
+                    if turn.stt_text:
+                        # Speech evidence already arrived from HA (partial
+                        # transcripts): the device's 5s deadline lost a race
+                        # it was never meant to win, not a silent room. Turn
+                        # 650 transcribed its full command as partials with
+                        # the final STT ~1s behind the deadline; treating
+                        # that as "nothing said" skipped the TTS wait, so no
+                        # timer and no answer. Fall through to the normal
+                        # end-of-speech path (EOS below lets the pipeline
+                        # finalize) and wait for HA's response like any
+                        # other turn.
+                        log.info(
+                            "[%s] no-speech timeout with %d chars already "
+                            "transcribed — waiting for HA response",
+                            getattr(turn.device, "device_id", "?"), len(turn.stt_text),
+                        )
+                    else:
+                        # No speech was ever detected — mirrors em_esphome's old
+                        # _no_speech_timeout shortcut: nothing was streamed for HA to
+                        # respond to, so _run_turn skips the TTS round-trip entirely
+                        # rather than waiting out a response that isn't coming.
+                        turn.no_speech = True
                 turn.endpoint.set()
                 break
             if turn.socket is None:
