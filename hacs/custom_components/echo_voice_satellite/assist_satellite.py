@@ -477,9 +477,24 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
             elif event_type == PipelineEventType.ERROR:
                 if not self._owns_turn(turn_id, token, channel):
                     return
-                await self.client.async_turn_action(
-                    turn_id, "pipeline-event", {"event": "error"}
+                # Forward the code/message, not just the fact: a bare
+                # {"event": "error"} is what made turns 664-666 (instant
+                # pipeline death, no STT, 20ms turns) undiagnosable — the
+                # controller only needs "error", but the HA log and any
+                # future reader need to know WHICH error. Keys are added
+                # only when present, so a bare ERROR event keeps its exact
+                # historical body.
+                data = event.data or {}
+                body: dict[str, Any] = {"event": "error"}
+                if data.get("code") is not None:
+                    body["code"] = data["code"]
+                if data.get("message") is not None:
+                    body["message"] = data["message"]
+                _LOGGER.warning(
+                    "Pipeline error for turn %s on %s: %s %s",
+                    turn_id, self.device_id, data.get("code"), data.get("message"),
                 )
+                await self.client.async_turn_action(turn_id, "pipeline-event", body)
         except ControllerError:
             _LOGGER.exception("Turn action failed for turn %s (%s)", turn_id, event_type)
 

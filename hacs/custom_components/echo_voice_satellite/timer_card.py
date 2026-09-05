@@ -396,7 +396,17 @@ def async_register_websocket_commands(hass) -> None:
     reasoning as every other `homeassistant`-touching import in this
     package: it must stay importable without Home Assistant installed."""
     from homeassistant.components import websocket_api
+    import voluptuous as vol
 
+    # Every key the card ever sends must be declared: websocket_command
+    # builds a strict voluptuous schema from this dict, and an undeclared
+    # key is rejected with "extra keys not allowed" before the handler
+    # runs. Shipping a handler that reads msg.get("device_id") under a
+    # schema that forbids "device_id" made every card action (start,
+    # pause, resume, change, cancel, dismiss) fail while list/subscribe
+    # — which send nothing extra — kept working. The payload shapes are
+    # pinned by hacs/tests/test_timer_card_commands.py against the card's
+    # actual _call() sites.
     @websocket_api.websocket_command({"type": "echo_voice_satellite/timers/list"})
     @websocket_api.async_response
     async def _list(hass, connection, msg):
@@ -419,7 +429,14 @@ def async_register_websocket_commands(hass) -> None:
 
         connection.subscriptions[msg["id"]] = hub.subscribe(push)
 
-    @websocket_api.websocket_command({"type": "echo_voice_satellite/timers/start"})
+    @websocket_api.websocket_command({
+        "type": "echo_voice_satellite/timers/start",
+        vol.Optional("device_id"): str,
+        vol.Optional("hours"): vol.Coerce(int),
+        vol.Optional("minutes"): vol.Coerce(int),
+        vol.Optional("seconds"): vol.Coerce(int),
+        vol.Optional("name"): vol.Any(str, None),
+    })
     @websocket_api.async_response
     async def _start(hass, connection, msg):
         hub = _hub_for(hass)
@@ -438,7 +455,11 @@ def async_register_websocket_commands(hass) -> None:
         connection.send_result(msg["id"], {"id": timer_id})
 
     def _register_action(name: str, action: str) -> None:
-        @websocket_api.websocket_command({"type": f"echo_voice_satellite/timers/{name}"})
+        @websocket_api.websocket_command({
+            "type": f"echo_voice_satellite/timers/{name}",
+            vol.Optional("timer_id"): str,
+            vol.Optional("seconds"): vol.Coerce(int),
+        })
         @websocket_api.async_response
         async def _handler(hass, connection, msg):
             hub = _hub_for(hass)
@@ -457,7 +478,10 @@ def async_register_websocket_commands(hass) -> None:
     for name in ("pause", "resume", "cancel", "change"):
         _register_action(name, name)
 
-    @websocket_api.websocket_command({"type": "echo_voice_satellite/timers/dismiss"})
+    @websocket_api.websocket_command({
+        "type": "echo_voice_satellite/timers/dismiss",
+        vol.Optional("timer_id"): str,
+    })
     @websocket_api.async_response
     async def _dismiss(hass, connection, msg):
         hub = _hub_for(hass)

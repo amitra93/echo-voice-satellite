@@ -517,6 +517,7 @@ vol.Optional = lambda key, default=None, **kwargs: key
 vol.In = lambda options: (lambda v: v)
 vol.All = lambda *validators, **kwargs: (lambda v: v)
 vol.Coerce = lambda type_fn: (lambda v: v)
+vol.Any = lambda *validators, **kwargs: (lambda v: v)
 vol.Range = lambda *a, **kw: (lambda v: v)
 vol.Length = lambda *a, **kw: (lambda v: v)
 vol.Schema = lambda schema, **kwargs: schema
