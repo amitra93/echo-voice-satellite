@@ -6547,7 +6547,7 @@ function App() {
   const approved = devices.filter(d => d.approved);
   const pending  = devices.filter(d => !d.approved);
   const updates  = approved.filter(d => d.firmware_ver && release?.version && d.firmware_ver !== release.version).length;
-  const active   = approved.filter(d => d.speaking || d.listening || d.thinking).length;
+  const active   = approved.filter(d => d.speaking || d.listening || d.thinking || d.timer_firing).length;
   const activityDeviceSignature = approved.map(d => `${d.device_id}:${d.label || ''}`).join('|');
 
   const selectedDevice = selected ? devices.find(d => d.device_id === selected) : null;
