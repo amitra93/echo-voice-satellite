@@ -5,6 +5,7 @@ import (
 	"crypto/md5"
 	"encoding/binary"
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -45,6 +46,166 @@ func TestCaptureFramesMatchControllerContract(t *testing.T) {
 	if end[0] != frameTypeCaptureEnd || binary.BigEndian.Uint16(end[1:3]) != 1 ||
 		binary.BigEndian.Uint32(end[3:7]) != uint32(len(pcm)) || string(end[7:]) != string(sum[:]) {
 		t.Fatalf("end frame = %x", end)
+	}
+}
+
+func TestEncodeCaptureBeginSurfacesMarshalErrors(t *testing.T) {
+	// A NaN score cannot be JSON-marshalled — encoding/json rejects
+	// NaN/Inf floats outright, which is the only realistic way to make
+	// capture.Metadata (all plain scalar fields otherwise) fail to encode.
+	metadata := capture.Metadata{Score: float32(math.NaN())}
+	if _, err := encodeCaptureBegin(metadata); err == nil {
+		t.Fatal("expected a marshal error for a NaN score")
+	}
+}
+
+func TestWriteCaptureFrameRejectsAStaleConnection(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+	addr := "ws://" + strings.TrimPrefix(server.URL, "http://")
+	current, _, err := websocket.DefaultDialer.Dial(addr, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer current.Close()
+	stale, _, err := websocket.DefaultDialer.Dial(addr, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer stale.Close()
+
+	// d.conn is "current"; writeCaptureFrame is asked to write on "stale" —
+	// this is the ownership guard that stops a superseded connection's
+	// upload goroutine from writing frames onto the new connection.
+	d := &DataClient{conn: current}
+	if err := d.writeCaptureFrame(stale, []byte{frameTypeCaptureEnd}); err != context.Canceled {
+		t.Fatalf("writeCaptureFrame on a stale conn = %v, want context.Canceled", err)
+	}
+}
+
+func TestWriteCaptureFrameReturnsErrorOnBrokenConnection(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		conn.Close()
+	}))
+	defer server.Close()
+	addr := "ws://" + strings.TrimPrefix(server.URL, "http://")
+	conn, _, err := websocket.DefaultDialer.Dial(addr, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	conn.Close()
+
+	d := &DataClient{conn: conn}
+	if err := d.writeCaptureFrame(conn, []byte{frameTypeCaptureEnd}); err == nil {
+		t.Fatal("expected an error writing to a closed connection")
+	}
+}
+
+func TestRunCaptureUploaderReturnsImmediatelyWithNoManagers(t *testing.T) {
+	d := &DataClient{}
+	done := make(chan struct{})
+	finished := make(chan struct{})
+	go func() {
+		d.runCaptureUploader(context.Background(), done, nil)
+		close(finished)
+	}()
+	select {
+	case <-finished:
+	case <-time.After(time.Second):
+		t.Fatal("runCaptureUploader with no configured managers must return immediately")
+	}
+}
+
+func TestUploadNextCaptureRetriesOnContextCancellationWhileBlocked(t *testing.T) {
+	upgrader := websocket.Upgrader{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		for {
+			if _, _, err := conn.ReadMessage(); err != nil {
+				return
+			}
+		}
+	}))
+	defer server.Close()
+	conn, _, err := websocket.DefaultDialer.Dial(
+		"ws://"+strings.TrimPrefix(server.URL, "http://"), nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+
+	ring := capture.New(capture.DefaultFrames)
+	manager := capture.NewManager(ring)
+	manager.Configure(capture.Settings{
+		Enabled: true, Frames: 2, NearMissFloor: 0.1, Model: "wake",
+		ClassifierMD5: "0123456789abcdef0123456789abcdef",
+	})
+	for sequence := uint16(1); sequence <= 2; sequence++ {
+		ring.Push(sequence, make([]byte, captureFrameBytes))
+	}
+	manager.Observe(shadow.ScoreEvent{Score: 0.8, Threshold: 0.5, Sequence: 2, Crossed: true})
+	manager.BindRequest(2, "wake:ctx")
+	manager.Deny("wake:ctx")
+
+	d := &DataClient{conn: conn, captureManager: manager}
+	ctx, cancel := context.WithCancel(context.Background())
+	blocked := make(chan struct{})
+	var once atomic.Bool
+	originalYield := captureYield
+	captureYield = func() {
+		if once.CompareAndSwap(false, true) {
+			d.wakeMu.Lock()
+			d.wakeGranted = true
+			d.wakeMu.Unlock()
+			close(blocked)
+		}
+	}
+	t.Cleanup(func() { captureYield = originalYield })
+
+	resultCh := make(chan bool, 1)
+	go func() {
+		resultCh <- d.uploadNextCapture(ctx, make(chan struct{}), conn, manager)
+	}()
+
+	select {
+	case <-blocked:
+	case <-time.After(time.Second):
+		t.Fatal("upload did not reach the blocked (wake-granted) state")
+	}
+	cancel()
+
+	select {
+	case got := <-resultCh:
+		if !got {
+			t.Fatal("uploadNextCapture should still report an item was found")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("uploadNextCapture did not return after context cancellation")
+	}
+	if item := manager.NextReady(); item == nil {
+		t.Fatal("capture must be retried (ready again) after a cancelled upload")
 	}
 }
 

@@ -38,6 +38,14 @@ func TestDuckGainUnityIsExact(t *testing.T) {
 	}
 }
 
+func TestSetGainImmediateJumpsTheRampWithNoAudio(t *testing.T) {
+	m := &Mixer{gain: unityGain}
+	m.SetGainImmediate(500)
+	if got := m.Gain(); got != 500 {
+		t.Fatalf("Gain() after SetGainImmediate(500) = %d, want 500 (no ramp)", got)
+	}
+}
+
 func TestDuckGainDecibels(t *testing.T) {
 	// -6dB is half amplitude, -18dB is the starting duck depth.
 	for _, tc := range []struct{ db, want float64 }{

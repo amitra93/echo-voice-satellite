@@ -6,6 +6,13 @@ import (
 	"time"
 )
 
+func TestDisarmWithNothingArmedReportsFalse(t *testing.T) {
+	var m Manager
+	if m.Disarm(1) {
+		t.Fatal("Disarm reported success with nothing armed")
+	}
+}
+
 func TestArmGenerationExpiryAndSingleAcceptance(t *testing.T) {
 	var m Manager
 	if err := m.Arm("turn-1", 1, "playback", time.Second); err != nil {

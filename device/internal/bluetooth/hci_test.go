@@ -145,6 +145,46 @@ func TestParseCommandStatusAndMalformedEvents(t *testing.T) {
 	}
 }
 
+func TestH4ParserHandlesSCOPackets(t *testing.T) {
+	var p h4Parser
+	sco := []byte{h4TypeSCO, 0x00, 0x00, 0x03, 0x01, 0x02, 0x03}
+	// Incomplete SCO header (need 4 bytes to know the length byte).
+	if got := p.Feed(sco[:3]); len(got) != 0 {
+		t.Fatal("incomplete SCO header emitted a packet")
+	}
+	got := p.Feed(sco[3:])
+	if len(got) != 1 || !bytes.Equal(got[0], sco) {
+		t.Fatalf("SCO packet = %x, want %x", got, sco)
+	}
+}
+
+func TestParseCommandCompleteRejectsShortStatusAndUnknownEvent(t *testing.T) {
+	// Command Status with fewer than 4 params.
+	short := []byte{0x04, evtCommandStatus, 0x02, 0x00, 0x01}
+	if _, ok := parseCommandComplete(short); ok {
+		t.Fatal("short command-status params accepted")
+	}
+	// An event code that is neither Command Complete nor Command Status.
+	other := []byte{0x04, 0x05, 0x01, 0x00}
+	if _, ok := parseCommandComplete(other); ok {
+		t.Fatal("unrecognised event code accepted as command complete")
+	}
+}
+
+func TestParseAdvReportsRejectsWrongSubeventAndShortReportBody(t *testing.T) {
+	// Right meta-event, wrong LE subevent code.
+	wrongSubevent := []byte{0x04, 0x3e, 0x03, 0x01, 0x01, 0x00}
+	if got := parseAdvReports(wrongSubevent); got != nil {
+		t.Fatalf("wrong subevent parsed as adverts: %+v", got)
+	}
+	// Advertising report subevent claiming one report, but with a body
+	// shorter than the fixed 9-byte-minimum per-report layout.
+	shortReport := []byte{0x04, 0x3e, 0x05, 0x02, 0x01, 0x00, 0x01, 0x02}
+	if got := parseAdvReports(shortReport); len(got) != 0 {
+		t.Fatalf("short report body parsed as an advert: %+v", got)
+	}
+}
+
 func TestH4ParserHandlesIncompleteHeadersAndACL(t *testing.T) {
 	var p h4Parser
 	if got := p.Feed([]byte{h4TypeEvent, 0x3e}); len(got) != 0 {

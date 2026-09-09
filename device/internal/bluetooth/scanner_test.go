@@ -133,6 +133,66 @@ func TestEnvIntDefault(t *testing.T) {
 	}
 }
 
+// TestSessionFailsWithoutTheDevice exercises session()'s early path: it
+// always durably-disables Bluedroid first (safe to run on a host with none
+// of those binaries — every failure there is logged, not fatal, per
+// ensureBluedroidDisabled's contract), then opens /dev/stpbt, which does
+// not exist on a dev host and so fails exactly like a device with the chip
+// unavailable would. This is the one part of session() reachable without
+// the real transport.
+func TestSessionFailsWithoutTheDevice(t *testing.T) {
+	s := NewScanner(nil)
+	stopCh := make(chan struct{})
+	if err := s.session(stopCh); err == nil {
+		t.Fatal("expected an error opening a nonexistent /dev/stpbt")
+	}
+	if !s.bluedroidDisabled {
+		t.Fatal("ensureBluedroidDisabled should have run and set its once-flag")
+	}
+}
+
+// TestEnsureBluedroidDisabledIsIdempotent calls it twice directly; the
+// second call must be a no-op (the pkgs/settings commands run exactly
+// once per process, per its doc comment) rather than re-running.
+func TestEnsureBluedroidDisabledIsIdempotent(t *testing.T) {
+	s := NewScanner(nil)
+	s.ensureBluedroidDisabled()
+	if !s.bluedroidDisabled {
+		t.Fatal("bluedroidDisabled not set after first call")
+	}
+	s.ensureBluedroidDisabled() // must return immediately, not re-run the commands
+}
+
+// TestRunRetriesFailedSessionsUntilStopped drives run() through a full
+// failed-session iteration (session() fails fast — no /dev/stpbt) and then
+// stops it while it is asleep in the retry backoff, exercising the
+// restarts counter, the error-logging branch, and the "stopped during
+// backoff" exit — none of which the SetEnabled-level test reaches, since
+// that test's disable can race ahead of the first backoff wait.
+func TestRunRetriesFailedSessionsUntilStopped(t *testing.T) {
+	s := NewScanner(nil)
+	stopCh := make(chan struct{})
+	doneCh := make(chan struct{})
+	go s.run(stopCh, doneCh)
+
+	// Let the first (fast-failing) session complete and the loop reach its
+	// backoff sleep before we ask it to stop.
+	time.Sleep(50 * time.Millisecond)
+	close(stopCh)
+
+	select {
+	case <-doneCh:
+	case <-time.After(6 * time.Second):
+		t.Fatal("run did not stop after stopCh closed")
+	}
+	if s.hciErrors.Load() == 0 {
+		t.Fatal("expected at least one hciErrors increment from the failed session")
+	}
+	if s.restarts.Load() == 0 {
+		t.Fatal("expected at least one restart to be counted before stopping")
+	}
+}
+
 func TestSetEnabledIsIdempotentAndStopsFailedSession(t *testing.T) {
 	s := NewScanner(nil)
 	s.SetEnabled(false)

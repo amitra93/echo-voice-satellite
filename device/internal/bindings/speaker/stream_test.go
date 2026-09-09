@@ -32,6 +32,21 @@ func TestPrimeGateHoldsUntilEnoughIsQueued(t *testing.T) {
 	}
 }
 
+func TestIsActiveTracksPumpAndEndStream(t *testing.T) {
+	s, _ := newTestStream(64)
+	if s.isActive() {
+		t.Fatal("a fresh stream must not report active")
+	}
+	pumpN(t, s, 1)
+	if !s.isActive() {
+		t.Fatal("isActive did not follow the first pump")
+	}
+	s.endStream()
+	if s.isActive() {
+		t.Fatal("isActive did not clear on endStream")
+	}
+}
+
 func TestAShortClipDoesNotWaitForThePrime(t *testing.T) {
 	// Everything it will ever have is already queued; waiting for 24 periods
 	// that are never coming would mean it never played.
@@ -100,9 +115,9 @@ func TestAFlushedStreamDoesNotLeaveEosArmedForTheNextOne(t *testing.T) {
 	s.ready(24)
 	s.take()
 
-	s.flush()                 // barge-in
-	s.drained()               // the pump loop sees the emptied channel
-	s.endStream()             // the cancelled stream's EOS finally arrives
+	s.flush()     // barge-in
+	s.drained()   // the pump loop sees the emptied channel
+	s.endStream() // the cancelled stream's EOS finally arrives
 
 	if s.eosPending.Load() {
 		t.Fatal("eosPending must not survive a flushed stream — the next " +

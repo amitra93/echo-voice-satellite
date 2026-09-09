@@ -96,20 +96,33 @@ func TestApplySetsProvidedFields(t *testing.T) {
 	d := &Device{initialised: true}
 	mg := 12
 	d.Apply(ConfigMessage{
-		VadThreshold:  0.02,
-		OwwModel:      "new_model",
-		StopModel:     "stop_v1",
-		StopThreshold: 0.77,
-		AfeMicGainDb:  &mg,
+		VadThreshold:     0.02,
+		VadSpeechMs:      250,
+		VadSilenceMs:     500,
+		OwwModel:         "new_model",
+		StopModel:        "stop_v1",
+		StopThreshold:    0.77,
+		BargeInThreshold: 0.3,
+		StartupVolume:    64,
+		AfeMicGainDb:     &mg,
 	})
 	if d.VadThreshold != 0.02 {
 		t.Errorf("VadThreshold = %v, want 0.02", d.VadThreshold)
+	}
+	if d.VadSpeechMs != 250 || d.VadSilenceMs != 500 {
+		t.Errorf("VAD timing = %v / %v, want 250 / 500", d.VadSpeechMs, d.VadSilenceMs)
 	}
 	if d.OwwModel != "new_model" {
 		t.Errorf("OwwModel = %q, want new_model", d.OwwModel)
 	}
 	if d.StopModel != "stop_v1" || d.StopThreshold != 0.77 {
 		t.Errorf("stop config = %q / %v", d.StopModel, d.StopThreshold)
+	}
+	if d.BargeInThreshold != 0.3 {
+		t.Errorf("BargeInThreshold = %v, want 0.3", d.BargeInThreshold)
+	}
+	if d.StartupVolume != 64 {
+		t.Errorf("StartupVolume = %v, want 64", d.StartupVolume)
 	}
 	if d.AfeMicGainDb != 12 {
 		t.Errorf("AfeMicGainDb = %d, want 12 (clamped-in-range passthrough)", d.AfeMicGainDb)
@@ -203,10 +216,18 @@ func TestApplyOutputChainPreservesPartialConfigAndSnapshotDoesNotAliasBands(t *t
 	d := &Device{}
 	d.Apply(ConfigMessage{EqBands: []float64{1, 2}, LimiterEnabled: boolPtr(false), BassGuardDb: floatPtr(0)})
 	d.Apply(ConfigMessage{SubsonicHz: floatPtr(60)})
+	d.Apply(ConfigMessage{
+		EqLoudness: boolPtr(false), BassShelfHz: floatPtr(90),
+		BassGuardEnabled: boolPtr(false), LimiterThreshold: floatPtr(-3),
+		LimiterRelease: floatPtr(200),
+	})
 	snap := d.Snapshot()
 	if !equalFloats(snap.EqBands, []float64{1, 2}) || *snap.LimiterEnabled ||
-		*snap.BassGuardDb != 0 || *snap.SubsonicHz != 60 || *snap.BassShelfHz != 125 {
+		*snap.BassGuardDb != 0 || *snap.SubsonicHz != 60 || *snap.BassShelfHz != 90 {
 		t.Fatalf("output chain config = %+v, want merged values", snap)
+	}
+	if *snap.EqLoudness || *snap.BassGuardEnabled || *snap.LimiterThreshold != -3 || *snap.LimiterRelease != 200 {
+		t.Fatalf("output chain overrides = %+v, want the just-applied values", snap)
 	}
 	snap.EqBands[0] = 99
 	if got := d.Snapshot().EqBands[0]; got != 1 {

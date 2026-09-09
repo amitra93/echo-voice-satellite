@@ -30,6 +30,64 @@ func TestSnapshotEndingReturnsCopies(t *testing.T) {
 	}
 }
 
+func TestNewClampsSubOneCapacityToDefault(t *testing.T) {
+	r := New(0)
+	if r.capacity != DefaultFrames {
+		t.Fatalf("New(0) capacity = %d, want DefaultFrames (%d)", r.capacity, DefaultFrames)
+	}
+	r = New(-5)
+	if r.capacity != DefaultFrames {
+		t.Fatalf("New(-5) capacity = %d, want DefaultFrames (%d)", r.capacity, DefaultFrames)
+	}
+}
+
+func TestSnapshotFromRejectsUnknownActivation(t *testing.T) {
+	r := New(5)
+	r.Push(1, []byte{1})
+	if got, complete := r.SnapshotFrom(99, 0); complete || got != nil {
+		t.Fatalf("unknown activation accepted: %#v", got)
+	}
+}
+
+func TestSnapshotFromExcludesFramesAfterAGapFollowingActivation(t *testing.T) {
+	r := New(5)
+	r.Push(1, []byte{1})
+	r.Push(2, []byte{2}) // activation
+	r.Push(4, []byte{4}) // gap after the activation — sequence jumps 2 -> 4
+	got, complete := r.SnapshotFrom(2, 1)
+	if !complete {
+		t.Fatalf("expected a complete snapshot up to the activation, got complete=%v", complete)
+	}
+	if len(got) == 0 || got[len(got)-1].Sequence != 2 {
+		t.Fatalf("snapshot must stop at the activation, excluding the post-gap frame: %#v", got)
+	}
+}
+
+// TestSnapshotFromRejectsAnInteriorGap covers the "never bridge a gap"
+// loop specifically (as opposed to TestSnapshotDoesNotBridgeGap, which
+// hits the earlier begin<0 short-history check): begin is non-negative
+// here, but a gap sits strictly between begin and the activation.
+func TestSnapshotFromRejectsAnInteriorGap(t *testing.T) {
+	r := New(5)
+	for _, sequence := range []uint16{1, 2, 4, 5} {
+		r.Push(sequence, []byte{byte(sequence)})
+	}
+	if got, complete := r.SnapshotFrom(5, 2); complete || got != nil {
+		t.Fatalf("interior gap accepted: %#v", got)
+	}
+}
+
+func TestSnapshotEndingAtRejectsNonPositiveFrameCount(t *testing.T) {
+	r := New(5)
+	r.Push(1, []byte{1})
+	if got, complete := r.SnapshotEndingAt(1, 0); complete || got != nil {
+		t.Fatalf("zero frameCount accepted: %#v", got)
+	}
+	if got, complete := r.SnapshotEndingAt(1, -1); complete || got != nil {
+		t.Fatalf("negative frameCount accepted: %#v", got)
+	}
+}
+
 func TestSnapshotDoesNotBridgeGap(t *testing.T) {
 	r := New(5)
 	r.Push(1, []byte{1})

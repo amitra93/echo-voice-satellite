@@ -2,6 +2,7 @@ package fixture
 
 import (
 	"math"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -163,6 +164,85 @@ func TestIsolatedEQCasesExist(t *testing.T) {
 	}
 	if n < 4 {
 		t.Errorf("%d isolated EQ cases, want at least 4 — regenerate the fixture", n)
+	}
+}
+
+// TestResultString pins the diagnostic format Compare's callers log — the
+// one thing about Result with no other test, since OK()/ErrorDB/PeakDiff
+// are all exercised through Compare already.
+func TestResultString(t *testing.T) {
+	r := Result{ErrorDB: -12.3, PeakDiff: 4, N: 100}
+	got := r.String()
+	want := "100 samples, error -12.3 dB, peak diff 4 LSB"
+	if got != want {
+		t.Fatalf("Result.String() = %q, want %q", got, want)
+	}
+}
+
+func TestCompareEmptyBuffersReportNegativeInfinity(t *testing.T) {
+	r, err := Compare(nil, nil)
+	if err != nil {
+		t.Fatalf("Compare(nil, nil): %v", err)
+	}
+	if !math.IsInf(r.ErrorDB, -1) || !r.OK() {
+		t.Fatalf("Compare(nil, nil) = %v, want -Inf dB / OK", r)
+	}
+}
+
+// TestLoadRejectsMissingFile and TestLoadRejectsTruncationThroughoutTheHeader
+// cover Load's parse-error surface. Every field read (SampleRate, ChunkSize,
+// the crossover SOS blocks, bass/limiter constants, case count, name
+// length, step params, PCM lengths...) goes through the same need()/u32/u16/
+// u8/f32/f64/pcm helpers, each with its own "if err != nil { return nil,
+// err }" — a sweep of truncation points through the structured header and
+// early cases exercises that whole family of checks without hand-deriving
+// every byte offset, the same reasoning wakeword/fixture's own truncation
+// test documents for its (much smaller) format.
+func TestLoadRejectsMissingFile(t *testing.T) {
+	if _, err := Load(filepath.Join(t.TempDir(), "missing.bin")); err == nil {
+		t.Fatal("missing path returned nil error")
+	}
+}
+
+func TestLoadRejectsBadMagic(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "bad.bin")
+	if err := os.WriteFile(path, []byte("NOTACHAIN"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("bad magic accepted")
+	}
+	if err := os.WriteFile(path, []byte("EM"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("file shorter than the magic accepted")
+	}
+}
+
+func TestLoadRejectsTruncationThroughoutTheHeader(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Clean(fixturePath))
+	if err != nil {
+		t.Fatal(err)
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "truncated.bin")
+	// The header and first several cases live well within the first 50KB
+	// of a ~970KB fixture; the remainder is repeated PCM payload governed
+	// by the same already-exercised pcm()/need() pair. A prime stride
+	// avoids aliasing with the format's fixed-width (2/4/8-byte) fields.
+	limit := len(raw)
+	if limit > 50000 {
+		limit = 50000
+	}
+	for cut := len(magic) + 1; cut < limit; cut += 13 {
+		if err := os.WriteFile(path, raw[:cut], 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(path); err == nil {
+			t.Fatalf("truncation at byte %d was accepted as a complete fixture", cut)
+		}
 	}
 }
 

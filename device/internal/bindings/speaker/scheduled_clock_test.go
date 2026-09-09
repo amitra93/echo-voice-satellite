@@ -41,6 +41,20 @@ func TestScheduledClockIgnoresWhenTheRenderLoopHappensToRun(t *testing.T) {
 	}
 }
 
+// Before any rate has been measured (no Observe call yet), Stride must fall
+// back to 1.0 rather than divide by an unset/zero rate.
+func TestScheduledClockStrideDefaultsToUnityBeforeAnyObservation(t *testing.T) {
+	c := newScheduledClock(func() int64 { return 0 })
+	if got := c.Stride(); got != 1.0 {
+		t.Fatalf("Stride() before any Observe = %v, want 1.0", got)
+	}
+	// Rate() reflects the underlying sendspin clock's default (nominal)
+	// rate before any real measurement has been Observe()'d.
+	if got := c.Rate(); got <= 0 {
+		t.Fatalf("Rate() before any Observe = %v, want a positive nominal default", got)
+	}
+}
+
 // A rate refinement may change how fast the clock runs from here on. It must
 // never move the timeline itself: the samples behind it have already been
 // played, so a step is audible immediately, while a slope error is a drift the

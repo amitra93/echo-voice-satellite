@@ -7,6 +7,40 @@ import (
 	"github.com/wilbowes/EchoMuse/internal/outchain/fixture"
 )
 
+// TestRunningMaxWithoutAWindowIsJustAbsoluteValue covers runningMax's
+// degenerate case (window <= 1, i.e. no lookahead at all): the monotonic
+// deque machinery is skipped entirely and it must reduce to abs(x).
+func TestRunningMaxWithoutAWindowIsJustAbsoluteValue(t *testing.T) {
+	l := NewLimiter(48000, -1.0, 150, true)
+	x := []float64{-3, 2, -1, 0, 5}
+	out := make([]float64, len(x))
+	l.runningMax(x, out, 1)
+	for i, v := range x {
+		if out[i] != math.Abs(v) {
+			t.Fatalf("runningMax(window=1)[%d] = %v, want %v", i, out[i], math.Abs(v))
+		}
+	}
+	l.runningMax(x, out, 0)
+	for i, v := range x {
+		if out[i] != math.Abs(v) {
+			t.Fatalf("runningMax(window=0)[%d] = %v, want %v", i, out[i], math.Abs(v))
+		}
+	}
+}
+
+func TestFlushWithNothingHeldReturnsNil(t *testing.T) {
+	// NewLimiter pre-fills the held tail with lookahead-1 zero samples, so
+	// the empty-tail branch is reached on the SECOND Flush of a stream
+	// (the first drains it), not on a freshly constructed Limiter.
+	l := NewLimiter(48000, -1.0, 150, true)
+	if l.Flush() == nil {
+		t.Fatal("setup: expected the first Flush to drain a non-empty tail")
+	}
+	if got := l.Flush(); got != nil {
+		t.Fatalf("second Flush() with nothing left held = %v, want nil", got)
+	}
+}
+
 func TestLimiterGeometryMatchesReference(t *testing.T) {
 	fx, err := fixture.Load(fixturePath)
 	if err != nil {

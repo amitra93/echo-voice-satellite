@@ -204,6 +204,11 @@ func TestBassGuardAgainstReference(t *testing.T) {
 // Bypassed must still filter and sum. Returning the input unchanged would step
 // the phase at the toggle; the sum of LR4's halves is an allpass, not the
 // identity.
+func TestBassGuardProcessIgnoresEmptyChunk(t *testing.T) {
+	g := NewBassGuard(48000, DefaultBassGuardDB, true)
+	g.Process(nil) // must not panic or allocate ring state for zero samples
+}
+
 func TestBypassedGuardIsNotAPassthrough(t *testing.T) {
 	g := NewBassGuard(48000, DefaultBassGuardDB, false)
 	n := 4096

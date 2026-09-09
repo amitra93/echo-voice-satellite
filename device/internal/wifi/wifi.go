@@ -158,8 +158,15 @@ func CurrentSSID() string {
 	return ""
 }
 
-// currentIPv4 returns the interface's IPv4 address, or "".
-func currentIPv4() string {
+// currentIPv4 is a seam over currentIPv4Impl, the same reasoning as wpaCli:
+// production calls the real interface lookup, but Change()'s full success
+// path (association -> DHCP -> controller reconnect) has no wlan0 to query
+// off real hardware, so host tests need a way to report an address without
+// one.
+var currentIPv4 = currentIPv4Impl
+
+// currentIPv4Impl returns the interface's IPv4 address, or "".
+func currentIPv4Impl() string {
 	ifi, err := net.InterfaceByName(iface)
 	if err != nil {
 		return ""

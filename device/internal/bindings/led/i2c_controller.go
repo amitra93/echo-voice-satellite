@@ -79,19 +79,33 @@ func (i *I2CController) GetNumLEDs() (int, error) {
 func (i *I2CController) SetLEDs(LEDs ...led.Led) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	mergeLEDs(led.Leds, LEDs...)
+	return os.WriteFile(ledFrame, buildFrame(led.Leds), perm)
+}
+
+// mergeLEDs updates stored (the full 12-LED ring, matched by ID) in place
+// with whichever incoming LEDs were provided, leaving any LED not present
+// in incoming untouched — exactly the inline merge SetLEDs used to do.
+// Pure — no I2C write — so it is host-testable without the real device.
+func mergeLEDs(stored []led.Led, incoming ...led.Led) {
+	for _, curLed := range incoming {
+		for j, storedLed := range stored {
+			if curLed.ID == storedLed.ID {
+				stored[j] = curLed
+				break
+			}
+		}
+	}
+}
+
+// buildFrame serialises the full ring into the wire format ledFrame
+// expects: each LED's hex RGB argument concatenated in ring order.
+func buildFrame(leds []led.Led) []byte {
 	var targetColor bytes.Buffer
-    for _, curLed := range LEDs {
-        for j, storedLed := range led.Leds {
-            if curLed.ID == storedLed.ID {
-                led.Leds[j] = curLed  // update stored with incoming
-                break
-            }
-        }
-    }
-    for _, l := range led.Leds {
-        targetColor.Write(l.BuildArgument())
-    }
-    return os.WriteFile(ledFrame, targetColor.Bytes(), perm)
+	for _, l := range leds {
+		targetColor.Write(l.BuildArgument())
+	}
+	return targetColor.Bytes()
 }
 
 func NewDefaultController() (led.Controller, error) {

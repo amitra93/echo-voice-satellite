@@ -2,6 +2,7 @@ package wakeword
 
 import (
 	"encoding/binary"
+	"errors"
 	"math"
 	"os"
 	"testing"
@@ -286,6 +287,114 @@ func TestOversizeChunkProducesMultipleEmbeddings(t *testing.T) {
 	}
 	if got != 1 {
 		t.Fatalf("completing the held tail produced %d embeddings, want 1", got)
+	}
+}
+
+func TestNewPanicsOnNilInferer(t *testing.T) {
+	defer func() {
+		if recover() == nil {
+			t.Fatal("New(nil) did not panic")
+		}
+	}()
+	New(nil)
+}
+
+func TestScoreWithRejectsNilClassifier(t *testing.T) {
+	d := New(&sizedInferer{})
+	for i := 0; i < FeatWindow; i++ {
+		if _, err := d.Push(make([]int16, ChunkSamples)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if !d.Ready() {
+		t.Fatal("setup: detector not ready")
+	}
+	if _, err := d.ScoreWith(nil); err == nil {
+		t.Fatal("ScoreWith(nil) did not error")
+	}
+}
+
+// errEmbedInferer and shortEmbedInferer isolate Push's two Embed failure
+// modes: the model call itself failing, and the model returning a tensor
+// of the wrong width (a shape mismatch that must be caught here rather
+// than silently corrupting the feature ring).
+type errEmbedInferer struct{ sizedInferer }
+
+func (e *errEmbedInferer) Embed([]float32) ([]float32, error) {
+	return nil, errors.New("synthetic embed failure")
+}
+
+type shortEmbedInferer struct{ sizedInferer }
+
+func (e *shortEmbedInferer) Embed([]float32) ([]float32, error) {
+	return make([]float32, FeatDim-1), nil
+}
+
+func TestPushSurfacesEmbedErrors(t *testing.T) {
+	d := New(&errEmbedInferer{})
+	if _, err := d.Push(make([]int16, ChunkSamples)); err == nil {
+		t.Fatal("Push did not surface an Embed error")
+	}
+}
+
+func TestPushRejectsWrongSizedEmbedding(t *testing.T) {
+	d := New(&shortEmbedInferer{})
+	if _, err := d.Push(make([]int16, ChunkSamples)); err == nil {
+		t.Fatal("Push accepted a wrong-width embedding")
+	}
+}
+
+// errMelspecInferer and mismatchedMelspecInferer isolate melspec's two
+// failure modes the same way: the model call failing, and a frame count
+// that disagrees with the tensor it actually returned.
+type errMelspecInferer struct{ sizedInferer }
+
+func (e *errMelspecInferer) Melspec([]float32) ([]float32, int, error) {
+	return nil, 0, errors.New("synthetic melspec failure")
+}
+
+type mismatchedMelspecInferer struct{ sizedInferer }
+
+func (m *mismatchedMelspecInferer) Melspec(samples []float32) ([]float32, int, error) {
+	// Claims 3 frames but returns a tensor sized for 2 — must be rejected
+	// rather than silently misinterpreted downstream.
+	return make([]float32, 2*MelBins), 3, nil
+}
+
+func TestPushSurfacesMelspecErrors(t *testing.T) {
+	d := New(&errMelspecInferer{})
+	if _, err := d.Push(make([]int16, ChunkSamples)); err == nil {
+		t.Fatal("Push did not surface a Melspec error")
+	}
+}
+
+func TestPushRejectsMismatchedMelspecFrameCount(t *testing.T) {
+	d := New(&mismatchedMelspecInferer{})
+	if _, err := d.Push(make([]int16, ChunkSamples)); err == nil {
+		t.Fatal("Push accepted a melspec frame count that disagreed with its own output")
+	}
+}
+
+// TestRingBuffersStayClampedAtTheirCaps drives enough chunks through a
+// long-running detector (the real device runs for hours) to exceed all
+// three ring caps — raw audio, mel frames, and embeddings — and checks
+// none of them grow unbounded.
+func TestRingBuffersStayClampedAtTheirCaps(t *testing.T) {
+	d := New(&sizedInferer{})
+	audio := make([]int16, ChunkSamples)
+	for i := 0; i < 200; i++ {
+		if _, err := d.Push(audio); err != nil {
+			t.Fatalf("chunk %d: %v", i, err)
+		}
+	}
+	if len(d.raw) > rawBufMax {
+		t.Fatalf("raw ring = %d samples, want <= %d", len(d.raw), rawBufMax)
+	}
+	if max := MelBufMax * MelBins; len(d.mel) > max {
+		t.Fatalf("mel ring = %d values, want <= %d", len(d.mel), max)
+	}
+	if max := FeatBufMax * FeatDim; len(d.feat) > max {
+		t.Fatalf("feature ring = %d values, want <= %d", len(d.feat), max)
 	}
 }
 

@@ -500,3 +500,164 @@ func TestRecoverIfPendingRestoresAndReportsOnSuccess(t *testing.T) {
 		t.Fatalf("result = %#v", result)
 	}
 }
+
+// TestChangeSucceedsEndToEnd drives every gate in Change() to success:
+// reload, association to the NEW ssid (via the wpaCli seam), an IPv4
+// address (via the currentIPv4 seam — off real hardware there is no wlan0
+// to query, so this needs the same kind of seam wpaCli already provides),
+// and the controller-reconnect callback. This is the one path none of the
+// other Change() tests exercise, since they all stop at a failure gate.
+func TestChangeSucceedsEndToEnd(t *testing.T) {
+	resetChangeState(t)
+	withFastWifiWaits(t)
+	conf, backup, marker := withTempWifiPaths(t)
+	if err := os.WriteFile(conf, []byte("old-conf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	withFakeReload(t, func(string) error { return nil })
+
+	oldWpaCli := wpaCli
+	wpaCli = func(...string) (string, error) {
+		return "wpa_state=COMPLETED\nssid=Home\n", nil
+	}
+	t.Cleanup(func() { wpaCli = oldWpaCli })
+
+	oldIP := currentIPv4
+	currentIPv4 = func() string { return "192.0.2.10" }
+	t.Cleanup(func() { currentIPv4 = oldIP })
+
+	Change("Home", "password", func() bool { return true })
+
+	result := PendingResult()
+	if result == nil || !result.OK || result.SSID != "Home" || result.Error != "" {
+		t.Fatalf("result = %#v, want a clean success", result)
+	}
+	// Marker + backup must survive an unacknowledged success — only Commit
+	// clears them (see Commit's doc comment: delivery is at-least-once).
+	if _, err := os.Stat(marker); err != nil {
+		t.Fatalf("marker removed before commit: %v", err)
+	}
+	if _, err := os.Stat(backup); err != nil {
+		t.Fatalf("backup removed before commit: %v", err)
+	}
+}
+
+// TestChangeRevertsWhenNoIPv4Address exercises the DHCP-timeout gate
+// specifically (association succeeds, an address never appears), which is
+// otherwise unreachable without the currentIPv4 seam.
+func TestChangeRevertsWhenNoIPv4Address(t *testing.T) {
+	resetChangeState(t)
+	withFastWifiWaits(t)
+	conf, _, _ := withTempWifiPaths(t)
+	if err := os.WriteFile(conf, []byte("old-conf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	withFakeReload(t, func(string) error { return nil })
+
+	oldWpaCli := wpaCli
+	wpaCli = func(...string) (string, error) {
+		return "wpa_state=COMPLETED\nssid=Home\n", nil
+	}
+	t.Cleanup(func() { wpaCli = oldWpaCli })
+
+	oldIP := currentIPv4
+	currentIPv4 = func() string { return "" }
+	t.Cleanup(func() { currentIPv4 = oldIP })
+
+	Change("Home", "password", func() bool { return true })
+
+	result := PendingResult()
+	if result == nil || result.OK || !strings.Contains(result.Error, "no IP") {
+		t.Fatalf("result = %#v, want a no-IP failure", result)
+	}
+}
+
+// TestChangeRevertsWhenControllerUnreachable exercises the final gate:
+// associated, has an address, but the control connection never comes back
+// (e.g. a VLAN/isolation misconfiguration on the new network).
+func TestChangeRevertsWhenControllerUnreachable(t *testing.T) {
+	resetChangeState(t)
+	withFastWifiWaits(t)
+	conf, _, _ := withTempWifiPaths(t)
+	if err := os.WriteFile(conf, []byte("old-conf"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	withFakeReload(t, func(string) error { return nil })
+
+	oldWpaCli := wpaCli
+	wpaCli = func(...string) (string, error) {
+		return "wpa_state=COMPLETED\nssid=Home\n", nil
+	}
+	t.Cleanup(func() { wpaCli = oldWpaCli })
+
+	oldIP := currentIPv4
+	currentIPv4 = func() string { return "192.0.2.10" }
+	t.Cleanup(func() { currentIPv4 = oldIP })
+
+	Change("Home", "password", func() bool { return false })
+
+	result := PendingResult()
+	if result == nil || result.OK || !strings.Contains(result.Error, "could not reach the controller") {
+		t.Fatalf("result = %#v, want a controller-unreachable failure", result)
+	}
+}
+
+// ─── Real (non-faked) helpers: writeConf, svc wifi wrappers, currentIPv4 ──
+//
+// These call the actual implementations — never through the reload/wpaCli
+// seams — against a redirected confPath and, for svc/reloadConf, the real
+// /system/bin/sh (absent on a host, so they fail fast and deterministically,
+// the same reasoning the rest of this file already documents for wpa_cli).
+
+func TestWriteConfWritesFileContentRegardlessOfChownOutcome(t *testing.T) {
+	conf, _, _ := withTempWifiPaths(t)
+	content := composeConf("Office", "password123")
+	// Chown to the Android aidWifi uid will fail on a host without root —
+	// the point of this test is that the file content is written before
+	// that, not that the whole call succeeds unprivileged.
+	_ = writeConf(content)
+	got, err := os.ReadFile(conf)
+	if err != nil {
+		t.Fatalf("writeConf did not write the file at all: %v", err)
+	}
+	if string(got) != content {
+		t.Fatalf("writeConf content = %q, want %q", got, content)
+	}
+}
+
+func TestSvcWifiFailsWithoutFrameworkBinary(t *testing.T) {
+	// /system/bin/sh does not exist on a host — svcWifi must surface that
+	// as an error rather than silently no-op.
+	if err := svcWifi("enable"); err == nil {
+		t.Fatal("expected an error invoking svc wifi without /system/bin/sh")
+	}
+}
+
+func TestDisableWifiFailsWithoutFrameworkBinary(t *testing.T) {
+	if err := disableWifi(); err == nil {
+		t.Fatal("expected disableWifi to fail without the framework binary")
+	}
+}
+
+func TestEnableWifiFailsWithoutFrameworkBinary(t *testing.T) {
+	if err := enableWifi(); err == nil {
+		t.Fatal("expected enableWifi to fail without the framework binary")
+	}
+}
+
+func TestReloadConfFailsAtDisableWithoutFrameworkBinary(t *testing.T) {
+	// reloadConf's real (non-faked) path — disableWifi fails immediately,
+	// so writeConf/enableWifi are never reached; this pins that entry
+	// error surfaces rather than being swallowed.
+	if err := reloadConf("content"); err == nil {
+		t.Fatal("expected reloadConf to fail when disableWifi fails")
+	}
+}
+
+func TestCurrentIPv4ImplReturnsEmptyWithoutTheInterface(t *testing.T) {
+	// wlan0 does not exist on a host — the real implementation (not the
+	// seam) must degrade to "", never panic.
+	if got := currentIPv4Impl(); got != "" {
+		t.Fatalf("currentIPv4Impl() = %q on a host with no wlan0, want empty", got)
+	}
+}

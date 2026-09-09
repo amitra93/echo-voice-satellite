@@ -291,6 +291,186 @@ func TestUnconfiguredKindsDefaultToWakeNames(t *testing.T) {
 	}
 }
 
+func TestObserveIgnoresEventsWhenDisabled(t *testing.T) {
+	m := NewManager(New(DefaultFrames))
+	m.Observe(shadow.ScoreEvent{Score: 0.9, Threshold: 0.5, Sequence: 1, Crossed: true})
+	if m.Count() != 0 || m.candidate != nil {
+		t.Fatal("Observe acted on an event while the manager is disabled")
+	}
+}
+
+func TestObserveIgnoresScoreAtOrBelowNearMissFloor(t *testing.T) {
+	m := testManager(t)
+	// Exactly at the floor — must be ignored, not treated as a candidate.
+	m.Observe(shadow.ScoreEvent{Score: 0.1, Threshold: 0.5, Sequence: 5})
+	if m.candidate != nil {
+		t.Fatal("a score at the near-miss floor was treated as a candidate")
+	}
+}
+
+func TestObserveIgnoresNearMissAfterActivationSeen(t *testing.T) {
+	m := testManager(t)
+	m.Observe(shadow.ScoreEvent{Score: 0.8, Threshold: 0.5, Sequence: 20, Crossed: true})
+	if !m.activationSeen {
+		t.Fatal("setup: activation was not recorded")
+	}
+	// A later near-miss-range score in the same debounce window must not
+	// overwrite or create a candidate once an activation already fired.
+	m.Observe(shadow.ScoreEvent{Score: 0.3, Threshold: 0.5, Sequence: 21})
+	if m.candidate != nil {
+		t.Fatal("near-miss after activation was recorded as a candidate")
+	}
+}
+
+func TestEnabledReflectsConfigure(t *testing.T) {
+	m := NewManager(New(DefaultFrames))
+	if m.Enabled() {
+		t.Fatal("a fresh manager must default to disabled")
+	}
+	m.Configure(Settings{Enabled: true, Frames: 1})
+	if !m.Enabled() {
+		t.Fatal("Enabled() did not reflect Configure(Enabled: true)")
+	}
+	m.Configure(Settings{Enabled: false})
+	if m.Enabled() {
+		t.Fatal("Enabled() did not reflect Configure(Enabled: false)")
+	}
+}
+
+func TestNotifySignalsOnReadyCapture(t *testing.T) {
+	m := testManager(t)
+	select {
+	case <-m.Notify():
+		t.Fatal("Notify signalled before any capture became ready")
+	default:
+	}
+	m.Observe(shadow.ScoreEvent{Score: 0.8, Threshold: 0.5, Sequence: 20, Crossed: true})
+	m.BindRequest(20, "wake:notify")
+	m.Deny("wake:notify") // Deny marks it ready immediately (no EndSTT needed)
+	select {
+	case <-m.Notify():
+	default:
+		t.Fatal("Notify did not signal after a capture became ready")
+	}
+}
+
+func TestChunkCountAndChunkServeExactFrameBoundaries(t *testing.T) {
+	// snapshotLocked hardcodes Metadata.FrameBytes at 2560 (the real wire
+	// frame size) regardless of what's actually in the ring, so — unlike
+	// testManager's 1-byte placeholder frames — this needs real
+	// frame-sized PCM for ChunkCount/Chunk's division to produce anything.
+	const frameBytes = 2560
+	ring := New(DefaultFrames)
+	for i := 0; i < 40; i++ {
+		ring.Push(uint16(i), make([]byte, frameBytes))
+	}
+	m := NewManager(ring)
+	m.debounce = 5 * time.Millisecond
+	m.Configure(Settings{
+		Enabled: true, Frames: 5, NearMissFloor: 0.1,
+		Model: "wake", ClassifierMD5: "0123456789abcdef0123456789abcdef",
+	})
+	for i := 0; i < 40; i++ {
+		ring.Push(uint16(i), make([]byte, frameBytes))
+	}
+	m.Observe(shadow.ScoreEvent{Score: 0.8, Threshold: 0.5, Sequence: 20, Crossed: true})
+	m.BindRequest(20, "wake:chunks")
+	m.Deny("wake:chunks")
+	item := m.NextReady()
+	if item == nil {
+		t.Fatal("setup: no ready capture")
+	}
+	count, ok := m.ChunkCount(item)
+	if !ok || count <= 0 {
+		t.Fatalf("ChunkCount = %d, %v", count, ok)
+	}
+	first, ok := m.Chunk(item, 0)
+	if !ok || len(first) != item.Metadata.FrameBytes {
+		t.Fatalf("Chunk(0) = %v, %v, want %d bytes", first, ok, item.Metadata.FrameBytes)
+	}
+	if _, ok := m.Chunk(item, count); ok {
+		t.Fatal("Chunk() accepted an out-of-range index")
+	}
+	if _, ok := m.Chunk(item, -1); ok {
+		t.Fatal("Chunk() accepted a negative index")
+	}
+
+	// A stale token (generation bumped by Clear) must be rejected by all
+	// three — this is findCurrentLocked's generation-mismatch branch.
+	m.Clear()
+	if _, ok := m.ChunkCount(item); ok {
+		t.Fatal("ChunkCount accepted a token from a cleared generation")
+	}
+	if _, ok := m.Chunk(item, 0); ok {
+		t.Fatal("Chunk accepted a token from a cleared generation")
+	}
+}
+
+func TestPCMReturnsTheFullBufferForACurrentToken(t *testing.T) {
+	m := testManager(t)
+	m.Observe(shadow.ScoreEvent{Score: 0.8, Threshold: 0.5, Sequence: 20, Crossed: true})
+	m.BindRequest(20, "wake:pcm")
+	m.Deny("wake:pcm")
+	item := m.NextReady()
+	if item == nil {
+		t.Fatal("setup: no ready capture")
+	}
+	pcm, ok := m.PCM(item)
+	if !ok || len(pcm) == 0 {
+		t.Fatalf("PCM() = %v, %v, want the full buffer", pcm, ok)
+	}
+}
+
+func TestRetryClearsInFlightForNamedCapture(t *testing.T) {
+	m := testManager(t)
+	m.Observe(shadow.ScoreEvent{Score: 0.8, Threshold: 0.5, Sequence: 20, Crossed: true})
+	m.BindRequest(20, "wake:namedretry")
+	m.Deny("wake:namedretry")
+	first := m.NextReady()
+	if first == nil {
+		t.Fatal("setup: no ready capture")
+	}
+	// Retry("unknown-id") must be a safe no-op.
+	m.Retry("no-such-capture-id")
+	if m.HasInFlight() != true {
+		t.Fatal("expected the claimed capture to still be in flight before Retry")
+	}
+	m.Retry(first.Metadata.CaptureID)
+	if m.HasInFlight() {
+		t.Fatal("Retry did not clear in-flight for the named capture")
+	}
+	second := m.NextReady()
+	if second == nil || second.Metadata.CaptureID != first.Metadata.CaptureID {
+		t.Fatalf("retried capture = %#v", second)
+	}
+}
+
+func TestCurrentIsFalseAfterAckForSameGenerationToken(t *testing.T) {
+	m := testManager(t)
+	m.Observe(shadow.ScoreEvent{Score: 0.8, Threshold: 0.5, Sequence: 20, Crossed: true})
+	m.BindRequest(20, "wake:acked")
+	m.Deny("wake:acked")
+	item := m.NextReady()
+	if item == nil {
+		t.Fatal("setup: no ready capture")
+	}
+	if !m.Ack(item.Metadata.CaptureID) {
+		t.Fatal("setup: Ack failed")
+	}
+	// Same generation (Ack does not bump it — only Clear/Configure do), but
+	// no longer in the queue: findCurrentLocked's final "not found" path.
+	if m.Current(item) {
+		t.Fatal("Current() reported true for an already-acknowledged capture")
+	}
+}
+
+func TestHasInFlightFalseWithNothingClaimed(t *testing.T) {
+	m := testManager(t)
+	if m.HasInFlight() {
+		t.Fatal("expected no in-flight captures on a fresh manager")
+	}
+}
+
 func TestDisableClearsAllRetainedPCMAndRetryState(t *testing.T) {
 	m := testManager(t)
 	m.Observe(shadow.ScoreEvent{Score: 0.8, Threshold: 0.5, Sequence: 20, Crossed: true})

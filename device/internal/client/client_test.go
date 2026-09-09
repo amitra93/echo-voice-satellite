@@ -259,6 +259,23 @@ func TestOutboundReportsDropSafelyWhenDisconnected(t *testing.T) {
 	c.SendStopStatus(false, "stop_v1", "model missing")
 	c.SendBleAdverts([]string{"advert"})
 	c.SendWifiScanResult(nil, "scan failed")
+	c.SendWakeStarted("req-1", "turn-1")
+	c.SendWakeStatus(true, "hey_jarvis_v0.1", "abc123", "")
+}
+
+func TestOnWakeGrantRegistersCallback(t *testing.T) {
+	c := &ControlClient{}
+	called := false
+	c.OnWakeGrant(func(requestID, turnID, source string, activationSeq uint16, expires time.Time) {
+		called = true
+	})
+	if c.wakeGrantCallback == nil {
+		t.Fatal("OnWakeGrant did not register a callback")
+	}
+	c.wakeGrantCallback("req", "turn", "wakeword", 1, time.Now())
+	if !called {
+		t.Fatal("registered wake grant callback was not invoked")
+	}
 }
 
 func TestStopStatusMessageIncludesReadinessModelAndOptionalError(t *testing.T) {

@@ -34,6 +34,8 @@ func TestParseAnimationErrors(t *testing.T) {
 	for _, input := range []string{
 		"bad:fff\n",
 		"10:ggg\n",
+		"10:0g0\n", // invalid G channel
+		"10:00g\n", // invalid B channel
 	} {
 		if _, err := ParseAnimation(input); err == nil {
 			t.Errorf("ParseAnimation(%q) returned nil error", input)

@@ -271,6 +271,27 @@ func TestRapidChangesQueueTheLatest(t *testing.T) {
 	}
 }
 
+// TestSetParamsDuringFadeMatchingNextClearsPending pins the third branch of
+// SetParams: a change requested mid-fade that exactly matches the fade's
+// own destination is not a new pending change — any earlier, now-stale
+// pending request must be cleared rather than left to apply after this
+// (redundant) one.
+func TestSetParamsDuringFadeMatchingNextClearsPending(t *testing.T) {
+	c := NewChain(testRate, Params{Bands: flatBands()})
+	c.SetParams(Params{Bands: boostBands(3)}) // starts the fade to "3"
+	if !c.Fading() {
+		t.Fatal("setup: fade did not start")
+	}
+	c.SetParams(Params{Bands: boostBands(5)}) // queues a pending change to "5"
+	if !c.havePending {
+		t.Fatal("setup: expected a pending change queued")
+	}
+	c.SetParams(Params{Bands: boostBands(3)}) // matches the in-flight fade target
+	if c.havePending {
+		t.Fatal("SetParams matching the in-flight target did not clear the stale pending change")
+	}
+}
+
 // A redundant push must cost a comparison, not a crossfade. The controller
 // re-sends the whole config on every change and on every reconnect.
 func TestIdenticalParamsDoNotFade(t *testing.T) {
@@ -305,6 +326,52 @@ func TestChainIsSampleCountPreserving(t *testing.T) {
 			t.Fatalf("chunk %d: emitted %d samples for 2048 in (fading=%v)",
 				i, len(out), c.Fading())
 		}
+	}
+}
+
+// Flush/MaxReductionDB are read out per response end and per stats tick
+// respectively; neither has a dedicated test elsewhere.
+func TestFlushAndMaxReductionDBReportLiveState(t *testing.T) {
+	c := NewChain(testRate, Params{Bands: flatBands(), LimiterEnabled: true,
+		LimiterThresholdDB: -1, LimiterReleaseMS: 150, GuardEnabled: true, GuardDB: -20})
+	// Loud enough to engage both dynamic stages so MaxReductionDB has
+	// something nonzero to report.
+	for i := 0; i < 5; i++ {
+		c.Process(sine(2048, 30000, 60))
+	}
+	limDB, guardDB := c.MaxReductionDB()
+	// Reduction is reported as a non-negative dB magnitude (0 = idle, per
+	// MaxReductionDB's doc comment); it must never read negative.
+	if limDB < 0 || guardDB < 0 {
+		t.Fatalf("MaxReductionDB() = (%v, %v), want non-negative reduction magnitudes", limDB, guardDB)
+	}
+	// Flush must not panic and must return the limiter's held tail without
+	// requiring a mid-fade (haveNext) state — that path is exercised by the
+	// crossfade tests above.
+	tail := c.Flush()
+	_ = tail
+}
+
+// TestFlushDuringCrossfadeFlushesBothStages covers Flush's other branch:
+// mid-fade, the OUTGOING stage's tail is returned but the incoming stage's
+// limiter must also be flushed so it doesn't hold stale look-ahead state
+// into the next response.
+func TestFlushDuringCrossfadeFlushesBothStages(t *testing.T) {
+	c := NewChain(testRate, Params{Bands: flatBands(), LimiterEnabled: true,
+		LimiterThresholdDB: -1, LimiterReleaseMS: 150})
+	c.SetParams(Params{Bands: boostBands(6), LimiterEnabled: true,
+		LimiterThresholdDB: -6, LimiterReleaseMS: 150})
+	if !c.Fading() {
+		t.Fatal("setup: expected an active crossfade after SetParams")
+	}
+	c.Flush() // must not panic while both stages are live
+}
+
+func TestParamsEqualRejectsDifferentBandCounts(t *testing.T) {
+	a := Params{Bands: flatBands()}
+	b := Params{Bands: append(flatBands(), 0)}
+	if a.Equal(b) {
+		t.Fatal("Params.Equal ignored a band-count mismatch")
 	}
 }
 

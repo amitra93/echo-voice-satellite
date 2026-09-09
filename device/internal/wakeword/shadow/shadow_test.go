@@ -2,6 +2,7 @@ package shadow
 
 import (
 	"errors"
+	"io"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -364,6 +365,62 @@ func TestCloseIsIdempotent(t *testing.T) {
 	s := NewScorer(&fakeInferer{}, 0.5, nil)
 	s.Close()
 	s.Close()
+}
+
+// fakeCloser stands in for the ONNX Runtime session Open/OpenWithHead would
+// normally attach as s.closers — those are cgo-owned and untestable here
+// (see CLAUDE.md on internal/wakeword/ort/), but the release-on-Close loop
+// itself is plain Go and needs only something implementing io.Closer.
+type fakeCloser struct{ closed bool }
+
+func (f *fakeCloser) Close() error { f.closed = true; return nil }
+
+func TestCloseReleasesAttachedClosers(t *testing.T) {
+	s := NewScorer(&fakeInferer{}, 0.5, nil)
+	c1, c2 := &fakeCloser{}, &fakeCloser{}
+	s.closers = []io.Closer{c1, c2}
+	s.Close()
+	if !c1.closed || !c2.closed {
+		t.Fatalf("Close did not release attached closers: %+v %+v", c1, c2)
+	}
+}
+
+func TestSetThresholdUpdatesTheCrossingBar(t *testing.T) {
+	s := NewScorer(&fakeInferer{}, 0.5, nil)
+	defer s.Close()
+	s.SetThreshold(0.8)
+	s.mu.Lock()
+	got := s.threshold
+	s.mu.Unlock()
+	if got != 0.8 {
+		t.Fatalf("threshold after SetThreshold(0.8) = %v, want 0.8", got)
+	}
+}
+
+func TestInfoReturnsWhateverWasRecordedAtConstruction(t *testing.T) {
+	s := NewScorer(&fakeInferer{}, 0.5, nil)
+	defer s.Close()
+	if got := s.Info(); got != "" {
+		t.Fatalf("Info() on a scorer built via NewScorer = %q, want empty (only Open sets it)", got)
+	}
+	s.info = "onnxruntime 1.19.2, model hey_test, xnnpack=true"
+	if got := s.Info(); got != s.info {
+		t.Fatalf("Info() = %q, want %q", got, s.info)
+	}
+}
+
+func TestPushBytesSequenceIgnoresEmptyPayload(t *testing.T) {
+	s := NewScorer(&fakeInferer{}, 0.5, nil)
+	defer s.Close()
+	// An empty (or single-byte, i.e. no whole samples) payload must be a
+	// silent no-op rather than enqueuing a zero-length frame.
+	s.PushBytesSequence(nil, 7)
+	s.PushBytesSequence([]byte{0x01}, 7)
+	select {
+	case <-s.ch:
+		t.Fatal("empty/odd payload was enqueued")
+	default:
+	}
 }
 
 type sharedInferer struct {

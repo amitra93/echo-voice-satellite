@@ -230,6 +230,37 @@ func TestDisabledPassthrough(t *testing.T) {
 	}
 }
 
+// TestProcessRejectsBufferSizeNotAMultipleOfFrameSize — the size guard must
+// be logged and bypass rather than silently pass a partial frame to speex,
+// which is exactly the historical bug this function's doc comment
+// describes (AEC silently never running on hardware).
+func TestProcessRejectsBufferSizeNotAMultipleOfFrameSize(t *testing.T) {
+	c := New()
+	c.SetParams(true, 0, minTailMs)
+	odd := make([]byte, FrameSize*2+1) // one byte short of a whole frame
+	out := c.Process(odd)
+	if &out[0] != &odd[0] {
+		t.Fatal("mis-sized Process input was copied/replaced rather than bypassed")
+	}
+	if !c.sizeWarned {
+		t.Fatal("mis-sized Process input did not set sizeWarned")
+	}
+}
+
+// TestProcessCountsReferenceUnderrunsWhenTheFarRingIsEmpty — mic frames
+// arriving with nothing yet in the far reference ring (no WriteFar call
+// yet, or the ring genuinely drained) must be counted as underruns rather
+// than silently fed zeros with no record of it.
+func TestProcessCountsReferenceUnderrunsWhenTheFarRingIsEmpty(t *testing.T) {
+	c := New()
+	c.SetParams(true, 0, minTailMs)
+	mic := make([]byte, FrameSize*2)
+	c.Process(mic) // no WriteFar has run — the far ring is empty
+	if c.underruns == 0 {
+		t.Fatal("expected at least one reference underrun with an empty far ring")
+	}
+}
+
 // TestParamClamps — out-of-range config must clamp, not crash or allocate
 // absurd filter lengths.
 func TestParamClamps(t *testing.T) {

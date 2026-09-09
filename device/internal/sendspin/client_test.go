@@ -113,6 +113,105 @@ func TestClientStartsOnlyAfterSyncAndSchedulesPCM(t *testing.T) {
 	}
 }
 
+func TestHandleBinaryIgnoresAudioBeforeAnyStream(t *testing.T) {
+	sink := &fakeSink{}
+	c := NewClient("id", "Study", sink)
+	now := int64(130)
+	c.NowUs = func() int64 { return now }
+	// Synchronize the clock WITHOUT ever sending stream/start, so the only
+	// remaining gate under test is "no stream started yet" (generation==0).
+	for _, p := range []ServerTime{
+		{ClientTransmitted: 100, ServerReceived: 110, ServerTransmitted: 120},
+		{ClientTransmitted: 200, ServerReceived: 210, ServerTransmitted: 220},
+	} {
+		if _, err := c.HandleText(serverMessage(t, TypeServerTime, p)); err != nil {
+			t.Fatal(err)
+		}
+		now += 100
+	}
+	if !c.filter.IsSynchronized() {
+		t.Fatal("setup: filter did not synchronize")
+	}
+	if err := c.HandleBinary(PackAudioChunk(1, []byte{1, 2})); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.pcm) != 0 {
+		t.Fatal("audio scheduled with no active stream")
+	}
+}
+
+func TestHandleBinaryTracksArrivalGapAndTargetErrorAcrossFrames(t *testing.T) {
+	sink := &fakeSink{}
+	c := NewClient("id", "Study", sink)
+	now := int64(130)
+	c.NowUs = func() int64 { return now }
+
+	if _, err := c.HandleText(serverMessage(t, TypeStreamStart, map[string]any{"player": map[string]any{
+		"codec": CodecPCM, "sample_rate": 48000, "channels": 1, "bit_depth": 16,
+	}})); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []ServerTime{
+		{ClientTransmitted: 100, ServerReceived: 110, ServerTransmitted: 120},
+		{ClientTransmitted: 200, ServerReceived: 210, ServerTransmitted: 220},
+	} {
+		if _, err := c.HandleText(serverMessage(t, TypeServerTime, p)); err != nil {
+			t.Fatal(err)
+		}
+		now += 100
+	}
+	// First frame establishes lastAudioAt/lastTargetUs/lastSamples.
+	if err := c.HandleBinary(PackAudioChunk(500, []byte{1, 2, 3, 4})); err != nil {
+		t.Fatal(err)
+	}
+	// A second frame exercises the "lastAudioAt not zero" branch: arrival
+	// gap and target-error tracking against the first frame's bookkeeping.
+	if err := c.HandleBinary(PackAudioChunk(1000, []byte{5, 6, 7, 8})); err != nil {
+		t.Fatal(err)
+	}
+	if len(sink.pcm) != 2 {
+		t.Fatalf("expected 2 scheduled frames, got %d", len(sink.pcm))
+	}
+	if c.maxArrivalGap < 0 {
+		t.Fatalf("maxArrivalGap not tracked: %v", c.maxArrivalGap)
+	}
+}
+
+func TestHandleBinaryPropagatesSinkRefusal(t *testing.T) {
+	sink := &refusingSink{}
+	c := NewClient("id", "Study", sink)
+	now := int64(130)
+	c.NowUs = func() int64 { return now }
+	if _, err := c.HandleText(serverMessage(t, TypeStreamStart, map[string]any{"player": map[string]any{
+		"codec": CodecPCM, "sample_rate": 48000, "channels": 1, "bit_depth": 16,
+	}})); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []ServerTime{
+		{ClientTransmitted: 100, ServerReceived: 110, ServerTransmitted: 120},
+		{ClientTransmitted: 200, ServerReceived: 210, ServerTransmitted: 220},
+	} {
+		if _, err := c.HandleText(serverMessage(t, TypeServerTime, p)); err != nil {
+			t.Fatal(err)
+		}
+		now += 100
+	}
+	if err := c.HandleBinary(PackAudioChunk(500, []byte{1, 2})); err == nil {
+		t.Fatal("expected an error when the sink refuses audio")
+	}
+}
+
+type refusingSink struct{ fakeSink }
+
+func (s *refusingSink) MusicSyncPCM(uint32, uint32, int64, []byte) bool { return false }
+
+func TestClientNowFallsBackToDeviceClockWhenUnset(t *testing.T) {
+	c := &Client{} // zero value: NowUs is nil, unlike NewClient's default
+	if got := c.now(); got <= 0 {
+		t.Fatalf("now() with no NowUs override = %d, want a positive device-clock reading", got)
+	}
+}
+
 func TestClientRoutesPlayerStreamLifecycleAndCommands(t *testing.T) {
 	sink := &fakeSink{}
 	c := NewClient("id", "Study", sink)
@@ -286,6 +385,45 @@ func TestClientQueuesLocalVolumeState(t *testing.T) {
 	if state.Player == nil || state.Player.Volume == nil || *state.Player.Volume != 70 ||
 		state.Player.Muted == nil || !*state.Player.Muted {
 		t.Fatalf("local volume state = %+v, want volume 70 and muted", state.Player)
+	}
+}
+
+func TestSetPlayerStateClampsVolumeRange(t *testing.T) {
+	c := NewClient("id", "Study", &fakeSink{})
+	c.SetPlayerState(-5, false)
+	if c.volume != 0 {
+		t.Fatalf("SetPlayerState(-5) volume = %d, want clamped to 0", c.volume)
+	}
+	c.SetPlayerState(150, false)
+	if c.volume != 100 {
+		t.Fatalf("SetPlayerState(150) volume = %d, want clamped to 100", c.volume)
+	}
+}
+
+func TestSetLocalVolumeClampsRangeAndReplacesQueuedUpdate(t *testing.T) {
+	c := NewClient("id", "Study", &fakeSink{})
+	c.SetLocalVolume(-10)
+	if c.volume != 0 {
+		t.Fatalf("SetLocalVolume(-10) volume = %d, want clamped to 0", c.volume)
+	}
+	c.SetLocalVolume(999)
+	if c.volume != 100 {
+		t.Fatalf("SetLocalVolume(999) volume = %d, want clamped to 100", c.volume)
+	}
+
+	// stateUpdates has capacity 1. A second call before anything drains the
+	// first must replace it (drop the stale update), not block or queue.
+	c.SetLocalVolume(10)
+	c.SetLocalVolume(20)
+	got := <-c.stateUpdates
+	state := decodePayload[clientStatePayload](t, got, TypeClientState)
+	if state.Player == nil || state.Player.Volume == nil || *state.Player.Volume != 20 {
+		t.Fatalf("expected the queued update to be replaced with volume 20, got %+v", state.Player)
+	}
+	select {
+	case extra := <-c.stateUpdates:
+		t.Fatalf("expected exactly one queued update, got a second: %v", extra)
+	default:
 	}
 }
 

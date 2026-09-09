@@ -89,6 +89,27 @@ func TestSeedVolumeStaysSilent(t *testing.T) {
 	}
 }
 
+// TestUseAndroidVolumeSwitchesOffCodecVolumeEvenWithoutTinymix — tinymix
+// does not exist on a host, so the exec.Command call fails and is logged;
+// what matters here is that codecVolume flips to false regardless, since
+// that flag (not the exec outcome) is what the rest of the controller
+// reads to decide who owns attenuation.
+func TestUseAndroidVolumeSwitchesOffCodecVolumeEvenWithoutTinymix(t *testing.T) {
+	vc := newVolumeController(func() led.Controller { return nil })
+	vc.mu.Lock()
+	vc.codecVolume = true
+	vc.mu.Unlock()
+
+	vc.UseAndroidVolume()
+
+	vc.mu.Lock()
+	got := vc.codecVolume
+	vc.mu.Unlock()
+	if got {
+		t.Fatal("UseAndroidVolume did not clear codecVolume")
+	}
+}
+
 // A deliberate button press must outrank the volume arc's 2s hold. Before
 // this, adjusting volume then immediately pressing the action button left
 // the arc owning the ring for the remainder of its window, so the device

@@ -187,6 +187,71 @@ func TestStatusNoAttribute(t *testing.T) {
 
 // The absence LOG is deliberately once-only; the status must not be, or a
 // device whose bus changed would keep reporting its first answer forever.
+// TestResolveThrottlesRepeatedScansWithinRetryInterval pins that a second
+// resolve within RetryInterval of a failed scan skips re-enumerating the
+// bus entirely — the whole reason a failed lookup no longer costs a full
+// glob+read pass on every caller.
+func TestResolveThrottlesRepeatedScansWithinRetryInterval(t *testing.T) {
+	fakeBus(t, map[string]bool{"tsl2584tsv": false})
+	if got := Report(); got.Code != StatusNoChip {
+		t.Fatalf("first scan: code = %q, want %q", got.Code, StatusNoChip)
+	}
+	firstScan := lastScan
+
+	// Immediately re-resolve without clearing lastScan or bumping past
+	// RetryInterval — must be throttled and leave lastScan untouched.
+	if got := resolve(); got != "" {
+		t.Fatalf("throttled resolve() = %q, want empty", got)
+	}
+	mu.Lock()
+	same := lastScan.Equal(firstScan)
+	mu.Unlock()
+	if !same {
+		t.Fatal("a throttled resolve re-scanned (lastScan moved)")
+	}
+}
+
+// TestResolveSkipsAnUnreadableBusEntry covers the "continue on read error"
+// branch inside the enumeration loop: an i2c entry whose name file cannot
+// be read (here, a directory instead of a regular file, so os.ReadFile
+// fails) must be skipped rather than aborting the whole scan.
+func TestResolveSkipsAnUnreadableBusEntry(t *testing.T) {
+	root := t.TempDir()
+	unreadable := filepath.Join(root, "unreadable")
+	if err := os.MkdirAll(filepath.Join(unreadable, "name"), 0o755); err != nil {
+		t.Fatal(err) // "name" is itself a directory, so ReadFile on it fails
+	}
+	good := filepath.Join(root, "tsl2540")
+	if err := os.MkdirAll(good, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(good, "name"), []byte("tsl2540\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(good, "als_lux"), []byte("42\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	mu.Lock()
+	path, lastScan, reported = "", time.Time{}, false
+	status = Status{Code: StatusUnknown}
+	mu.Unlock()
+	oldGlob := i2cGlob
+	i2cGlob = filepath.Join(root, "*", "name")
+	t.Cleanup(func() {
+		i2cGlob = oldGlob
+		mu.Lock()
+		path, lastScan, reported = "", time.Time{}, false
+		status = Status{Code: StatusUnknown}
+		mu.Unlock()
+	})
+
+	got := Report()
+	if got.Code != StatusOK {
+		t.Fatalf("code = %q, want %q (unreadable entry should be skipped, not fatal)", got.Code, StatusOK)
+	}
+}
+
 func TestStatusRefreshesAcrossScans(t *testing.T) {
 	fakeBus(t, map[string]bool{"tsl2584tsv": false})
 	if got := Report(); got.Code != StatusNoChip {

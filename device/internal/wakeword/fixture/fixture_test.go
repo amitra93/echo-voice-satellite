@@ -163,6 +163,13 @@ func TestReportSummaryAndVerify(t *testing.T) {
 	if bad.Ok() || !strings.Contains(bad.Summary(), "STRUCTURAL") || !strings.Contains(bad.Summary(), "first melspec mismatch") {
 		t.Fatalf("failed report summary = %q", bad.Summary())
 	}
+	// A numerical mismatch with no Structural entries and no Err must also
+	// fail Ok() — the per-diff loop, not just the two early gates.
+	numerical := ok
+	numerical.Score = []Diff{{N: 1, Worst: 0.2, Scale: 1, Tol: 0.01, Examples: []string{"bad"}}}
+	if numerical.Ok() {
+		t.Fatal("Ok() ignored a failing Diff with no Structural/Err set")
+	}
 	failed := Report{Err: os.ErrNotExist}
 	if !strings.HasPrefix(failed.Summary(), "FAIL: ") || failed.Ok() {
 		t.Fatalf("error report = %#v", failed)
@@ -213,6 +220,40 @@ func TestVerifyReportsInferenceErrorsAndStructuralFailures(t *testing.T) {
 	r := Verify(fixtureInferer{}, badMel)
 	if len(r.Structural) == 0 || !strings.Contains(r.Structural[0], "fed melspec") {
 		t.Fatalf("structural report = %#v", r)
+	}
+}
+
+// TestVerifyReachesScoringOnceReady drives Verify with enough chunks for
+// the feature ring to become Ready (wakeword.FeatWindow), which is the
+// only way to reach Score()/Classify() at all — every test above stays
+// below that with a single-record fixture. This covers both the
+// no-error scoring path (through the final per-chunk comparison loop,
+// including the ScoreFrom-gated Score diff) and, separately, the
+// score-error return when Classify fails once scoring has started.
+func TestVerifyReachesScoringOnceReady(t *testing.T) {
+	n := wakeword.FeatWindow + 4
+	fx, err := LoadORT(writeFixture(t, validFixtureBytes(n*wakeword.ChunkSamples, n, 1)))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// This synthetic fixture's every record claims MelInLen==ChunkSamples,
+	// which the real melspectrogram context window only holds for chunk 0
+	// (later chunks are legitimately fed more samples) — so this run is
+	// not expected to be numerically clean. The point here is reaching
+	// the code path at all: no error, and one Score diff recorded per
+	// chunk, including past ScoreFrom.
+	ok := Verify(fixtureInferer{}, fx)
+	if ok.Err != nil {
+		t.Fatalf("healthy long verification returned an error: %v", ok.Err)
+	}
+	if len(ok.Score) != n {
+		t.Fatalf("Score diffs = %d, want %d (one per chunk)", len(ok.Score), n)
+	}
+
+	failing := Verify(fixtureInferer{errStage: "classify"}, fx)
+	if failing.Err == nil || !strings.Contains(failing.Err.Error(), "classify") {
+		t.Fatalf("classify failure once ready = %#v", failing)
 	}
 }
 

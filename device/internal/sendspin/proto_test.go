@@ -79,6 +79,26 @@ func TestEncodeClientStateOmitsNil(t *testing.T) {
 	}
 }
 
+func TestParseServerHello(t *testing.T) {
+	raw := json.RawMessage(`{"server_id":"ma-1","name":"Music Assistant","version":2}`)
+	h, err := ParseServerHello(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.ServerID != "ma-1" || h.Name != "Music Assistant" || h.Version != 2 {
+		t.Fatalf("server hello wrong: %+v", h)
+	}
+}
+
+func TestAudioChunkString(t *testing.T) {
+	c := AudioChunk{TimestampUs: 12345, Payload: []byte{1, 2, 3}}
+	got := c.String()
+	want := "AudioChunk(ts=12345us, 3 bytes)"
+	if got != want {
+		t.Fatalf("AudioChunk.String() = %q, want %q", got, want)
+	}
+}
+
 func TestParseServerTime(t *testing.T) {
 	raw := json.RawMessage(`{"client_transmitted":100,"server_received":150,"server_transmitted":160}`)
 	st, err := ParseServerTime(raw)

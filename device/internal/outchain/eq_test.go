@@ -275,3 +275,14 @@ func TestSetBandsDropsStateWhenCountChanges(t *testing.T) {
 		}
 	}
 }
+
+func TestAllZeroDetectsBothCases(t *testing.T) {
+	if !allZero(make([]float64, NumBands)) {
+		t.Fatal("allZero(all zeros) = false")
+	}
+	nonZero := make([]float64, NumBands)
+	nonZero[NumBands-1] = 0.5
+	if allZero(nonZero) {
+		t.Fatal("allZero(one nonzero band) = true")
+	}
+}

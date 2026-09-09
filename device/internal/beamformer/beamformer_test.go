@@ -154,6 +154,19 @@ func TestUnlockAndRepeatedLock(t *testing.T) {
 	b.Unlock() // idempotent while already unlocked
 }
 
+// TestLockBeforeBaselineWarmupUsesRawEnergy covers Lock's third branch:
+// with the ~3s baseline warmup not yet complete, an onset/burst ratio
+// against a near-zero baseline would be meaningless, so it falls back to
+// picking the direction with the most raw smoothed energy.
+func TestLockBeforeBaselineWarmupUsesRawEnergy(t *testing.T) {
+	b := New() // baselineReady starts at 0 — warmup not complete
+	b.energySmooth[3] = 9.0
+	b.Lock(true)
+	if got := directionToChannel[3]; b.lockedChannel != got {
+		t.Fatalf("locked channel = %d, want %d (direction 3, highest raw energy)", b.lockedChannel, got)
+	}
+}
+
 func TestDecodeS24SampleHandlesPositiveAndNegativeValues(t *testing.T) {
 	if got := decodeS24Sample(0x00, 0x00, 0x00); got != 0 {
 		t.Fatalf("zero sample = %v, want 0", got)

@@ -1,5 +1,3 @@
-//go:build server
-
 package afeipc
 
 import "testing"
@@ -9,6 +7,7 @@ func TestMusicStreamVolumeIndexMapsPhysicalLevelsFromThreeToThirty(t *testing.T)
 		level int
 		want  int
 	}{
+		{-5, 0},
 		{0, 0},
 		{72, 2},
 		{73, 3},
@@ -21,6 +20,7 @@ func TestMusicStreamVolumeIndexMapsPhysicalLevelsFromThreeToThirty(t *testing.T)
 		{115, 24},
 		{121, 27},
 		{127, 30},
+		{200, 30},
 	} {
 		got := musicStreamVolumeIndex(tt.level)
 		if got != tt.want {
