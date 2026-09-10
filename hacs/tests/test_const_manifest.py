@@ -49,6 +49,11 @@ def test_manifest_requires_google_genai():
     for r in reqs:
         if "google-genai" in r:
             assert ">=" in r or "==" in r or "~=" in r, f"unpinned {r}"
+            # HA Core's Google conversation integration owns and pins the 1.x
+            # SDK. Requiring 2.x here makes pip replace Core's dependency and
+            # leaves the configured conversation agent unavailable, ending
+            # EchoMuse turns before STT starts.
+            assert "<2.0" in r, f"google-genai must stay compatible with HA Core: {r}"
 
 
 def test_stt_platform_is_importable():
