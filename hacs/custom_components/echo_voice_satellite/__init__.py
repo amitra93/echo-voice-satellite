@@ -28,12 +28,16 @@ async def async_setup(hass, config: dict) -> bool:
 
     try:
         async_register_websocket_commands(hass)
+        from .alarm_card import async_register_alarm_ws_commands
+
+        async_register_alarm_ws_commands(hass)
     except ImportError:
         # Keep the pure package setup usable by tooling that imports the
         # integration without Home Assistant's optional websocket module —
         # timer_card.py itself has no top-level homeassistant import, only
         # this call's deferred one.
         pass
+
     return True
 
 
@@ -136,10 +140,23 @@ def _remove_stale_volume_select_entities(hass, entry) -> None:
 
 
 async def async_setup_entry(hass, entry) -> bool:
+    from .alarm_card import async_register_alarm_ws_commands
     from .ble_scanner import register_scanner
     from .client import ControllerClient
     from .coordinator import EchoVoiceSatelliteCoordinator
     from .timer_card import async_setup_timer_card
+
+    # Config entries are the reliable setup path for config-flow integrations.
+    # Keep the global command registration here as well as async_setup(); if HA
+    # skipped the optional top-level setup during a reload, the card still has
+    # its backend before it makes its first WebSocket request.
+    try:
+        async_register_alarm_ws_commands(hass)
+    except ImportError:
+        # The pure HACS tests intentionally provide no websocket_api module.
+        # A real config-entry setup has it; preserving this guard keeps the
+        # package importable for those non-HA test seams.
+        pass
 
     _remove_stale_button_entities(hass, entry)
     _remove_stale_volume_number_entities(hass, entry)

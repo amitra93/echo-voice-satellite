@@ -48,6 +48,7 @@ import time
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urlsplit, urlunsplit
+from zoneinfo import ZoneInfo
 
 import aiohttp
 from aiohttp import web
@@ -73,6 +74,8 @@ import em_test_audio
 import em_turn_engine
 import em_timers
 import em_timer_alarm
+import em_alarms
+import em_alarm_scheduler
 import em_ha_sidechannels as ha_sidechannels
 from version import VERSION as CONTROLLER_VERSION
 from version import compare as _compare_versions
@@ -277,6 +280,7 @@ _test_audio_lock: dict[str, asyncio.Lock] = {}
 TEST_AUDIO_DEVICE_PATH = "/data/local/tmp/echomuse-test-query.wav"
 _timer_sessions: dict[str, em_timers.AlarmSession] = {}
 _timer_alarm_runner: em_timer_alarm.TimerAlarmRunner | None = None
+_alarm_scheduler: "em_alarm_scheduler.AlarmScheduler | None" = None
 
 
 def get_timer_session(device_id: str) -> em_timers.AlarmSession | None:
@@ -368,6 +372,103 @@ def init(devices_ref: dict, shell_pending_ref: dict, shell_dashboard_ref: dict) 
     _timer_alarm_runner = em_timer_alarm.TimerAlarmRunner(
         _devices.get, _play, on_state=_timer_state, on_changed=_push_timer_alarm
     )
+
+    global _alarm_scheduler
+    _alarm_scheduler = em_alarm_scheduler.AlarmScheduler(
+        load=_load_alarm_schedule,
+        persist=db.set_alarm_schedule,
+        disable=lambda alarm_id: db.update_alarm(alarm_id, {"enabled": False}),
+        fire=fire_alarm,
+    )
+
+
+def _load_alarm_schedule() -> list["em_alarm_scheduler.LoadedAlarm"]:
+    """Every enabled alarm as (spec, next_fire_utc, last_fired_occurrence).
+
+    Read as full rows once so the scheduler sees the schedule bookkeeping the
+    spec deliberately does not carry.
+    """
+    out: list[em_alarm_scheduler.LoadedAlarm] = []
+    for row in db.list_alarms():
+        if not row["enabled"]:
+            continue
+        out.append((db._alarm_spec(row), row["next_fire_utc"], row["last_fired_occurrence"]))
+    return out
+
+
+async def _push_alarm_snapshot(device_id: str, session: em_timers.AlarmSession) -> None:
+    await _push_event({
+        "type": "timer.alarm",
+        "device_id": device_id,
+        **session.snapshot(),
+    })
+
+
+async def _deliver_finished(
+    device_id: str,
+    session: em_timers.AlarmSession,
+    transition: em_timers.TimerTransition,
+) -> str:
+    """Shared delivery for a finished timer AND a fired alarm.
+
+    Assumes the finished record has already been applied into `session`.
+    A fired alarm is a finished timer, so both the HA-timer endpoint and the
+    alarm scheduler route through this one place — offline discard, muted
+    discard, the timer.alarm snapshot push, and starting the ring — so mute
+    and offline policy cannot drift between the two. Returns an outcome string
+    for the caller's log / scheduler bookkeeping.
+    """
+    device = _devices.get(device_id)
+    if device is None:
+        # HA retains any durable record, but an offline Echo cannot ring. Drop
+        # transient alarm presentation rather than leave a phantom ringing row.
+        session.disconnect()
+        await _push_alarm_snapshot(device_id, session)
+        return "offline"
+    if device.muted:
+        # A muted device must not leak audio. Mute is device-sovereign, so a
+        # muted alarm is discarded exactly like a muted timer expiry.
+        session.dismiss_all()
+        await _push_alarm_snapshot(device_id, session)
+        return "muted"
+    if transition.alarm_changed:
+        await _push_alarm_snapshot(device_id, session)
+        if session.current is not None and _timer_alarm_runner is not None:
+            _timer_alarm_runner.start(device_id, session)
+    return "ringing"
+
+
+async def fire_alarm(device_id: str, timer_id: str, label: str | None) -> str:
+    """Ring a scheduled alarm by injecting a synthetic finished timer.
+
+    The per-occurrence `timer_id` (`alarm:<id>:<date>`) makes each firing a
+    distinct id so a recurring alarm is never deduped against yesterday's ring
+    by AlarmSession. Everything downstream is the timer ring stack, unchanged.
+    """
+    session = _timer_sessions.setdefault(device_id, em_timers.AlarmSession())
+    event = {
+        "event": "finished",
+        "timer_id": timer_id,
+        "name": label or "Alarm",
+        "total_seconds": 0,
+        "seconds_left": 0,
+        "is_active": False,
+    }
+    transition = session.apply(event, now=asyncio.get_running_loop().time())
+    if not transition.accepted or transition.duplicate:
+        return "ignored"
+    return await _deliver_finished(device_id, session, transition)
+
+
+async def alarm_scheduler_loop() -> None:
+    """Run the alarm scheduler; started as a background task by em_controller."""
+    if _alarm_scheduler is not None:
+        await _alarm_scheduler.run()
+
+
+def notify_alarm_scheduler() -> None:
+    if _alarm_scheduler is not None:
+        _alarm_scheduler.notify()
 
 
 async def create_app() -> web.Application:
@@ -500,6 +601,28 @@ async def create_app() -> web.Application:
     app.router.add_post(
         "/api/devices/{id}/timer-alarm/dismiss",
         auth.require_integration_or_admin(_post_dismiss_timer_alarm),
+    )
+    # Alarms (durable wall-clock). Same auth as timer-events so both the HACS
+    # integration and an admin dashboard session can manage them.
+    app.router.add_get(
+        "/api/alarms",
+        auth.require_integration_or_admin(_get_all_alarms),
+    )
+    app.router.add_get(
+        "/api/devices/{id}/alarms",
+        auth.require_integration_or_admin(_get_device_alarms),
+    )
+    app.router.add_post(
+        "/api/devices/{id}/alarms",
+        auth.require_integration_or_admin(_post_alarm),
+    )
+    app.router.add_delete(
+        "/api/devices/{id}/alarms/{aid}",
+        auth.require_integration_or_admin(_delete_alarm),
+    )
+    app.router.add_post(
+        "/api/devices/{id}/timezone",
+        auth.require_integration_or_admin(_post_device_timezone),
     )
     app.router.add_post("/api/devices/{id}/test_audio",   _post_test_audio)
     app.router.add_post("/api/devices/{id}/test_turn",    _post_test_turn)
@@ -1333,6 +1456,145 @@ async def _post_dismiss_timer_alarm(request: web.Request) -> web.Response:
     device_id = request.match_info["id"]
     dismissed = await dismiss_timer_alarm(device_id)
     return _ok({"device_id": device_id, "dismissed": dismissed})
+
+
+# ─── Alarms (durable wall-clock) ──────────────────────────────────────────────
+
+def _alarm_row_dict(row) -> dict:
+    """Serialise an alarm row for the API/card. `next_fire_utc` lets the card
+    render a countdown/absolute time without a per-second backend push, the
+    same shape the timer card uses for `finishes_at`."""
+    return {
+        "id": row["id"],
+        "device_id": row["device_id"],
+        "label": row["label"],
+        "hour": row["hour"],
+        "minute": row["minute"],
+        "recurrence": row["recurrence"],
+        "weekday_mask": row["weekday_mask"],
+        "date": row["date"],
+        "tz": row["tz"],
+        "enabled": bool(row["enabled"]),
+        "next_fire_utc": row["next_fire_utc"],
+    }
+
+
+def _default_alarm_tz(device_id: str) -> str:
+    """Timezone for a new alarm when the request omits one: the per-device
+    timezone (reported by HACS from hass.config.time_zone), else the
+    controller host's TZ, else UTC."""
+    return db.get_device_timezone(device_id) or os.environ.get("TZ") or "UTC"
+
+
+def _spec_from_body(alarm_id: str, device_id: str, body: dict, tz: str) -> em_alarms.AlarmSpec:
+    return em_alarms.AlarmSpec(
+        id=alarm_id,
+        device_id=device_id,
+        hour=int(body["hour"]),
+        minute=int(body["minute"]),
+        recurrence=str(body.get("recurrence", "once")),
+        tz=tz,
+        enabled=bool(body.get("enabled", True)),
+        weekday_mask=int(body.get("weekday_mask", 0)),
+        date=body.get("date"),
+        label=(body.get("label") or None),
+    )
+
+
+async def _get_all_alarms(request: web.Request) -> web.Response:
+    """GET /api/alarms — every alarm across the fleet (for the card)."""
+    loop = asyncio.get_event_loop()
+    rows = await loop.run_in_executor(None, db.list_alarms, None)
+    return _ok({"alarms": [_alarm_row_dict(r) for r in rows]})
+
+
+async def _get_device_alarms(request: web.Request) -> web.Response:
+    """GET /api/devices/{id}/alarms — one device's alarms."""
+    device_id = request.match_info["id"]
+    loop = asyncio.get_event_loop()
+    rows = await loop.run_in_executor(None, db.list_alarms, device_id)
+    return _ok({"device_id": device_id, "alarms": [_alarm_row_dict(r) for r in rows]})
+
+
+async def _post_alarm(request: web.Request) -> web.Response:
+    """POST /api/devices/{id}/alarms — create an alarm."""
+    import uuid
+    device_id = request.match_info["id"]
+    loop = asyncio.get_event_loop()
+    if await loop.run_in_executor(None, db.get_device, device_id) is None:
+        return _error("device_not_found", f"No device: {device_id}", 404)
+    body = await _json_body(request)
+    if not isinstance(body, dict) or "hour" not in body or "minute" not in body:
+        return _error("invalid_alarm", "hour and minute are required", 400)
+
+    alarm_id = uuid.uuid4().hex
+    tz = str(body.get("tz") or _default_alarm_tz(device_id))
+    # "set an alarm for 7am" is a one-off with no explicit date: resolve it to
+    # the next occurrence (today if still ahead, else tomorrow) so the voice
+    # layer never needs a clock.
+    if str(body.get("recurrence", "once")) == "once" and not body.get("date"):
+        try:
+            body = {**body, "date": em_alarms.resolve_once_date(
+                int(body["hour"]), int(body["minute"]), tz, time.time())}
+        except (ValueError, TypeError, KeyError):
+            pass  # falls through to validate() below, which reports it
+    try:
+        spec = _spec_from_body(alarm_id, device_id, body, tz)
+        em_alarms.validate(spec)
+    except (ValueError, TypeError, KeyError) as e:
+        return _error("invalid_alarm", str(e), 400)
+
+    next_fire = em_alarms.next_fire(spec, time.time())
+    user = request.get("user") or {}
+    created_by = user.get("username") or user.get("role") or "integration"
+
+    def _create():
+        db.create_alarm(
+            alarm_id, device_id, hour=spec.hour, minute=spec.minute,
+            recurrence=spec.recurrence, tz=spec.tz, enabled=spec.enabled,
+            weekday_mask=spec.weekday_mask, date=spec.date, label=spec.label,
+            next_fire_utc=next_fire, created_by=created_by,
+        )
+        return db.get_alarm(alarm_id)
+
+    row = await loop.run_in_executor(None, _create)
+    notify_alarm_scheduler()
+    return _ok({"alarm": _alarm_row_dict(row)}, status=201)
+
+
+async def _delete_alarm(request: web.Request) -> web.Response:
+    """DELETE /api/devices/{id}/alarms/{aid} — cancel an alarm."""
+    device_id = request.match_info["id"]
+    alarm_id = request.match_info["aid"]
+    loop = asyncio.get_event_loop()
+    row = await loop.run_in_executor(None, db.get_alarm, alarm_id)
+    if row is None or row["device_id"] != device_id:
+        return _error("alarm_not_found", f"No alarm: {alarm_id}", 404)
+    await loop.run_in_executor(None, db.delete_alarm, alarm_id)
+    notify_alarm_scheduler()
+    return _ok({"deleted": True, "id": alarm_id})
+
+
+async def _post_device_timezone(request: web.Request) -> web.Response:
+    """POST /api/devices/{id}/timezone — set the device's default alarm tz.
+
+    The HACS integration seeds this from hass.config.time_zone so a new alarm
+    created without an explicit tz uses "the timezone of the device".
+    """
+    device_id = request.match_info["id"]
+    loop = asyncio.get_event_loop()
+    if await loop.run_in_executor(None, db.get_device, device_id) is None:
+        return _error("device_not_found", f"No device: {device_id}", 404)
+    body = await _json_body(request)
+    tz = body.get("tz") if isinstance(body, dict) else None
+    if not isinstance(tz, str) or not tz:
+        return _error("invalid_timezone", "tz is required", 400)
+    try:
+        ZoneInfo(tz)
+    except Exception:
+        return _error("invalid_timezone", f"unknown timezone {tz!r}", 400)
+    await loop.run_in_executor(None, db.set_device_timezone, device_id, tz)
+    return _ok({"device_id": device_id, "tz": tz})
 
 
 @auth.require_admin

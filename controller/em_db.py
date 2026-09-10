@@ -29,6 +29,7 @@ import time
 from contextlib import contextmanager
 from typing import Optional
 
+import em_alarms
 import em_config_sections
 import em_recordings
 import em_training_captures
@@ -798,6 +799,36 @@ MIGRATIONS: list[str] = [
     """
     UPDATE system_config SET value = '27' WHERE key = 'schema_version';
     """,
+    # ── v28 — durable wall-clock alarms ────────────────────────────────────
+    # Alarms are controller-owned (HA has no alarm concept to defer to); see
+    # docs/design/alarms-design.md. `next_fire_utc` is a cached derived value
+    # (recomputed on write and after every fire) and `last_fired_occurrence`
+    # is the double-fire guard across ticks and restarts. `devices.timezone`
+    # is the per-device default an alarm's tz snapshots from at creation.
+    """
+    CREATE TABLE IF NOT EXISTS alarms (
+        id                    TEXT    PRIMARY KEY,
+        device_id             TEXT    NOT NULL,
+        label                 TEXT,
+        hour                  INTEGER NOT NULL,
+        minute                INTEGER NOT NULL,
+        recurrence            TEXT    NOT NULL,
+        weekday_mask          INTEGER NOT NULL DEFAULT 0,
+        date                  TEXT,
+        tz                    TEXT    NOT NULL,
+        enabled               INTEGER NOT NULL DEFAULT 1,
+        next_fire_utc         REAL,
+        last_fired_occurrence TEXT,
+        created_by            TEXT,
+        created_at            INTEGER NOT NULL,
+        FOREIGN KEY (device_id) REFERENCES devices(device_id)
+    );
+    CREATE INDEX IF NOT EXISTS idx_alarms_device ON alarms(device_id);
+
+    ALTER TABLE devices ADD COLUMN timezone TEXT;
+
+    UPDATE system_config SET value = '28' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -1549,6 +1580,7 @@ def delete_device(device_id: str) -> None:
     """
     with _tx() as conn:
         conn.execute("DELETE FROM device_logs WHERE device_id = ?", (device_id,))
+        conn.execute("DELETE FROM alarms WHERE device_id = ?", (device_id,))
         conn.execute("DELETE FROM devices WHERE device_id = ?", (device_id,))
     try:
         removed = em_recordings.delete_device(device_id)
@@ -1563,6 +1595,144 @@ def delete_device(device_id: str) -> None:
     except Exception as e:
         log.warning(f"[db] Wake-capture cleanup failed for {device_id}: {e}")
     log.info(f"[db] Device deleted: {device_id}")
+
+
+# ─── Alarms (durable wall-clock, controller-owned) ────────────────────────────
+#
+# Alarms live here, not in Home Assistant, because HA has no alarm record type
+# to defer to (see docs/design/alarms-design.md). The pure scheduling logic is
+# em_alarms; this layer is persistence only. Rows map to em_alarms.AlarmSpec so
+# the scheduler and API never touch sqlite.Row column names directly.
+
+def _alarm_spec(row: sqlite3.Row) -> em_alarms.AlarmSpec:
+    return em_alarms.AlarmSpec(
+        id=row["id"],
+        device_id=row["device_id"],
+        hour=row["hour"],
+        minute=row["minute"],
+        recurrence=row["recurrence"],
+        tz=row["tz"],
+        enabled=bool(row["enabled"]),
+        weekday_mask=row["weekday_mask"],
+        date=row["date"],
+        label=row["label"],
+    )
+
+
+def get_device_timezone(device_id: str) -> Optional[str]:
+    row = _q1("SELECT timezone FROM devices WHERE device_id = ?", (device_id,))
+    return row["timezone"] if row else None
+
+
+def set_device_timezone(device_id: str, tz: Optional[str]) -> None:
+    with _tx() as conn:
+        conn.execute(
+            "UPDATE devices SET timezone = ? WHERE device_id = ?", (tz, device_id)
+        )
+
+
+def create_alarm(
+    alarm_id: str,
+    device_id: str,
+    *,
+    hour: int,
+    minute: int,
+    recurrence: str,
+    tz: str,
+    enabled: bool = True,
+    weekday_mask: int = 0,
+    date: Optional[str] = None,
+    label: Optional[str] = None,
+    next_fire_utc: Optional[float] = None,
+    created_by: Optional[str] = None,
+) -> None:
+    with _tx() as conn:
+        conn.execute(
+            """
+            INSERT INTO alarms (id, device_id, label, hour, minute, recurrence,
+                                weekday_mask, date, tz, enabled, next_fire_utc,
+                                last_fired_occurrence, created_by, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, ?)
+            """,
+            (alarm_id, device_id, label, hour, minute, recurrence, weekday_mask,
+             date, tz, 1 if enabled else 0, next_fire_utc, created_by,
+             int(time.time())),
+        )
+
+
+def get_alarm(alarm_id: str) -> Optional[sqlite3.Row]:
+    return _q1("SELECT * FROM alarms WHERE id = ?", (alarm_id,))
+
+
+def get_alarm_spec(alarm_id: str) -> Optional[em_alarms.AlarmSpec]:
+    row = get_alarm(alarm_id)
+    return _alarm_spec(row) if row else None
+
+
+def list_alarms(device_id: Optional[str] = None) -> list[sqlite3.Row]:
+    if device_id is None:
+        return _q("SELECT * FROM alarms ORDER BY hour, minute, id")
+    return _q(
+        "SELECT * FROM alarms WHERE device_id = ? ORDER BY hour, minute, id",
+        (device_id,),
+    )
+
+
+def list_enabled_alarm_specs() -> list[em_alarms.AlarmSpec]:
+    """Every enabled alarm, as specs — the scheduler's whole working set."""
+    return [_alarm_spec(r) for r in _q("SELECT * FROM alarms WHERE enabled = 1")]
+
+
+# Columns a caller may set through update_alarm — anything else is ignored so a
+# request body can never write next_fire_utc / last_fired_occurrence, which are
+# scheduler-owned bookkeeping.
+_ALARM_UPDATABLE = frozenset(
+    {"label", "hour", "minute", "recurrence", "weekday_mask", "date", "tz", "enabled"}
+)
+
+
+def update_alarm(alarm_id: str, fields: dict) -> bool:
+    sets = {k: v for k, v in fields.items() if k in _ALARM_UPDATABLE}
+    if not sets:
+        return False
+    if "enabled" in sets:
+        sets["enabled"] = 1 if sets["enabled"] else 0
+    assignments = ", ".join(f"{k} = ?" for k in sets)
+    with _tx() as conn:
+        cur = conn.execute(
+            f"UPDATE alarms SET {assignments} WHERE id = ?",
+            (*sets.values(), alarm_id),
+        )
+        return cur.rowcount > 0
+
+
+def set_alarm_schedule(
+    alarm_id: str,
+    next_fire_utc: Optional[float],
+    last_fired_occurrence: Optional[str] = None,
+) -> None:
+    """Scheduler-only: persist the recomputed next fire and dedup guard.
+
+    `last_fired_occurrence` is passed only when advancing after a fire; a bare
+    reschedule (create) leaves it untouched by passing None here and the
+    caller not intending to clear it — the COALESCE keeps the existing value.
+    """
+    with _tx() as conn:
+        conn.execute(
+            """
+            UPDATE alarms
+               SET next_fire_utc = ?,
+                   last_fired_occurrence = COALESCE(?, last_fired_occurrence)
+             WHERE id = ?
+            """,
+            (next_fire_utc, last_fired_occurrence, alarm_id),
+        )
+
+
+def delete_alarm(alarm_id: str) -> bool:
+    with _tx() as conn:
+        cur = conn.execute("DELETE FROM alarms WHERE id = ?", (alarm_id,))
+        return cur.rowcount > 0
 
 
 # ─── ESPHome / BLE proxy port allocation (retired, Phase 4 cutover) ───────────

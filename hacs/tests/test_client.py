@@ -97,6 +97,31 @@ async def _dismiss_timer_alarm(request):
     return web.json_response({"device_id": request.match_info["id"], "dismissed": True})
 
 
+async def _list_alarms(request):
+    _require_key(request)
+    return web.json_response({"device_id": request.match_info["id"], "alarms": [{"id": "a1"}]})
+
+
+async def _all_alarms(request):
+    _require_key(request)
+    return web.json_response({"alarms": [{"id": "a1"}, {"id": "a2"}]})
+
+
+async def _create_alarm(request):
+    _require_key(request)
+    return web.json_response({"alarm": {"id": "new", **(await request.json())}}, status=201)
+
+
+async def _delete_alarm_route(request):
+    _require_key(request)
+    return web.json_response({"deleted": True, "id": request.match_info["aid"]})
+
+
+async def _set_tz(request):
+    _require_key(request)
+    return web.json_response({"device_id": request.match_info["id"], **(await request.json())})
+
+
 async def _server_error(request):
     _require_key(request)
     return web.Response(status=500, text="boom")
@@ -118,6 +143,11 @@ def _make_app():
     app.router.add_post("/api/devices/{id}/media", _media_command)
     app.router.add_post("/api/devices/{id}/timer-events", _timer_event)
     app.router.add_post("/api/devices/{id}/timer-alarm/dismiss", _dismiss_timer_alarm)
+    app.router.add_get("/api/alarms", _all_alarms)
+    app.router.add_get("/api/devices/{id}/alarms", _list_alarms)
+    app.router.add_post("/api/devices/{id}/alarms", _create_alarm)
+    app.router.add_delete("/api/devices/{id}/alarms/{aid}", _delete_alarm_route)
+    app.router.add_post("/api/devices/{id}/timezone", _set_tz)
     app.router.add_post("/api/turns/{tid}/endpoint", _turn_action)
     app.router.add_post("/api/turns/{tid}/reject", _turn_action_error)
     app.router.add_post("/api/turns/{tid}/error500", _server_error)
@@ -276,6 +306,27 @@ def test_dismiss_timer_alarm_posts_to_the_dismiss_endpoint():
         return reply
 
     assert asyncio.run(_run(body)) == {"device_id": "ABC123", "dismissed": True}
+
+
+def test_alarm_create_list_delete_and_timezone_methods():
+    async def body(base_url):
+        client = ControllerClient(base_url, API_KEY)
+        try:
+            created = await client.async_create_alarm("ABC123", {"hour": 7, "minute": 0})
+            listed = await client.async_list_alarms("ABC123")
+            fleet = await client.async_list_all_alarms()
+            deleted = await client.async_delete_alarm("ABC123", "a1")
+            tz = await client.async_set_device_timezone("ABC123", "Europe/London")
+        finally:
+            await client.async_close()
+        return created, listed, fleet, deleted, tz
+
+    created, listed, fleet, deleted, tz = asyncio.run(_run(body))
+    assert created["alarm"]["hour"] == 7
+    assert [a["id"] for a in listed] == ["a1"]
+    assert [a["id"] for a in fleet] == ["a1", "a2"]
+    assert deleted == {"deleted": True, "id": "a1"}
+    assert tz["tz"] == "Europe/London"
 
 
 def test_post_error_without_json_reason_still_raises_controller_error():

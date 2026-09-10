@@ -117,11 +117,43 @@ class ControllerClient:
         on the device itself."""
         return await self._post(f"/api/devices/{device_id}/timer-alarm/dismiss", {})
 
+    # ── Alarms (durable wall-clock) ─────────────────────────────────────────
+
+    async def async_list_alarms(self, device_id: str) -> list[dict[str, Any]]:
+        """Every alarm for one EchoMuse device."""
+        return (await self._get(f"/api/devices/{device_id}/alarms")).get("alarms", [])
+
+    async def async_list_all_alarms(self) -> list[dict[str, Any]]:
+        """Every alarm across the fleet (for the alarm card)."""
+        return (await self._get("/api/alarms")).get("alarms", [])
+
+    async def async_create_alarm(
+        self, device_id: str, body: dict[str, Any]
+    ) -> dict[str, Any]:
+        return await self._post(f"/api/devices/{device_id}/alarms", body)
+
+    async def async_delete_alarm(self, device_id: str, alarm_id: str) -> dict[str, Any]:
+        return await self._request("DELETE", f"/api/devices/{device_id}/alarms/{alarm_id}", None)
+
+    async def async_set_device_timezone(self, device_id: str, tz: str) -> dict[str, Any]:
+        """Seed the device's default alarm timezone (hass.config.time_zone)."""
+        return await self._post(f"/api/devices/{device_id}/timezone", {"tz": tz})
+
     async def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+        return await self._request("POST", path, body)
+
+    async def _get(self, path: str) -> dict[str, Any]:
+        return await self._request("GET", path, None)
+
+    async def _request(
+        self, method: str, path: str, body: dict[str, Any] | None
+    ) -> dict[str, Any]:
         session = await self._ensure_session()
         try:
-            async with session.post(
-                f"{self.base_url}{path}", json=body, headers=self._headers()
+            async with session.request(
+                method, f"{self.base_url}{path}",
+                json=body if body is not None else None,
+                headers=self._headers(),
             ) as response:
                 payload = await response.json()
                 if response.status >= 400:

@@ -159,6 +159,27 @@ def test_wake_captures_have_no_path_into_a_bundle():
         )
 
 
+def test_alarm_labels_have_no_path_into_a_bundle():
+    """
+    Alarm labels are user-authored free text ("Sam's wake up"), the same class
+    as device labels. The bundle is an allowlist built from explicit
+    parameters, so alarms are excluded structurally — no parameter carries
+    them and em_support never reads the alarms table. Pin BOTH, because the
+    failure mode is someone later adding an `alarms=` parameter without
+    pseudonymising the labels first.
+    """
+    sig = inspect.signature(S.build)
+    for param in sig.parameters:
+        assert "alarm" not in param.lower(), (
+            f"build() grew a {param!r} parameter — alarm labels must be "
+            f"pseudonymised before any alarm data enters a bundle"
+        )
+    src = (Path(__file__).resolve().parents[1] / "em_support.py").read_text()
+    assert "FROM alarms" not in src and "list_alarms" not in src, (
+        "em_support reads the alarms table — alarm labels must be redacted first"
+    )
+
+
 def test_labels_are_replaced_with_positional_pseudonyms():
     """Device labels are user-authored and routinely contain names."""
     b = _bundle()

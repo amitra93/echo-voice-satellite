@@ -587,6 +587,77 @@ active-timer rows is computed fresh from `remaining_seconds` on every
 snapshot rather than stored, for the same reason: nothing here carries a
 wall-clock value across time for a DST transition to skew.
 
+## Alarms
+
+Full design: `docs/design/alarms-design.md`. Alarms are **wall-clock**
+notifications ("7am every weekday"), a separate feature from countdown
+**timers** above — they share the *ring* and nothing else.
+
+**The controller owns every durable alarm record; the same code owns the
+physical alert.** This is the deliberate opposite of timers, where Home
+Assistant owns the durable record. The reason is simply that **HA has no alarm
+concept at all** — its built-in intents cover timers (`HassStartTimer`, …) but
+there is no `HassSetAlarm` and no alarm entity (HA's only "alarm" is the
+unrelated security `alarm_control_panel`), so there is no HA record type to
+defer to the way there is for timers. Alarms therefore live in the controller's
+SQLite (`alarms` table, schema v28), where durability, recurrence and DST logic
+can be pure, testable controller Python in the `em_timers`/`em_turnclock` family
+(`em_alarms.py`), and where the physical alarm/LED/queue/dismissal already live.
+Consequences accepted: alarms are **not** HA entities (managed through four
+explicit Assist LLM tools this integration ships, plus a Lovelace card), and there is no
+EchoMuse-dashboard alarm UI in the first release (the REST API exists, so one is
+cheap later).
+
+**Scheduling is the one place that uses the WALL clock, and only the
+scheduling.** The whole codebase is monotonic-by-default because the device
+boots with a bogus pre-NTP clock and durations must survive wall-clock jumps —
+but "7am" is a wall-clock fact, not a duration. This is safe because the
+scheduling runs on the **controller host** (real NTP clock and timezone), the
+**device still never learns the time** (it rings when told, exactly as for a
+finished timer), and the alarm's own **ring timeout stays monotonic**
+(`em_timer_alarm.py` is untouched). Only "is this due, and when next" uses
+`time.time()` + `zoneinfo`.
+
+**DST is correct by construction, not by correction.** `em_alarms.next_fire`
+rebuilds the local wall time in the alarm's `ZoneInfo` on **every** occurrence
+and converts to a UTC epoch, so a 7am alarm stays 7am local across a transition
+with no adjustment step. Edge policy on the transition day: spring-forward gap
+(nonexistent local time) fires at the first valid instant after the gap;
+fall-back ambiguity uses `fold=0` (the earlier). Per-device timezone defaults
+from the HACS integration reporting `hass.config.time_zone` on register and is
+overridable per device; it is controller-side metadata and is **not** pushed to
+the device.
+
+**A fired alarm is delivered as a synthetic finished timer**, reusing the entire
+ring stack unchanged: the `em_timers.AlarmSession` FIFO queue, `TimerAlarmRunner`
+playback, music duck/restore, the amber `timer_anim` pulse, the monotonic
+unanswered-ring timeout, and all three dismissal paths (spoken stop word,
+action-button, card). Two things make this safe: the synthetic event's
+`timer_id` is **per-occurrence** (`alarm:<id>:<date>`) so a recurring alarm is a
+different id each day and `AlarmSession`'s fingerprint/`_cancelled` dedup never
+suppresses tomorrow's ring; and the `finished`-handling body of
+`_post_timer_event` is factored into a shared `_deliver_finished(device_id,
+session, event)` so the HA-timer path and the alarm path are byte-identical and
+tested once.
+
+**Policies.** A **muted** device's alarm produces no sound and no LED — the same
+discard as a muted timer expiry, preserving the device-sovereign mute invariant
+even though it means a muted device misses its wake-up. An **offline** device's
+occurrence is not delivered (best effort), but a recurring alarm still advances.
+A **missed** occurrence (controller was down, or device reconnects late) fires
+**once** on startup/reconnect if within `ALARM_LATE_GRACE_S` (default 600s) and
+the device is present and unmuted, else it is skipped; either way recurring
+alarms advance and one-offs disable. `alarms.last_fired_occurrence` is the guard
+that stops a fired occurrence re-firing on the next tick or a later restart.
+
+**The scheduler ticks; it does not sleep to the next fire.**
+`em_alarm_scheduler.py` (asyncio, the impure counterpart to pure `em_alarms.py`,
+the same split as `em_timer_alarm` vs `em_timers`) runs a ~15-30s tick loop plus
+an event re-arm on add/delete. A single long `asyncio.sleep` to the next
+fire would miss an NTP step, a host suspend/resume, or a DST jump; a tick catches
+a wall-clock jump within one interval, and minute-granular alarms make the tick
+cheap. **No firmware change** is needed for core alarms.
+
 ## Architecture
 
 ### Device → Controller protocol

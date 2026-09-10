@@ -3286,6 +3286,7 @@ async def main():
     release_task       = asyncio.create_task(api.release_poll_loop())
     session_prune_task = asyncio.create_task(api.session_prune_loop())
     loop_lag_task      = asyncio.create_task(event_loop_lag_monitor())
+    alarm_task         = asyncio.create_task(api.alarm_scheduler_loop())
 
     # Device-link TLS: generate/load the CA + server cert. Failure to set
     # up TLS (missing cryptography package, unwritable dir) must never take

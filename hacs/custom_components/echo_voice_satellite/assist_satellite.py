@@ -117,6 +117,15 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
         )
         self.async_on_remove(self._timer_unregister)
 
+        # Seed the device's default alarm timezone from HA's own timezone, so
+        # a voice/card alarm created without an explicit tz uses "the timezone
+        # of the device" (docs/design/alarms-design.md). Best-effort: a
+        # controller that does not yet know this device, or an older
+        # controller without the endpoint, must not fail satellite setup.
+        with contextlib.suppress(Exception):
+            await self.client.async_set_device_timezone(
+                self.device_id, self.hass.config.time_zone
+            )
     def _timer_event(self, event, timer) -> None:
         """TimerManager invokes handlers synchronously from its event loop."""
         if timer.conversation_command:
