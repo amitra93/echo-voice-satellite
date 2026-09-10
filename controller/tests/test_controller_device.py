@@ -666,47 +666,82 @@ def test_dashboard_state_and_led_helpers(monkeypatch):
     asyncio.run(run())
 
 
-def test_timer_speech_dismissal_waits_for_stt_and_does_not_generate_response(monkeypatch):
-    device = new_device()
-    dismissed = []
+def test_leds_idle_resolves_countdown_ring_or_falls_back_to_off(monkeypatch):
+    """
+    leds_idle is what every "return the ring to rest" call site now uses
+    instead of a bare leds_off — it must reveal the first running timer's
+    countdown ring when one exists and a device can render it, and fall
+    back to plain leds_off's behaviour in every other case (no session, no
+    running timer, or a countdown_spec the em_timer_ring guards refuse to
+    build).
+    """
+    import em_timers
 
-    async def dismiss(device_id):
-        dismissed.append(device_id)
-        return True
+    def session_with(timer_id="pizza", **overrides):
+        session = em_timers.AlarmSession()
+        session.running[timer_id] = em_timers.TimerRecord(
+            timer_id=timer_id, name=timer_id,
+            total_seconds=overrides.get("total_seconds", 100),
+            seconds_left=overrides.get("seconds_left", 80),
+            is_active=overrides.get("is_active", True),
+            received_at=overrides.get("received_at", 0.0),
+        )
+        return session
 
-    async def voice_turn(_device, **kwargs):
-        assert kwargs["trigger_label"] == "timer-speech"
-        assert kwargs["stt_only"] is True
-        assert kwargs["initial_audio"] == (b"first",)
-        await kwargs["on_transcript"]("stop")
+    async def run():
+        device = new_device(["led_anim"])
+        animations = []
+        device.send_led_anim = lambda value: asyncio.sleep(0, result=animations.append(value))
 
-    monkeypatch.setattr(em_controller.api, "dismiss_timer_alarm", dismiss)
-    monkeypatch.setattr(em_controller, "_run_voice_locked", voice_turn)
-    device.beam_lock = lambda: asyncio.sleep(0)
-    device.beam_unlock = lambda: asyncio.sleep(0)
+        # No timer session at all -> the same "off" leds_off would send.
+        monkeypatch.setattr(em_controller.api, "get_timer_session", lambda device_id: None)
+        await em_controller.leds_idle(device)
+        assert animations[-1] == {"pattern": "off"}
 
-    asyncio.run(em_controller._run_timer_speech_turn(device, b"first"))
-    assert dismissed == [device.device_id]
+        # A running timer with a usable received_at -> countdown push.
+        monkeypatch.setattr(em_controller.api, "get_timer_session",
+                             lambda device_id: session_with())
+        await em_controller.leds_idle(device)
+        assert animations[-1]["pattern"] == "countdown"
+        assert animations[-1]["colors"] == [list(device.led_scene["countdown_color"])]
 
+        # An active alarm owns the ring. Timer updates and delayed turn cleanup
+        # both flow through leds_idle, so neither may replace its pulse.
+        animations.clear()
+        device.timer_firing = True
+        await em_controller.leds_idle(device)
+        assert animations == []
+        device.timer_firing = False
+        await em_controller.leds_idle(device)
+        assert animations[-1]["pattern"] == "countdown"
 
-def test_timer_speech_without_stt_transcript_keeps_alarm_running(monkeypatch):
-    device = new_device()
-    dismissed = []
+        # A session with no running timer (e.g. it already finished) -> off.
+        monkeypatch.setattr(em_controller.api, "get_timer_session",
+                             lambda device_id: em_timers.AlarmSession())
+        await em_controller.leds_idle(device)
+        assert animations[-1] == {"pattern": "off"}
 
-    async def dismiss(_device_id):
-        dismissed.append(True)
-        return True
+        # A running timer em_timer_ring cannot interpolate from yet
+        # (received_at is None, e.g. a record built before this controller
+        # ever observed a clock for it) -> off, not a crash.
+        monkeypatch.setattr(
+            em_controller.api, "get_timer_session",
+            lambda device_id: session_with(received_at=None),
+        )
+        await em_controller.leds_idle(device)
+        assert animations[-1] == {"pattern": "off"}
 
-    async def voice_turn(_device, **kwargs):
-        return None
+        # A running timer but firmware that cannot animate locally -> off,
+        # via legacy set_leds, same as leds_off on that device.
+        legacy = new_device()
+        frames = []
+        legacy.set_leds = lambda *value, **kwargs: asyncio.sleep(0, result=frames.append((value, kwargs)))
+        monkeypatch.setattr(em_controller.api, "get_timer_session",
+                             lambda device_id: session_with())
+        await em_controller.leds_idle(legacy)
+        assert frames == [((em_controller._make_leds(0, 0, 0),), {})]
 
-    monkeypatch.setattr(em_controller.api, "dismiss_timer_alarm", dismiss)
-    monkeypatch.setattr(em_controller, "_run_voice_locked", voice_turn)
-    device.beam_lock = lambda: asyncio.sleep(0)
-    device.beam_unlock = lambda: asyncio.sleep(0)
-
-    asyncio.run(em_controller._run_timer_speech_turn(device, b"first"))
-    assert dismissed == []
+    asyncio.run(run())
 
 
 def test_timer_button_tap_dismisses_locally_without_voice_turn(monkeypatch):
@@ -790,6 +825,22 @@ def test_legacy_spinner_stops_and_cleans_up():
         stop.set()
         await em_controller.leds_spin_green(device, stop)
         assert len(calls) == 1
+
+    asyncio.run(run())
+
+
+def test_spinner_cleanup_does_not_clear_a_timer_alarm():
+    async def run():
+        device = new_device()
+        device.timer_firing = True
+        calls = []
+        device.set_leds = lambda *value, **kwargs: asyncio.sleep(
+            0, result=calls.append(value)
+        )
+        stop = asyncio.Event()
+        stop.set()
+        await em_controller.leds_spin_green(device, stop)
+        assert calls == []
 
     asyncio.run(run())
 
@@ -1006,9 +1057,25 @@ def test_control_handler_processes_device_state_messages(monkeypatch):
         monkeypatch.setattr(em_controller.api, "_push_log_event", no_op)
         monkeypatch.setattr(em_controller.api, "wifi_record_result", lambda *args: ({"pending": None}, False))
         monkeypatch.setattr(em_controller.api, "notify_device_connected", no_op)
-        monkeypatch.setattr(em_controller.api, "notify_device_disconnected", no_op)
+        disconnected = []
+
+        async def notify_disconnected(device_id):
+            # Alarm shutdown needs the registered Device to send its final
+            # speaker_flush before this control handler removes it.
+            assert device_id in em_controller._devices
+            disconnected.append(device_id)
+
+        monkeypatch.setattr(em_controller.api, "notify_device_disconnected", notify_disconnected)
         monkeypatch.setattr(em_controller.em_player, "device_gone", lambda *args: None)
-        monkeypatch.setattr(em_controller, "leds_off", no_op)
+        # The reconnect/register flow resolves the ring through leds_idle,
+        # not a bare leds_off, so a running timer's countdown ring survives
+        # a drop-and-reconnect instead of requiring a fresh HA event.
+        idle_calls = []
+
+        async def fake_leds_idle(device):
+            idle_calls.append(device)
+
+        monkeypatch.setattr(em_controller, "leds_idle", fake_leds_idle)
         monkeypatch.setattr(em_controller.ha_sidechannels, "ambient_light", lambda *args: None)
         monkeypatch.setattr(em_controller.ha_sidechannels, "mute_state", lambda *args: None)
         monkeypatch.setattr(em_controller.ha_sidechannels, "volume", lambda *args: None)
@@ -1019,6 +1086,8 @@ def test_control_handler_processes_device_state_messages(monkeypatch):
             await em_controller.handle_control(ws)
             assert ws.closed is False
             assert any(json.loads(value)["type"] == "ack" for value in ws.sent)
+            assert len(idle_calls) == 1
+            assert disconnected == ["dev"]
         finally:
             em_controller._devices = old_devices
 

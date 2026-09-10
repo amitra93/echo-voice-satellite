@@ -47,17 +47,17 @@ extend the existing HA-requested continuation flow.
 
 **Goal:** Match a basic smart-speaker feature users expect without requiring a new wake word.
 
-**Native timers are done.** See `docs/design/timers-design.md` and
-`docs/design/timers-implementation-update.md` for the full design and
-phase-by-phase build status; `docs/timer-validation.md` for test coverage
-and the hardware acceptance checklist.
+**Native timers are done.** See `docs/design/timers-implementation-audit.md`
+for the implementation decisions and `docs/timer-validation.md` for test
+coverage and the hardware acceptance checklist.
 
 - ~~Add timer start, update, pause, resume, cancel, and finished events.~~
   Done — Home Assistant's native `TimerManager`/Assist timer intents are the
-  only timer state; the controller forwards lifecycle events and owns only
-  the physical alarm.
+  only durable timer state; the controller forwards lifecycle events and holds
+  only transient alarm and countdown-ring presentation state.
 - ~~Add timer LED feedback and a configurable maximum ring duration.~~ Done —
-  amber pulse while ringing, `MAX_RING_S` = 120s.
+  scene-coloured idle countdown for the first-started running timer, plus the
+  amber pulse while ringing; `MAX_RING_S` = 120s.
 - ~~Make `stop` work while the device is muted without weakening mute
   privacy.~~ Resolved differently than proposed: a muted device discards a
   `finished` expiry entirely (no chime, no ring at all), so there is no
@@ -80,8 +80,8 @@ and the hardware acceptance checklist.
   and adds no new inference dependency. See item 7 ("Add Fast Local
   Commands") below for the wider version covering ordinary playback.
 
-**Relevant code:** `controller/em_timers.py`, `controller/em_timer_alarm.py`,
-`controller/em_turn_engine.py`, `controller/em_player.py`,
+**Relevant code:** `controller/em_timers.py`, `controller/em_timer_ring.py`,
+`controller/em_timer_alarm.py`, `controller/em_turn_engine.py`, `controller/em_player.py`,
 `hacs/custom_components/echo_voice_satellite/`
 
 ### 4. Support Multiple Wake Words With Backend Routing

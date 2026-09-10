@@ -265,6 +265,67 @@ def test_muted_timer_expiry_is_discarded_without_starting_alarm(monkeypatch):
     assert events[-1]["state"] == "idle"
 
 
+def test_post_timer_event_refreshes_ring_when_idle_and_skips_mid_turn(monkeypatch):
+    """
+    started/updated/cancelled can change which timer is first-running, so
+    the countdown ring must refresh immediately rather than waiting out
+    whatever TTL the last-pushed spec happened to have — but only while the
+    device is idle; mid-turn, _leds_turn_end already owns resolving the ring
+    once the turn ends, and pushing here would just be immediately
+    superseded.
+    """
+    import em_controller as ctl
+
+    em_api._timer_sessions.clear()
+    old_devices = em_api._devices
+    events = []
+
+    async def push(event):
+        events.append(event)
+
+    idle_calls = []
+
+    async def fake_leds_idle(device):
+        idle_calls.append(device)
+
+    monkeypatch.setattr(em_api, "_push_event", push)
+    monkeypatch.setattr(ctl, "leds_idle", fake_leds_idle)
+
+    class FakeDevice:
+        def __init__(self, *, listening=False, thinking=False, speaking=False):
+            self.listening = listening
+            self.thinking = thinking
+            self.speaking = speaking
+            self.muted = False
+
+    idle_device = FakeDevice()
+    listening_device = FakeDevice(listening=True)
+    thinking_device = FakeDevice(thinking=True)
+    speaking_device = FakeDevice(speaking=True)
+    em_api._devices = {
+        "idle-dev": idle_device, "listening-dev": listening_device,
+        "thinking-dev": thinking_device, "speaking-dev": speaking_device,
+    }
+    try:
+        for event_name in ("started", "updated", "cancelled"):
+            response = run(em_api._post_timer_event.__wrapped__(Request(
+                {"event": event_name, "timer_id": "01J"},
+                match_info={"id": "idle-dev"},
+            )))
+            assert response.status == 200
+        assert idle_calls == [idle_device, idle_device, idle_device]
+
+        idle_calls.clear()
+        for device_id in ("listening-dev", "thinking-dev", "speaking-dev"):
+            run(em_api._post_timer_event.__wrapped__(Request(
+                {"event": "started", "timer_id": "02J"},
+                match_info={"id": device_id},
+            )))
+        assert idle_calls == []
+    finally:
+        em_api._devices = old_devices
+
+
 def test_dismiss_timer_alarm_endpoint_dismisses_the_ringing_alarm(monkeypatch):
     em_api._timer_sessions.clear()
     events = []
@@ -470,11 +531,13 @@ def test_controller_helpers_and_link_auth(monkeypatch, caplog):
 
 
 def test_controller_led_outcome_and_monitor_reconnect(monkeypatch):
+    import em_timers
     import test_controller_device as controller_tests
     ctl = controller_tests.em_controller
     device = controller_tests.new_device(["led_anim"])
     sent = []
     device.send_led_anim = lambda value: asyncio.sleep(0, result=sent.append(value))
+    ctl.api._timer_sessions.pop(device.device_id, None)
     device.last_turn_outcome = "ok"
     run(ctl._leds_turn_end(device))
     assert sent == [{"pattern": "off"}]
@@ -486,6 +549,63 @@ def test_controller_led_outcome_and_monitor_reconnect(monkeypatch):
     device.last_turn_outcome = "no_speech"
     run(ctl._leds_turn_end(device))
     assert sent[-1] == {"pattern": "off"}
+    device.barge_detected = False
+
+    # The no-outcome fallback now goes through leds_idle: a running timer's
+    # countdown ring takes over instead of a bare "off".
+    session = em_timers.AlarmSession()
+    timer = em_timers.TimerRecord(
+        timer_id="pizza", name="pizza", total_seconds=100, seconds_left=80,
+        is_active=True, received_at=0.0,
+    )
+    session.running[timer.timer_id] = timer
+    monkeypatch.setattr(ctl.api, "get_timer_session", lambda device_id: session)
+    device.last_turn_outcome = None
+    run(ctl._leds_turn_end(device))
+    assert sent[-1]["pattern"] == "countdown"
+
+    # An alarm that begins during an outcome cue's one-second follow-up keeps
+    # its pulse; clearing the alarm before that follow-up lets countdown resume.
+    async def delayed_idle_respects_timer_owner():
+        sent.clear()
+        device.timer_firing = True
+        await ctl._delayed_leds_idle(device, 0)
+        assert sent == []
+        device.timer_firing = False
+        await ctl._delayed_leds_idle(device, 0)
+        assert sent[-1]["pattern"] == "countdown"
+
+    run(delayed_idle_respects_timer_owner())
+
+    # The outcome-cue branch's fire-and-forget follow-up also resolves
+    # through leds_idle once the cue's own TTL elapses — revealing the
+    # countdown ring underneath rather than leaving the ring dark forever.
+    async def outcome_then_follow_up():
+        original_sleep = ctl.asyncio.sleep
+        monkeypatch.setattr(
+            ctl.asyncio, "sleep",
+            lambda _delay, result=None: original_sleep(0, result=result),
+        )
+        sent.clear()
+        device.last_turn_outcome = "no_speech"
+        before = asyncio.all_tasks()
+        await ctl._leds_turn_end(device)
+        assert sent == [{"pattern": "pulse"}]
+        follow_up = next(iter(asyncio.all_tasks() - before))
+        await follow_up
+        assert sent[-1]["pattern"] == "countdown"
+
+        # And with nothing running, the same follow-up clears to black.
+        monkeypatch.setattr(ctl.api, "get_timer_session", lambda device_id: None)
+        sent.clear()
+        device.last_turn_outcome = "no_speech"
+        before = asyncio.all_tasks()
+        await ctl._leds_turn_end(device)
+        follow_up = next(iter(asyncio.all_tasks() - before))
+        await follow_up
+        assert sent[-1] == {"pattern": "off"}
+
+    run(outcome_then_follow_up())
 
     async def reconnect():
         ctl._devices["dev"] = device

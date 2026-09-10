@@ -33,9 +33,18 @@ class TimerRecord:
     seconds_left: int
     is_active: bool
     ha_device_id: str | None = None
+    # Controller monotonic clock reading (`loop.time()`) at the moment this
+    # record was received — populated by the caller (`_post_timer_event`),
+    # never here, so this module stays clock-free like every other member of
+    # this pure-logic family. Defaults to None so every existing
+    # `from_payload` call site (which never sets it) is unaffected; `None`
+    # means "cannot interpolate a countdown from this record yet", not zero.
+    received_at: float | None = None
 
     @classmethod
-    def from_payload(cls, payload: dict[str, Any]) -> "TimerRecord":
+    def from_payload(
+        cls, payload: dict[str, Any], received_at: float | None = None
+    ) -> "TimerRecord":
         return cls(
             timer_id=payload["timer_id"],
             name=payload.get("name"),
@@ -43,6 +52,7 @@ class TimerRecord:
             seconds_left=int(payload.get("seconds_left", 0)),
             is_active=bool(payload.get("is_active", False)),
             ha_device_id=payload.get("ha_device_id"),
+            received_at=received_at,
         )
 
     def as_dict(self) -> dict[str, Any]:
@@ -74,13 +84,27 @@ class AlarmSession:
         self._last_payload: dict[str, str] = {}
         self._cancelled: set[str] = set()
 
-    def apply(self, event: dict[str, Any]) -> TimerTransition:
+    def apply(
+        self, event: dict[str, Any], now: float | None = None
+    ) -> TimerTransition:
+        """
+        `now` is an optional monotonic clock reading (`loop.time()`),
+        supplied by the caller — never read from a clock in here, keeping
+        this module clock-free like the rest of this pure-logic family. It
+        is stamped onto the constructed record as `received_at`, which is
+        what lets `em_timer_ring.countdown_spec` later interpolate "how much
+        of this timer is left right now" between events. Omitting it (the
+        default) is exactly what every existing caller/test already does,
+        and produces a record with `received_at=None`, which
+        `countdown_spec` already treats as "nothing to interpolate from
+        yet" rather than as a bug.
+        """
         event_name = event.get("event")
         timer_id = event.get("timer_id")
         if event_name not in LIFECYCLE_EVENTS or not isinstance(timer_id, str) or not timer_id:
             return TimerTransition(False)
 
-        timer = TimerRecord.from_payload(event)
+        timer = TimerRecord.from_payload(event, received_at=now)
         fingerprint = json.dumps(event, sort_keys=True, separators=(",", ":"), default=str)
         if self._last_payload.get(timer_id) == fingerprint:
             return TimerTransition(True, duplicate=True)

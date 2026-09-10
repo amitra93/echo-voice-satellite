@@ -38,10 +38,15 @@ integration talks to the device it manages.
   config is on.
 - The satellite registers itself as a native Home Assistant timer device
   (`HassStartTimer`/`HassPauseTimer`/etc. and Assist API LLM tools all work
-  unmodified), so `set a 10 minute timer` just works. A finished timer rings
-  a continuous chime on the originating Echo with no spoken confirmation in
-  either direction — say `stop`, or tap the action button, to dismiss it. See
-  [`docs/design/timers-design.md`](../docs/design/timers-design.md).
+  unmodified), so `set a 10 minute timer` just works. An otherwise idle Echo
+  shows the remaining portion of its first-started timer in a scene-derived
+  partial ring; pausing holds that ring still. A finished timer replaces it
+   with a continuous chime and amber pulse on the originating Echo, with no
+   spoken confirmation in either direction. A device with a ready stop-word
+   model accepts local `stop`; every device can use the action button or card
+   Dismiss control. See [`docs/led-ring-states.md`](../docs/led-ring-states.md)
+   for ring priority and firmware fallback details, and
+   [`docs/timer-validation.md`](../docs/timer-validation.md) for validation.
 
 ## Timers dashboard card
 

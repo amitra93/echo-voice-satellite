@@ -220,6 +220,15 @@ def resolve(config: dict) -> dict:
     outcome_colors = ([list(preset["spin_head"])] if not preset["rotate"]
                       else [list(c) for c in preset["listening"]])
 
+    # The timer countdown ring's single colour. Deliberately NOT the same
+    # derivation outcome_colors uses below: outcome_colors hands `pulse` the
+    # whole rotate palette for pride, since `pulse` can modulate a multi-
+    # colour palette as a unit, while `countdown` only ever reads `Colors[0]`
+    # — it paints a lit-count arc in one colour — so pride (whose
+    # `spin_head` is None; there is no single "the" spinner colour for a
+    # rotating rainbow) needs its own fallback to a representative hue.
+    countdown_color = preset["spin_head"] or _RAINBOW[0]
+
     return {
         "name":           name,
         "listening":      listening_leds,
@@ -227,6 +236,7 @@ def resolve(config: dict) -> dict:
         "listening_anim": listening_anim,
         "spin_anim":      spin_anim,
         "meter_anim":     meter_anim,
+        "countdown_color": countdown_color,
         # Timer alarms can outlast a single chime and must remain visible for
         # the whole firing window, including while music is being interrupted.
         "timer_anim":     {

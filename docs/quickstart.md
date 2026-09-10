@@ -189,10 +189,11 @@ The LED ring tells you what's happening:
 
 | Ring | Meaning |
 |---|---|
-| Off | Idle, listening for the wake word |
+| Off | Idle, listening for the wake word when no timer countdown is active |
 | Green | Heard the wake word, recording your command |
 | Light-green segment | Which direction it thinks you're speaking from |
 | Spinning | Thinking (Home Assistant is processing) |
+| Scene-coloured partial ring | Remaining time for the first timer you started; it holds still while paused and is replaced by the amber alarm pulse at expiry |
 | Cyan arc | Volume level, shown for 2 seconds after a volume press (even mid-response) |
 | Solid red | Microphones muted (the physical mute button — hardware-level since v2.7.4). Pressing mute mid-conversation also cancels whatever the assistant was doing |
 

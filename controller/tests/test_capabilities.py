@@ -48,6 +48,38 @@ def test_device_announces_expected_capabilities():
         assert expected in caps, f"firmware no longer announces {expected!r}"
 
 
+def test_countdown_ring_requires_no_new_capability():
+    """
+    The timer countdown ring (docs/design/timers-led-design.md) is a new
+    `led_anim` pattern name, not a new capability: firmware that has not
+    been OTA'd to render "countdown" falls into StartAnim's existing
+    unknown-pattern default (clear the ring) — the same safe degrade as
+    today's no-countdown behaviour. So "countdown" must never appear in the
+    capability list devices announce, and `leds_idle`'s gate for pushing one
+    must stay the existing `led_anim_capable`, never a dedicated capability
+    check that would make this a second thing to negotiate.
+    """
+    caps = device_capabilities()
+    assert "countdown" not in caps, (
+        "the countdown ring pattern must ride entirely under the existing "
+        "led_anim capability, not announce one of its own"
+    )
+
+    src = CONTROLLER.read_text()
+    m = re.search(r"async def leds_idle\(.*?\n(?=\nasync def |\ndef |\Z)", src, re.S)
+    assert m, "could not find leds_idle in em_controller.py"
+    body = m.group(0)
+    assert "device.led_anim_capable" in body, (
+        "leds_idle must gate the countdown push on the existing "
+        "led_anim_capable property"
+    )
+    assert not re.search(r'in\s+\(?\s*self\.capabilities|in\s+\(?\s*device\.capabilities',
+                          body), (
+        "leds_idle must not gate the countdown push on a raw capability "
+        "string of its own — led_anim_capable already covers it"
+    )
+
+
 def test_every_capability_the_controller_checks_is_one_the_device_sends():
     """
     A controller checking for a capability string the device never sends is a

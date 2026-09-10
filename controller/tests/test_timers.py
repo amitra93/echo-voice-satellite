@@ -12,6 +12,23 @@ def event(name, timer_id, **values):
     }
 
 
+def test_apply_defaults_received_at_to_none_but_stamps_it_when_given_now():
+    # The `now` parameter of `apply()` is what lets `em_timer_ring.
+    # countdown_spec` interpolate a running timer's remaining time between
+    # events — omitting it (every pre-existing caller and test) must keep
+    # producing `received_at=None`, since that is the "cannot interpolate
+    # yet" sentinel `countdown_spec` already relies on. This was a real gap
+    # caught only while wiring the LED countdown ring in: `TimerRecord.
+    # received_at` existed but nothing ever populated it.
+    session = em_timers.AlarmSession()
+    session.apply(event("started", "pizza"))
+    assert session.running["pizza"].received_at is None
+
+    session2 = em_timers.AlarmSession()
+    session2.apply(event("started", "pasta"), now=123.5)
+    assert session2.running["pasta"].received_at == 123.5
+
+
 def test_finished_timers_are_current_then_fifo():
     session = em_timers.AlarmSession()
     assert session.apply(event("started", "pizza")).accepted

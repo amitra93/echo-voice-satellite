@@ -421,6 +421,20 @@ can't wipe it the instant it appears — but **pressing the action button
 cancels it immediately**, so adjusting the volume and then talking to the
 device still shows you the listening ring straight away.
 
+### Timer countdown
+
+When the device is otherwise idle, a running timer appears as a partial ring:
+the lit portion is its remaining time, in a colour derived from your selected
+scene. If several timers are running, the first one you started is the one
+shown. Pausing it holds the segment still; resuming it makes it continue to
+shrink. Conversations, link status, mute, and the physical cyan volume arc
+take the ring while they are active. When the timer expires, its amber alarm
+pulse replaces the countdown.
+
+This uses the same local animation support as the conversation ring. Firmware
+that predates the `countdown` pattern simply leaves the resting ring dark; the
+timer and its alarm still work normally.
+
 ### How a turn ends
 The ring tells you *why* a conversation stopped, using rhythm rather than
 colour (red, orange and cyan already mean mute, no-controller and volume):

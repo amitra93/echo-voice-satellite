@@ -49,8 +49,9 @@ expiry.
 | 2 | **Mute ring** | Solid red `(180,0,0)` + button LED (gpio444, active-high) | Until unmuted; survives reboot + OTA | **Device-sovereign**, persisted to `/data/local/etc/echomuse/state.json` | `mute.go:132` |
 | 3 | **Link state** | Orange sine pulse (disconnected) / white slow pulse (pending approval) | Until link resolves | Device-local | `cmd/server.go:161,174` |
 | 4 | **Turn / media animation** | `solid` · `spin` · `rotate` · `pulse` · `meter` · `off`, scene-coloured | Until replaced or `ttlSec` expires (30s listening / 135s spinner / per-response for the meter) | Controller-specified, device-rendered | `animator.go:53` |
+| 4.5 | **Timer countdown** | Scene-coloured partial ring for the first-started timer still running | Timer lifecycle update, replacement, or TTL | Controller-specified, device-rendered | `animator.go:142` |
 | 5 | **Direction overlay** | Base ring colour brightened toward white at the beam angle | While listening ring is up | Device-local, requires `listeningLEDs` | `server.go:269` |
-| 6 | **Idle** | All off | — | — | — |
+| 6 | **Idle** | All off, or the timer countdown when one is running | — | — | — |
 
 ### Suppression rules [today]
 
@@ -84,13 +85,15 @@ paints the *latest* frame, and the next tick (≤80ms) resumes normally.
 Replacement is atomic via a generation counter — a stale animation goroutine
 can never paint over its successor (`animator.go:45-48`).
 
-**The timer alarm is layer 4, not a new layer.** It sends an ordinary
-`led_anim` (`pattern: pulse`, amber, `ttlSec` 135) the same way listening,
-thinking, and playing do, and is subject to the same suppression, generation
-counter, and dead-man TTL as any other animation — no new arbitration rule
-was needed to add it. See §4.6 and `docs/audio-states.md` §5.3 for its full
-behaviour, and `docs/design/timers-design.md`/
-`docs/design/timers-implementation-update.md` for the design and status.
+**Timer presentation uses the existing animation machinery, not a new
+arbitration path.** While no higher owner is active, the controller sends a
+`countdown` `led_anim` for the first-started timer that remains in its running
+set. The device renders its remaining proportion locally; a paused timer keeps
+the same partial ring without decaying. The timer alarm remains layer 4: a
+finished timer replaces the countdown with the ordinary amber `pulse`
+(`timer_anim`, `ttlSec` 135). Both patterns inherit the same suppression,
+generation counter, and dead-man TTL as every other animation. See §4.6 and
+`docs/audio-states.md` §5.3 for the alarm.
 
 ---
 
@@ -229,6 +232,8 @@ Mute is the reference implementation of principle 5, and its behaviour is
 | C5 | Any `led_anim` / `leds` | MUTED or VOL-DISPLAY | **Recorded into `baseLEDs`, not painted** | [today] |
 | C6 | Legacy `leds` frame | any unsuppressed | Atomically replaces any running animation (generation counter) | [today] |
 | C7 | No replacement within `ttlSec` | animation running | Dead-man clears the ring — protects against a controller that died mid-turn | [today] |
+| C8 | `led_anim` `countdown` | resting state with a timer running | Device counts down the scene-coloured partial ring locally; `runningMps: 0` holds it static while paused | [today] |
+| C9 | `led_anim` `countdown` on firmware that does not recognise the pattern | any unsuppressed | Safely clears to black through `StartAnim`'s existing unknown-pattern path; no new capability is needed beyond `led_anim` | [today] |
 
 ### 4.5 Audio / link lifecycle
 
@@ -242,16 +247,24 @@ Mute is the reference implementation of principle 5, and its behaviour is
 | L6 | **Speaker stream ends** (EOS received *and* audio channel empty) | PLAYING | **Controller estimates this from wall-clock and clears the ring early on slow links** — measured up to 6.1s premature | [today] |
 | L7 | Speaker stream ends | PLAYING | Device clears / hands back the ring itself, from the signal it already logs (`pcm_speaker.go:309`) | [proposed] |
 
-### 4.6 Timer alarm ring
+### 4.6 Timer countdown and alarm ring
 
-Rides layer 4 (`led_anim`, `pattern: pulse`) — see the note under §2. Full
-behaviour: `docs/audio-states.md` §5.3.
+The countdown is layer 4.5 and only appears while a timer is running and no
+higher owner is active. It selects the first timer started that is still in the
+controller's running set, uses the scene spinner's representative colour, and
+is static while that timer is paused. It is presentation state, not a second
+timer store: the controller rebuilds it from later HA lifecycle events. A
+controller restart clears the in-memory session, so an otherwise quiet timer's
+ring stays dark until a later `updated`, `cancelled`, or `finished` event.
+
+The finished-timer alarm rides layer 4 (`led_anim`, `pattern: pulse`) and
+replaces the countdown. Full alarm behaviour: `docs/audio-states.md` §5.3.
 
 | # | Event | Ring outcome | Status |
 |---|---|---|---|
 | T1 | HA sends a `finished` timer event and no alarm is already ringing for the device | Amber pulse (`timer_anim`, `ttlSec` 135) starts; suppressed the same as any other animation while MUTED or VOL-DISPLAY | [today] |
-| T2 | Dismissal — action-button tap, or a recognized `stop` from the ring's STT-only speech detector | `leds_off` | [today] |
-| T3 | `MAX_RING_S` (120s) elapses unanswered | `leds_off`, queue advances to the next finished timer, which repeats T1 | [today] |
+| T2 | Dismissal — action-button tap, card action, or a recognized local `stop` on a stop-word-ready device | Resting state: the first still-running timer's countdown returns, or the ring goes dark | [today] |
+| T3 | `MAX_RING_S` (120s) elapses unanswered | Resting state, then queue advances to the next finished timer, which repeats T1 | [today] |
 | T4 | Controller dies mid-ring | `ttlSec` dead-man clears the pulse — the same protection every other animation has, nothing timer-specific | [today] |
 
 ---

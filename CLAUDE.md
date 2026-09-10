@@ -485,22 +485,35 @@ directly rather than the retired race.
 
 ## Timers
 
-Full design: `docs/design/timers-design.md`. Phase-by-phase build status and
-the fixes that followed it: `docs/design/timers-implementation-update.md`.
-Behavioural spec for how a ringing alarm shares the speaker with everything
-else: `docs/audio-states.md` §5.3. Ring animation: `docs/led-ring-states.md`
-§4.6. Test coverage and the manual hardware checklist: `docs/timer-validation.md`.
+Implementation decisions and remaining hardware acceptance are in
+`docs/design/timers-implementation-audit.md` and `docs/timer-validation.md`.
+The behavioural speaker and ring contracts are `docs/audio-states.md` §5.3 and
+`docs/led-ring-states.md` §4.6.
 
-**Home Assistant owns every timer record; the controller owns nothing but the
-physical alarm.** `HassStartTimer`/`HassCancelTimer`/`HassPauseTimer`/etc. and
-HA's native `TimerManager` are the only timer state that exists — EchoMuse
-never mutates a `TimerInfo`, never overrides an Assist timer intent, and
-never builds a second timer store. `EchoAssistSatellite.async_added_to_hass`
-registers each Echo as an HA timer device
+**Home Assistant owns every durable timer record; the controller owns the
+physical alarm and transient ring presentation.** `HassStartTimer`/
+`HassCancelTimer`/`HassPauseTimer`/etc. and HA's native `TimerManager` are the
+only timer state that exists — EchoMuse never mutates a `TimerInfo`, never
+overrides an Assist timer intent, and never builds a second timer store.
+`EchoAssistSatellite.async_added_to_hass` registers each Echo as an HA timer device
 (`async_register_timer_handler`) and forwards every lifecycle event to the
 controller over `POST /api/devices/{id}/timer-events` — idempotent by
 timer-id+state fingerprint (`em_timers.AlarmSession.apply`), since HA can and
 does redeliver.
+
+**The timer countdown is presentation, not ownership.** While an otherwise
+resting device has one or more running timers, `em_timer_ring.first_running`
+selects the first-started entry and `countdown_spec` sends its remaining
+fraction and rate under the existing `led_anim` capability. The device counts
+down locally; a paused timer's rate is zero, so its partial scene-coloured ring
+holds still. Turn/media animation, link state, mute, and the physical volume
+arc take priority, and a finished timer replaces the countdown with its amber
+alarm pulse. No new capability is added: firmware that does not recognise the
+`countdown` pattern follows `StartAnim`'s existing safe unknown-pattern path
+and clears the ring. `_timer_sessions` is in-memory only, so a controller
+restart leaves an otherwise quiet timer dark until a later HA lifecycle event
+rebuilds the presentation; do not add a competing timer snapshot/store to
+paper over that deliberate limitation.
 
 **A delayed-command timer (`in five minutes turn off the lights`) must never
 reach the controller.** `TimerInfo.conversation_command` marks these —
@@ -1644,6 +1657,13 @@ Volume persists through reboots **controller-side**: every device `volume_state`
 ## LED priority system
 
 Turn-state ring colours (listening ring, thinking spinner) come from **LED scenes** (`em_scenes.py`), configurable per device (`ledScene` + custom colours). Firmware with the `led_anim` capability (v2.9+) **animates locally**: the controller sends one `led_anim` message per state change ({pattern: solid|spin|rotate|pulse|meter|off, colors, periodMs, ttlSec}) and the device renders frames on its own ticker (`internal/server/animator.go`) — controller/WiFi jitter can't judder the ring. `meter` throbs with the live speaker RMS (tapped at the ALSA write, so it tracks audible audio, not the ~5.5s-ahead send) — measured on the **voice plane only, before the music mix**, unlike the AEC far-end tap which deliberately sees the mixed output; a meter fed the mix throbs to the music bed before the response has started; its response curve is config-tunable (`meter*` keys → `AnimSpec` pointer fields → `resolveMeter`, which clamps independently of the dashboard ranges) because it is a taste parameter that needs iterating in a real room, not a firmware OTA per pass. `ttlSec` is bounded per phase — 30s listening, 135s spinner (**coupled to `_fetch_tts_audio`'s 60s timeout ×2 attempts, since the spinner spans HA think time AND the fetch — move one and move the other**), and computed per response for `meter` via `em_scenes.meter_ttl` so a long TTS cannot self-clear mid-answer. Loss-resilience: newer spec or raw `leds` frame atomically replaces the animation (generation counter), and `ttlSec` is a dead-man that self-clears the ring if the controller dies mid-turn. Legacy firmware falls back to controller-streamed frames. Controller `leds` messages carry an explicit `listening: true` flag on listening-ring frames — the device's direction overlay keys off it (pre-scene firmware inferred "listening" from an all-green ring, which breaks for any other scene; the heuristic remains as fallback for old controllers). The direction overlay brightens the base ring colour instead of painting green. Mute ring (red) and volume arc (cyan) are device-local and scene-independent by design.
+
+`countdown` is another existing-`led_anim` pattern: it paints the first-started
+running timer's scene-derived remaining fraction once per second, with
+`runningMps: 0` for a paused timer. It is only the resting ring: turn/media
+animation, link state, mute, volume, and the finished timer's amber pulse all
+replace it. It has no new capability flag; older firmware takes the existing
+safe unknown-pattern path and clears the ring.
 
 Turn *outcomes* are distinguished by rhythm, not colour (red/orange/cyan are taken by mute/link/volume): `no_speech` gets one slow throb, `no_tts`/`tts_error`/`timeout` fast blinks, everything else ends silently. Both ride the existing `pulse` pattern with a 1s TTL so they retire on the device's own ticker — no follow-up message to lose. Driven by `device.last_turn_outcome` (set in `em_turn_engine._persist_turn`, consumed once by `_leds_turn_end`).
 

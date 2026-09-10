@@ -38,6 +38,15 @@ type AnimSpec struct {
 	// against a controller that died mid-turn. 0 → no TTL.
 	TTLSec int `json:"ttlSec"`
 
+	// ── countdown-only fields ────────────────────────────────────────────
+	// FractionNow is the remaining fraction (0-1) of the timer's duration
+	// at the instant this spec was sent — the device interpolates every
+	// subsequent frame from here rather than being re-pushed.
+	FractionNow float64 `json:"fractionNow"`
+	// RunningMps is the fraction lost per second of wall time (1/total
+	// seconds while the timer is running, exactly 0 while paused).
+	RunningMps float64 `json:"runningMps"`
+
 	// ── meter-only response curve ────────────────────────────────────────
 	// Pointer-typed so 0 is expressible and "absent" is distinguishable
 	// from "zero" (same reason micGainDb is a pointer in ConfigMessage).
@@ -118,9 +127,9 @@ func (s *Server) StartAnim(spec AnimSpec) {
 
 	switch spec.Pattern {
 	case "off":
-		s.SetLEDs(blackFrame(), boolPtr(false))
+		s.paintIfCurrent(gen, blackFrame(), boolPtr(false))
 	case "solid":
-		s.SetLEDs(paletteFrame(spec.Colors), boolPtr(spec.Listening))
+		s.paintIfCurrent(gen, paletteFrame(spec.Colors), boolPtr(spec.Listening))
 		if spec.TTLSec > 0 {
 			go s.animExpiry(gen, time.Duration(spec.TTLSec)*time.Second)
 		}
@@ -130,9 +139,11 @@ func (s *Server) StartAnim(spec AnimSpec) {
 		go s.runPulse(gen, spec)
 	case "meter":
 		go s.runMeter(gen, spec)
+	case "countdown":
+		go s.runCountdown(gen, spec)
 	default:
 		log.Printf("StartAnim: unknown pattern %q — clearing ring", spec.Pattern)
-		s.SetLEDs(blackFrame(), boolPtr(false))
+		s.paintIfCurrent(gen, blackFrame(), boolPtr(false))
 	}
 }
 
@@ -151,15 +162,28 @@ func (s *Server) animCurrent(gen int) bool {
 	return gen == s.anim.gen
 }
 
+// paintIfCurrent atomically confirms that an animation generation is still
+// live and records/paints its frame. Keeping the generation lock across
+// SetLEDs closes the check-then-paint race where a one-second countdown tick
+// could overwrite a newer listening or alarm animation.
+func (s *Server) paintIfCurrent(gen int, frame []led.Led, listeningHint *bool) bool {
+	s.anim.mu.Lock()
+	defer s.anim.mu.Unlock()
+	if gen != s.anim.gen {
+		return false
+	}
+	s.SetLEDs(frame, listeningHint)
+	return true
+}
+
 // animExpiry clears the ring when a TTL'd static frame outlives its
 // dead-man window without being replaced.
 func (s *Server) animExpiry(gen int, ttl time.Duration) {
 	time.Sleep(ttl)
-	if !s.animCurrent(gen) {
+	if !s.paintIfCurrent(gen, blackFrame(), boolPtr(false)) {
 		return
 	}
 	log.Printf("led_anim: TTL expired with no replacement — clearing ring")
-	s.SetLEDs(blackFrame(), boolPtr(false))
 }
 
 // runAnim renders spin/rotate frames until replaced or TTL-expired. Frames
@@ -184,13 +208,14 @@ func (s *Server) runAnim(gen int, spec AnimSpec) {
 			return
 		}
 		if !deadline.IsZero() && time.Now().After(deadline) {
-			log.Printf("led_anim: TTL expired with no replacement — clearing ring")
-			if s.animCurrent(gen) {
-				s.SetLEDs(blackFrame(), boolPtr(false))
+			if s.paintIfCurrent(gen, blackFrame(), boolPtr(false)) {
+				log.Printf("led_anim: TTL expired with no replacement — clearing ring")
 			}
 			return
 		}
-		s.SetLEDs(animFrame(spec, pos), boolPtr(false))
+		if !s.paintIfCurrent(gen, animFrame(spec, pos), boolPtr(false)) {
+			return
+		}
 		pos = (pos + 1) % 12
 		<-ticker.C
 	}
@@ -226,15 +251,16 @@ func (s *Server) runPulse(gen int, spec AnimSpec) {
 			return
 		}
 		if !deadline.IsZero() && time.Now().After(deadline) {
-			log.Printf("led_anim: TTL expired with no replacement — clearing ring")
-			if s.animCurrent(gen) {
-				s.SetLEDs(blackFrame(), boolPtr(false))
+			if s.paintIfCurrent(gen, blackFrame(), boolPtr(false)) {
+				log.Printf("led_anim: TTL expired with no replacement — clearing ring")
 			}
 			return
 		}
 		phase := float64(time.Since(start)) / float64(cycle)
 		b := 0.15 + 0.85*(0.5-0.5*math.Cos(2*math.Pi*phase))
-		s.SetLEDs(scaleFrame(base, b), boolPtr(false))
+		if !s.paintIfCurrent(gen, scaleFrame(base, b), boolPtr(false)) {
+			return
+		}
 		<-ticker.C
 	}
 }
@@ -261,9 +287,8 @@ func (s *Server) runMeter(gen int, spec AnimSpec) {
 			return
 		}
 		if !deadline.IsZero() && time.Now().After(deadline) {
-			log.Printf("led_anim: TTL expired with no replacement — clearing ring")
-			if s.animCurrent(gen) {
-				s.SetLEDs(blackFrame(), boolPtr(false))
+			if s.paintIfCurrent(gen, blackFrame(), boolPtr(false)) {
+				log.Printf("led_anim: TTL expired with no replacement — clearing ring")
 			}
 			return
 		}
@@ -280,7 +305,55 @@ func (s *Server) runMeter(gen int, spec AnimSpec) {
 		// target. Painting the target directly (the pre-2026-07-25
 		// behaviour) is what made the throb near-invisible.
 		b := math.Pow(floor+span*env, gamma)
-		s.SetLEDs(scaleFrame(base, b), boolPtr(false))
+		if !s.paintIfCurrent(gen, scaleFrame(base, b), boolPtr(false)) {
+			return
+		}
+		<-ticker.C
+	}
+}
+
+// runCountdown renders a running timer's remaining fraction as a partial
+// ring — lit LEDs of spec.Colors[0] starting at LED 0, the rest black. The
+// controller sends a starting fraction and a decay rate; the device
+// interpolates every subsequent frame itself so controller/WiFi jitter
+// can't judder it, the same reasoning spin/pulse/meter are already
+// device-rendered for. Ticks once per second — deliberately slower than
+// pulse/meter's 40ms tick, since a 12-LED lit-count only changes roughly
+// every total_seconds/12 seconds and there is no audio or motion to track
+// smoothly here.
+func (s *Server) runCountdown(gen int, spec AnimSpec) {
+	var deadline time.Time
+	if spec.TTLSec > 0 {
+		deadline = time.Now().Add(time.Duration(spec.TTLSec) * time.Second)
+	}
+	var color [3]uint8
+	if len(spec.Colors) > 0 {
+		color = spec.Colors[0]
+	}
+	start := time.Now()
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for {
+		if !s.animCurrent(gen) {
+			return
+		}
+		if !deadline.IsZero() && time.Now().After(deadline) {
+			if s.paintIfCurrent(gen, blackFrame(), boolPtr(false)) {
+				log.Printf("led_anim: TTL expired with no replacement — clearing ring")
+			}
+			return
+		}
+		fraction := spec.FractionNow - spec.RunningMps*time.Since(start).Seconds()
+		fraction = math.Min(1, math.Max(0, fraction))
+		lit := int(math.Round(fraction * 12))
+		if lit < 0 {
+			lit = 0
+		} else if lit > 12 {
+			lit = 12
+		}
+		if !s.paintIfCurrent(gen, countdownFrame(color, lit), boolPtr(false)) {
+			return
+		}
 		<-ticker.C
 	}
 }
@@ -345,6 +418,21 @@ func paletteFrame(colors [][3]uint8) []led.Led {
 			c = colors[i]
 		}
 		frame[i].R, frame[i].G, frame[i].B = c[0], c[1], c[2]
+	}
+	return frame
+}
+
+// countdownFrame renders lit LEDs of color starting at LED 0 and proceeding
+// forward, the rest black — a fixed reference position distinct from the
+// volume arc's volumeLEDStart (11), so the two partial-ring idioms are
+// never visually confused.
+func countdownFrame(color [3]uint8, lit int) []led.Led {
+	frame := make([]led.Led, 12)
+	for i := range frame {
+		frame[i].ID = i
+		if i < lit {
+			frame[i].R, frame[i].G, frame[i].B = color[0], color[1], color[2]
+		}
 	}
 	return frame
 }

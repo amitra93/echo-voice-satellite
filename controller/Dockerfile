@@ -75,6 +75,7 @@ COPY em_announce.py .
 COPY em_runbarrier.py .
 COPY em_volume.py .
 COPY em_timers.py .
+COPY em_timer_ring.py .
 COPY em_timer_alarm.py .
 COPY em_audio_frame.py .
 COPY em_clock.py .

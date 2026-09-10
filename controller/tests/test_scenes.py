@@ -142,6 +142,36 @@ def test_outcome_cues_are_self_clearing_and_distinct():
     assert err["periodMs"] < ns["periodMs"]   # error reads as more agitated
 
 
+# ─── timer countdown ring colour ─────────────────────────────────────────
+
+def test_countdown_color_present_for_every_scene():
+    for name in ("standard", "airy", "malevolent", "pride"):
+        scene = em_scenes.resolve({"ledScene": name})
+        color = scene["countdown_color"]
+        assert color is not None
+        assert len(color) == 3
+        for ch in color:
+            assert 0 <= ch <= 255
+
+    custom = em_scenes.resolve({
+        "ledScene": "custom",
+        "ledListenColor": "#102030",
+        "ledThinkColor": "#405060",
+    })
+    assert custom["countdown_color"] == (0x40, 0x50, 0x60)
+
+
+def test_pride_countdown_color_falls_back_to_a_real_colour():
+    """
+    pride's spin_head is None (a rotating rainbow has no single spinner
+    colour), but countdown only ever renders one colour — it must fall back
+    to a representative hue rather than propagate None.
+    """
+    scene = em_scenes.resolve({"ledScene": "pride"})
+    assert scene["countdown_color"] is not None
+    assert scene["countdown_color"] == em_scenes._RAINBOW[0]
+
+
 def test_ack_cue_is_a_steady_hold_not_a_rhythm():
     """
     The acknowledgement cue says "heard you, nothing more to do" — it is not

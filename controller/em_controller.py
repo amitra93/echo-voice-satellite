@@ -73,6 +73,7 @@ import em_eq
 import em_limiter
 import em_mbc
 import em_scenes
+import em_timer_ring
 import em_stop
 import em_arbiter
 import em_button
@@ -866,6 +867,48 @@ async def leds_off(device: Device):
         await device.set_leds(_make_leds(0, 0, 0))
 
 
+async def leds_idle(device: Device) -> None:
+    """
+    Return the ring to its resting state: off, or the countdown ring for
+    the device's first-running timer if one exists. Every call site that
+    used to mean "clear to black" now means this instead, so a running
+    timer stays visible through turn-end, reconnect and alarm dismissal
+    rather than requiring a fresh HA event to reappear (see docs/design/
+    timers-led-design.md).
+    """
+    # A firing timer owns the ring until its state callback clears this flag.
+    # Timer lifecycle updates and delayed outcome cleanup must not replace the
+    # amber pulse with an idle/countdown frame in the meantime.
+    if device.timer_firing:
+        return
+    session = api.get_timer_session(device.device_id)
+    timer = em_timer_ring.first_running(session) if session else None
+    if timer is not None and device.led_anim_capable:
+        spec = em_timer_ring.countdown_spec(
+            timer, asyncio.get_running_loop().time(),
+            device.led_scene["countdown_color"],
+        )
+        if spec is not None:
+            await device.send_led_anim(spec)
+            return
+    await leds_off(device)
+
+
+async def _delayed_leds_idle(device: Device, ttl_sec: float) -> None:
+    """
+    Fire-and-forget follow-up for an outcome cue's own device-side TTL.
+
+    The cue anims (nospeech_anim/error_anim/ack_anim) self-clear to black
+    on the device's own dead-man timer, and the controller has no hook into
+    that expiry — this is what lets the ring reveal the countdown ring
+    underneath once the cue clears, instead of staying black forever. A
+    newer turn animation or a refreshed countdown spec arriving first
+    supersedes this harmlessly via the animator's generation counter.
+    """
+    await asyncio.sleep(ttl_sec)
+    await leds_idle(device)
+
+
 # Turn outcomes that get a distinguishing ring cue at turn end. Everything
 # else ("ok", "cancelled") ends silently: the user either heard a reply or
 # pressed the button themselves, so a cue would be noise.
@@ -891,13 +934,16 @@ _OUTCOME_ANIM = {
 
 async def _leds_turn_end(device: Device):
     """
-    Clear the ring at turn end, playing a brief self-clearing cue first if
-    the turn ended in a way the user would otherwise have no signal for.
+    Return the ring to its resting state at turn end — off, or the running
+    timer's countdown ring — playing a brief self-clearing cue first if the
+    turn ended in a way the user would otherwise have no signal for.
 
-    The cue anims carry a 1s TTL, so the device retires them on its own
-    ticker with no follow-up message — nothing to leak if the controller
-    dies in between, and a continuation/barge repaint simply supersedes it
-    via the animator's generation counter.
+    The cue anims carry a 1s TTL and self-clear to black on the device's
+    own ticker; a controller-side follow-up timed to the same TTL then
+    reveals the countdown ring underneath once that expiry happens (or
+    leaves the ring dark if nothing is running). A continuation/barge
+    repaint, or a newer countdown spec, supersedes either via the
+    animator's generation counter.
     """
     outcome = device.last_turn_outcome
     device.last_turn_outcome = None
@@ -909,8 +955,11 @@ async def _leds_turn_end(device: Device):
         if anim:
             log.info(f"[{device.device_id}] Turn ended '{outcome}' — ring cue")
             await device.send_led_anim(anim)
+            asyncio.create_task(
+                _delayed_leds_idle(device, anim.get("ttlSec", 1))
+            ).add_done_callback(_log_task_exception)
             return
-    await leds_off(device)
+    await leds_idle(device)
 
 
 async def leds_listening(device: Device):
@@ -935,7 +984,7 @@ async def leds_spin_green(device: Device, stop_event: asyncio.Event):
         except asyncio.CancelledError:
             pass
         finally:
-            await leds_off(device)
+            await leds_idle(device)
         return
     spin_frame = device.led_scene["spin_frame"]
     pos = 0
@@ -947,7 +996,7 @@ async def leds_spin_green(device: Device, stop_event: asyncio.Event):
     except asyncio.CancelledError:
         pass
     finally:
-        await leds_off(device)
+        await leds_idle(device)
 
 
 # ─── Audio conversion ─────────────────────────────────────────────────────────
@@ -2203,7 +2252,7 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
         )
         log.info(f"[control] Config pushed to {device_id} (volume={device.volume:.3f})")
 
-        await leds_off(device)
+        await leds_idle(device)
         await api.notify_device_connected(device_id)
         _device_ref = device
         async def _standalone_play(pcm_bytes: bytes, _d=_device_ref) -> bool:
@@ -2836,8 +2885,8 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
                 # Stamp the moment it went away, so "last seen" is exact for
                 # an offline device rather than up to one stats report stale.
                 db.touch_device_seen(device.device_id)
-                _devices.pop(device.device_id, None)
                 await api.notify_device_disconnected(device.device_id)
+                _devices.pop(device.device_id, None)
                 em_player.device_gone(device.device_id)
 
 

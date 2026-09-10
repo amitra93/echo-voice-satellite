@@ -278,6 +278,17 @@ TEST_AUDIO_DEVICE_PATH = "/data/local/tmp/echomuse-test-query.wav"
 _timer_sessions: dict[str, em_timers.AlarmSession] = {}
 _timer_alarm_runner: em_timer_alarm.TimerAlarmRunner | None = None
 
+
+def get_timer_session(device_id: str) -> em_timers.AlarmSession | None:
+    """
+    The one accessor `em_controller.leds_idle` uses to reach `_timer_sessions`
+    from across the module boundary — `em_controller` already imports this
+    module as `api` at module level, so this stays a plain function call
+    rather than a private-name reach-across.
+    """
+    return _timer_sessions.get(device_id)
+
+
 def init(devices_ref: dict, shell_pending_ref: dict, shell_dashboard_ref: dict) -> None:
     """
     Bind live shared state from em_controller.
@@ -1255,7 +1266,9 @@ async def _post_timer_event(request: web.Request) -> web.Response:
     timer_id = timer_id.strip()
     session = _timer_sessions.setdefault(device_id, em_timers.AlarmSession())
     try:
-        transition = session.apply(body)
+        transition = session.apply(
+            body, now=asyncio.get_running_loop().time()
+        )
     except (KeyError, TypeError, ValueError):
         return _error("invalid_timer_event", "Invalid timer event values", 400)
     if not transition.accepted:
@@ -1286,6 +1299,19 @@ async def _post_timer_event(request: web.Request) -> web.Response:
         if session.current is not None and event == "finished" and _timer_alarm_runner:
             if device is not None:
                 _timer_alarm_runner.start(device_id, session)
+    if event in {"started", "updated", "cancelled"} and device is not None and (
+        not device.listening and not device.thinking and not device.speaking
+    ):
+        # Refresh the countdown ring immediately rather than waiting out
+        # whatever TTL the last-pushed spec happened to have — this is what
+        # makes pause, resume and extension visible on the ring right away.
+        # Unconditional on transition.alarm_changed above: that flag is about
+        # the finished-alarm queue, a separate piece of state from `running`.
+        # Mid-turn is skipped: _leds_turn_end already resolves the ring
+        # correctly once the turn ends, and pushing here would just be
+        # immediately and pointlessly superseded.
+        import em_controller
+        await em_controller.leds_idle(device)
     log.info("[%s] Timer %s: %s", device_id, timer_id, event)
     return _ok({"accepted": True, "duplicate": False, "timer_id": timer_id})
 
