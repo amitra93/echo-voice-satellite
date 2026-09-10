@@ -104,7 +104,8 @@ select = _module("homeassistant.components.select")
 select.SelectEntity = SelectEntity
 pipeline = _module("homeassistant.components.assist_pipeline")
 pipeline.PipelineEventType = _enum("PipelineEventType", {
-    "STT_END": "stt_end", "INTENT_END": "intent_end", "TTS_END": "tts_end", "ERROR": "error",
+    "STT_END": "stt_end", "INTENT_START": "intent_start", "INTENT_PROGRESS": "intent_progress",
+    "INTENT_END": "intent_end", "TTS_END": "tts_end", "ERROR": "error",
 })
 pipeline.PipelineEvent = lambda type, data=None: types.SimpleNamespace(type=type, data=data or {})
 pipeline.async_get_pipelines = lambda hass: []

@@ -732,6 +732,8 @@ function TurnObservability({ turns, devices, isAdmin }) {
   const [removedAudio, setRemovedAudio] = useState(() => new Set());
   const [pruningAudio, setPruningAudio] = useState(false);
   const [pruneMessage, setPruneMessage] = useState(null);
+  const [toolCalls, setToolCalls] = useState({});
+  const [toolCallsLoading, setToolCallsLoading] = useState(() => new Set());
   const audioRef = useRef(null);
   const urlsRef  = useRef({});    // turn_id -> object URL
 
@@ -805,6 +807,34 @@ function TurnObservability({ turns, devices, isAdmin }) {
     } finally {
       setPruningAudio(false);
     }
+  };
+
+  const loadToolCalls = async (t, key) => {
+    if (!isAdmin || toolCalls[key] !== undefined || toolCallsLoading.has(key)) return;
+    setToolCallsLoading(current => new Set(current).add(key));
+    try {
+      const result = await API.get(`/api/devices/${t.device_id}/turns/${t.turn_id}/tool-calls`);
+      setToolCalls(current => ({ ...current, [key]: result.tool_calls || [] }));
+    } catch {
+      setToolCalls(current => ({ ...current, [key]: null }));
+    } finally {
+      setToolCallsLoading(current => { const next = new Set(current); next.delete(key); return next; });
+    }
+  };
+
+  const toggleDetails = (t, key) => {
+    const opening = !expanded.has(key);
+    setExpanded(current => {
+      const next = new Set(current); opening ? next.add(key) : next.delete(key); return next;
+    });
+    if (opening) loadToolCalls(t, key);
+  };
+
+  const toolJson = value => JSON.stringify(value, null, 2);
+  const toolJsonStyle = {
+    margin: '0 0 4px', maxHeight: '13.5em', overflow: 'auto',
+    whiteSpace: 'pre-wrap', wordBreak: 'break-word', lineHeight: '1.35em',
+    scrollbarWidth: 'thin',
   };
 
   useEffect(() => () => {
@@ -913,9 +943,7 @@ function TurnObservability({ turns, devices, isAdmin }) {
             return (
               <React.Fragment key={key}>
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, padding: '5px 0', borderRadius: 4 }}>
-                <button onClick={() => setExpanded(current => {
-                    const next = new Set(current); next.has(key) ? next.delete(key) : next.add(key); return next;
-                  })}
+                <button onClick={() => toggleDetails(t, key)}
                   aria-expanded={isExpanded}
                   style={{ background:'none', border:0, color:'var(--accent)', cursor:'pointer', fontFamily:mono, fontSize:9, width:72, textAlign:'left', flexShrink:0 }}>
                   {isExpanded ? '▾ Hide' : '▸ Details'}
@@ -945,6 +973,19 @@ function TurnObservability({ turns, devices, isAdmin }) {
                   <div>STT {fmtS(seg.stt)} · HA response {fmtS(seg.ha)} · TTS + playback {fmtS(seg.tts)}</div>
                    {t.stt_text && <div style={{ marginTop:4 }}>STT: “{t.stt_text}”</div>}
                    {t.tts_text && <div style={{ marginTop:4 }}>TTS: “{t.tts_text}”</div>}
+                   {isAdmin && <div style={{ marginTop:8 }}>
+                     <div style={{ color:'var(--accent)', fontSize:9, letterSpacing:'0.08em' }}>TOOLS</div>
+                     {toolCallsLoading.has(key) && <div>Loading tool calls...</div>}
+                     {toolCalls[key] === null && <div style={{ color:'var(--warn)' }}>Tool calls unavailable</div>}
+                     {toolCalls[key] && toolCalls[key].length === 0 && <div>No tools called</div>}
+                     {toolCalls[key]?.map(call => <div key={call.call_id} className="em-inset" style={{ marginTop:6, padding:'6px 8px' }}>
+                       <div>{call.sequence + 1}. {call.name} · {call.status}</div>
+                       <div style={{ marginTop:3 }}>Request</div>
+                       <pre aria-label="Tool request JSON" style={toolJsonStyle}>{toolJson(call.request)}</pre>
+                       <div>Response</div>
+                       <pre aria-label="Tool response JSON" style={{ ...toolJsonStyle, margin: 0 }}>{toolJson(call.response)}</pre>
+                     </div>)}
+                   </div>}
                   {t.wake_model && <div>wake {t.wake_model.replace(/\.[a-z]+$/, '').split('/').pop()} · score {t.wake_score?.toFixed(3)} · threshold {t.wake_threshold?.toFixed(2)}</div>}
                   {isAdmin && (t.audio_file || t.tts_audio_file) && (
                     <div style={{ display:'flex', gap:8, flexWrap:'wrap', marginTop:8 }}>

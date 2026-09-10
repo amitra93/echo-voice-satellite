@@ -72,9 +72,13 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
         self._transcript_sent = False
         self._endpoint_sent = False
         self._continue_conversation = False
+        self._tool_calls: dict[str, dict[str, Any]] = {}
+        self._tool_call_sequence = 0
+        self._tool_trace_lock = asyncio.Lock()
         self._attr_unique_id = f"{device_id}_assist_satellite"
         self._attr_name = "Voice Assistant"
         self._event_remove = coordinator.async_add_event_listener(self._async_gateway_event)
+        self._chat_log_unsubscribe = None
 
     async def async_will_remove_from_hass(self) -> None:
         self._event_remove()
@@ -86,6 +90,7 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
             task.cancel()
         self._active_turn_id = None
         self._active_channel = None
+        self._active_conversation_id = None
         self._active_turn_token = None
         self._pipeline_task = None
         self._tts_task = None
@@ -117,6 +122,21 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
         )
         self.async_on_remove(self._timer_unregister)
 
+        # Native HA intents add ToolInput/ToolResultContent directly to the
+        # chat log; unlike LLM calls they emit no INTENT_PROGRESS delta. The
+        # conversation id is bound synchronously in on_pipeline_event below,
+        # so this global subscription can safely select only this turn.
+        try:
+            from homeassistant.components.conversation.chat_log import async_subscribe_chat_logs
+        except ImportError as err:  # pragma: no cover - older HA cannot supply traces
+            _LOGGER.warning("Tool tracing unavailable on %s: %s", self.device_id, err)
+        else:
+            self._chat_log_unsubscribe = async_subscribe_chat_logs(
+                self.hass, self._on_chat_log_event
+            )
+            self.async_on_remove(self._chat_log_unsubscribe)
+            _LOGGER.info("Tool tracing chat-log hook registered for %s", self.device_id)
+
         # Seed the device's default alarm timezone from HA's own timezone, so
         # a voice/card alarm created without an explicit tz uses "the timezone
         # of the device" (docs/design/alarms-design.md). Best-effort: a
@@ -126,6 +146,7 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
             await self.client.async_set_device_timezone(
                 self.device_id, self.hass.config.time_zone
             )
+
     def _timer_event(self, event, timer) -> None:
         """TimerManager invokes handlers synchronously from its event loop."""
         if timer.conversation_command:
@@ -196,6 +217,7 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
             # queued pipeline events can then never resolve a newer turn.
             self._active_turn_id = None
             self._active_channel = None
+            self._active_conversation_id = None
             self._active_turn_token = None
             self._pipeline_task = None
             self._tts_task = None
@@ -234,11 +256,14 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
                 return
             self._active_turn_id = turn_id
             self._active_channel = channel
+            self._active_conversation_id = None
             token = object()
             self._active_turn_token = token
             self._transcript_sent = False
             self._endpoint_sent = False
             self._continue_conversation = False
+            self._tool_calls = {}
+            self._tool_call_sequence = 0
             self._tts_task = None
             try:
                 # The controller does not grant the device until HA has accepted
@@ -249,6 +274,7 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
                 _LOGGER.exception("Failed to accept turn %s", turn_id)
                 self._active_turn_id = None
                 self._active_channel = None
+                self._active_conversation_id = None
                 self._active_turn_token = None
                 with contextlib.suppress(ControllerError):
                     await self.client.async_turn_action(turn_id, "reject")
@@ -402,6 +428,8 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
         self._active_channel = channel
         token = object()
         self._active_turn_token = token
+        self._tool_calls = {}
+        self._tool_call_sequence = 0
         self._tts_task = asyncio.current_task()
         self._tts_turn_token = token
         try:
@@ -423,6 +451,10 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
                 pass
 
     def on_pipeline_event(self, event: PipelineEvent) -> None:
+        if event.type == PipelineEventType.INTENT_START and self._active_turn_id is not None:
+            conversation_id = (event.data or {}).get("conversation_id")
+            if isinstance(conversation_id, str):
+                self._active_conversation_id = conversation_id
         if self._active_turn_id is not None and self._active_turn_token is not None:
             # PipelineEvent has no turn id. Bind it while HA invokes this
             # callback, rather than when its asynchronous forwarding runs.
@@ -430,6 +462,22 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
                 event, self._active_turn_id, self._active_turn_token, self._active_channel
             ))
         self.async_write_ha_state()
+
+    def _on_chat_log_event(self, conversation_id: str, _event_type, data: dict[str, Any]) -> None:
+        """Bridge native-intent ToolInput/ToolResultContent into turn tracing."""
+        if conversation_id != self._active_conversation_id:
+            return
+        content = data.get("content")
+        if not isinstance(content, dict) or content.get("role") not in {"assistant", "tool_result"}:
+            return
+        turn_id, token, channel = (
+            self._active_turn_id, self._active_turn_token, self._active_channel
+        )
+        if turn_id is None or token is None or channel is None:
+            return
+        self.hass.async_create_task(
+            self._forward_tool_delta({"chat_log_delta": content}, turn_id, token, channel)
+        )
 
     async def _async_pipeline_event(
         self, event: PipelineEvent, turn_id: int | None = None,
@@ -476,6 +524,8 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
                     turn_id, "pipeline-event",
                     {"event": "intent_end", "continue_conversation": continue_conversation},
                 )
+            elif event_type == PipelineEventType.INTENT_PROGRESS:
+                await self._forward_tool_delta(event.data or {}, turn_id, token, channel)
             elif event_type == PipelineEventType.TTS_END:
                 tts_token = (event.data or {}).get("tts_output", {}).get("token")
                 if tts_token and self._tts_task is None and self._owns_turn(turn_id, token, channel):
@@ -506,6 +556,62 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
                 await self.client.async_turn_action(turn_id, "pipeline-event", body)
         except ControllerError:
             _LOGGER.exception("Turn action failed for turn %s (%s)", turn_id, event_type)
+
+    async def _forward_tool_delta(self, data: dict[str, Any], turn_id: int,
+                                  token: object, channel) -> None:
+        """Forward raw HA chat-log tool calls/results for the owning turn.
+
+        ``INTENT_PROGRESS`` is HA's supported streaming surface for this data.
+        A tool request and its result are separate deltas, so retain the raw
+        arguments by call id until the result arrives, then upsert that row on
+        the controller. Results arriving first are also retained: a task
+        scheduling inversion must not turn into a trace with no request.
+        """
+        delta = data.get("chat_log_delta")
+        if not isinstance(delta, dict):
+            return
+        payloads: list[dict[str, Any]] = []
+        async with self._tool_trace_lock:
+            if not self._owns_turn(turn_id, token, channel):
+                return
+            calls = delta.get("tool_calls")
+            if isinstance(calls, list):
+                for call in calls:
+                    call_id = call.get("id") if isinstance(call, dict) else getattr(call, "id", None)
+                    name = (call.get("tool_name") if isinstance(call, dict) else getattr(call, "tool_name", None))
+                    request = (call.get("tool_args") if isinstance(call, dict) else getattr(call, "tool_args", None))
+                    if not isinstance(call_id, str) or not call_id or not isinstance(name, str) or not name:
+                        continue
+                    record = self._tool_calls.get(call_id)
+                    if record is None:
+                        record = {"sequence": self._tool_call_sequence, "call_id": call_id}
+                        self._tool_call_sequence += 1
+                        self._tool_calls[call_id] = record
+                    record.update({"name": name, "request": request})
+                    record.setdefault("response", None)
+                    record.setdefault("status", "pending")
+                    payloads.append(dict(record))
+            elif delta.get("role") == "tool_result":
+                call_id = delta.get("tool_call_id")
+                name = delta.get("tool_name")
+                if isinstance(call_id, str) and call_id and isinstance(name, str) and name:
+                    record = self._tool_calls.get(call_id)
+                    if record is None:
+                        record = {"sequence": self._tool_call_sequence, "call_id": call_id}
+                        self._tool_call_sequence += 1
+                        self._tool_calls[call_id] = record
+                    result = delta.get("tool_result")
+                    record.update({
+                        "name": name,
+                        "response": result,
+                        "status": "error" if isinstance(result, dict) and "error" in result else "ok",
+                    })
+                    record.setdefault("request", None)
+                    payloads.append(dict(record))
+        for payload in payloads:
+            if not self._owns_turn(turn_id, token, channel):
+                return
+            await self.client.async_turn_action(turn_id, "tool-call", payload)
 
     async def _stream_pipeline_tts(
         self, token: str, turn_id: int, turn_token: object | None = None, channel=None

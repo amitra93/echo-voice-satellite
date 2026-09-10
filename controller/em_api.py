@@ -521,6 +521,7 @@ async def create_app() -> web.Application:
     app.router.add_post("/api/devices/{id}/config",       _post_device_config)
     app.router.add_get("/api/devices/{id}/logs",          _get_device_logs)
     app.router.add_get("/api/devices/{id}/turns",         _get_device_turns)
+    app.router.add_get("/api/devices/{id}/turns/{turn}/tool-calls", _get_turn_tool_calls)
     app.router.add_get("/api/devices/{id}/activity",      _get_device_activity)
     app.router.add_get("/api/devices/{id}/turns/{turn}/audio", _get_turn_audio)
     app.router.add_get("/api/devices/{id}/turns/{turn}/audio/{kind}", _get_turn_audio)
@@ -571,7 +572,7 @@ async def create_app() -> web.Application:
     # 1 wires these handlers to em_turn_engine's live state machine.
     app.router.add_post("/api/devices/{id}/turn", auth.require_integration_or_admin(em_turn_engine.create_turn))
     for action in ("accept", "reject", "endpoint", "cancel", "tts/start",
-                   "tts/end", "tts-text", "transcript", "pipeline-event"):
+                   "tts/end", "tts-text", "transcript", "pipeline-event", "tool-call"):
         app.router.add_post(
             f"/api/turns/{{tid}}/{action}",
             auth.require_integration_or_admin(em_turn_engine.turn_action),
@@ -975,6 +976,21 @@ def _redact_turns_for(turns: list, user: dict) -> list:
     if user.get("role") == "admin":
         return turns
     return [{k: v for k, v in t.items() if k not in ("stt_text", "tts_text")} for t in turns]
+
+
+@auth.require_admin
+async def _get_turn_tool_calls(request: web.Request) -> web.Response:
+    """GET raw Home Assistant tool calls for one turn. Admin-only by design."""
+    try:
+        turn_id = int(request.match_info["turn"])
+    except (KeyError, ValueError):
+        return _error("bad_request", "turn must be numeric", 400)
+    calls = await asyncio.get_running_loop().run_in_executor(
+        None, db.get_turn_tool_calls, request.match_info["id"], turn_id,
+    )
+    if calls is None:
+        return _error("turn_not_found", "No matching turn", 404)
+    return _ok({"tool_calls": calls})
 
 
 @auth.require_admin

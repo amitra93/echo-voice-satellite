@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import logging
 import time
 from dataclasses import dataclass, field
@@ -79,6 +80,7 @@ BUTTON_HOLD_MS = 750        # device-measured heldMs threshold for a HOLD gestur
 # (a healthy turn reaches /endpoint in a few seconds) while still recovering
 # a genuinely stuck turn in a bounded time instead of hours.
 ENDPOINT_WAIT_TIMEOUT_S = 30.0
+TOOL_TRACE_MAX_BYTES = 256 * 1024
 TURN_ACCEPT_TIMEOUT_S = 3.0
 WAKE_STARTED_TIMEOUT_S = 1.0
 
@@ -398,6 +400,27 @@ async def turn_action(request: web.Request) -> web.Response:
         if event == "intent_end":
             turn.intent_mono = turn.intent_mono or time.monotonic()
             turn.continue_conversation = body.get("continue_conversation", False)
+    elif action == "tool-call":
+        try:
+            body = await request.json()
+            sequence = body["sequence"]
+            call_id = body["call_id"]
+            name = body["name"]
+            status = body["status"]
+            if (not isinstance(sequence, int) or sequence < 0 or not isinstance(call_id, str)
+                    or not call_id or len(call_id) > 256 or not isinstance(name, str)
+                    or not name or len(name) > 512 or status not in {"pending", "ok", "error"}):
+                raise ValueError
+            request_json = json.dumps(body.get("request"), ensure_ascii=False, separators=(",", ":"))
+            response_json = json.dumps(body.get("response"), ensure_ascii=False, separators=(",", ":"))
+            if len(request_json.encode()) > TOOL_TRACE_MAX_BYTES or len(response_json.encode()) > TOOL_TRACE_MAX_BYTES:
+                return web.json_response({"error": "tool_trace_too_large"}, status=413)
+        except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+            return web.json_response({"error": "invalid_tool_call"}, status=400)
+        await asyncio.get_running_loop().run_in_executor(
+            None, db.upsert_turn_tool_call, turn_id, sequence, call_id, name,
+            request_json, response_json, status,
+        )
     return web.json_response({"turn_id": turn_id, "action": action})
 
 

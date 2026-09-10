@@ -10,6 +10,19 @@ import pytest
 import em_alarms
 import em_db as db
 
+
+def test_turn_tool_calls_are_ordered_and_bound_to_their_device(fresh_db):
+    turn = db.create_turn("dev1")
+    db.upsert_turn_tool_call(turn, 0, "call-a", "HassCancelTimer", '{"name":"tea"}', None, "pending")
+    db.upsert_turn_tool_call(turn, 0, "call-a", "HassCancelTimer", '{"name":"tea"}', '{"cancelled":["tea"]}', "ok")
+
+    assert db.get_turn_tool_calls("other", turn) is None
+    assert db.get_turn_tool_calls("dev1", turn) == [{
+        "sequence": 0, "call_id": "call-a", "name": "HassCancelTimer",
+        "request": {"name": "tea"}, "response": {"cancelled": ["tea"]}, "status": "ok",
+    }]
+
+
 @pytest.fixture()
 def fresh_db(tmp_path):
     path = tmp_path / "test.db"

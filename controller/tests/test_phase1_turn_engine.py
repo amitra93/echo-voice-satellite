@@ -194,6 +194,35 @@ def test_turn_actions_record_transcript_and_component_latencies(monkeypatch):
     asyncio.run(run())
 
 
+def test_tool_call_action_persists_raw_request_and_response(monkeypatch):
+    async def run():
+        turn = engine.Turn(13, FakeDevice(), None, None)
+        engine.ENGINE.turns[13] = turn
+        saved = []
+        monkeypatch.setattr(engine.db, "upsert_turn_tool_call", lambda *args: saved.append(args))
+
+        class Request:
+            match_info = {"tid": "13"}
+            path = "/api/turns/13/tool-call"
+
+            async def json(self):
+                return {
+                    "sequence": 0, "call_id": "call-1", "name": "HassCancelTimer",
+                    "request": {"name": "tea"}, "response": {"cancelled": ["tea"]},
+                    "status": "ok",
+                }
+
+        try:
+            response = await engine.turn_action(Request())
+            assert response.status == 200
+            assert saved == [(13, 0, "call-1", "HassCancelTimer", '{"name":"tea"}',
+                              '{"cancelled":["tea"]}', "ok")]
+        finally:
+            engine.ENGINE.turns.pop(13, None)
+
+    asyncio.run(run())
+
+
 def test_transcript_callback_only_runs_for_recognized_speech():
     async def run():
         turn = engine.Turn(12, FakeDevice(), None, None)

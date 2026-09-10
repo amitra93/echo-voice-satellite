@@ -110,6 +110,7 @@ def _make_satellite(client=None, muted=False):
     entity.hass = _FakeHass()
     entity._active_turn_id = None
     entity._active_channel = None
+    entity._active_conversation_id = None
     entity._active_turn_token = object()
     entity._tts_task = None
     entity._tts_turn_token = None
@@ -118,6 +119,15 @@ def _make_satellite(client=None, muted=False):
     entity._transcript_sent = False
     entity._endpoint_sent = False
     entity._continue_conversation = False
+    entity._tool_calls = {}
+    entity._tool_call_sequence = 0
+    entity._tool_trace_lock = asyncio.Lock()
+    entity._timer_card_hub = None
+    entity._timer_queue = asyncio.Queue()
+    entity._timer_worker = None
+    entity._timer_forwarding_closed = False
+    entity._event_remove = lambda: None
+    entity._chat_log_unsubscribe = None
     entity._attr_unique_id = "A_assist_satellite"
     entity.async_write_ha_state = lambda: None
     return entity, client, coordinator
@@ -627,6 +637,80 @@ def test_intent_end_forwards_continue_conversation_flag():
     assert ("turn_action", 1, "pipeline-event",
              {"event": "intent_end", "continue_conversation": True}) in client.calls
     assert ("turn_action", 1, "tts-text", {"text": "The answer."}) in client.calls
+
+
+def test_intent_progress_forwards_raw_tool_request_and_response():
+    entity, client, _coord = _make_satellite()
+    entity._active_turn_id = 1
+    entity._active_channel = object()
+    token = entity._active_turn_token
+
+    asyncio.run(entity._async_pipeline_event(PipelineEvent(
+        type=PipelineEventType.INTENT_PROGRESS,
+        data={"chat_log_delta": {"tool_calls": [
+            {"id": "call-1", "tool_name": "HassCancelTimer", "tool_args": {"name": "1:51 timer"}},
+        ]}},
+    )))
+    asyncio.run(entity._async_pipeline_event(PipelineEvent(
+        type=PipelineEventType.INTENT_PROGRESS,
+        data={"chat_log_delta": {
+            "role": "tool_result", "tool_call_id": "call-1", "tool_name": "HassCancelTimer",
+            "tool_result": {"cancelled": ["timer-151"]},
+        }},
+    )))
+
+    calls = [call for call in client.calls if call[2] == "tool-call"]
+    assert calls == [
+        ("turn_action", 1, "tool-call", {
+            "sequence": 0, "call_id": "call-1", "name": "HassCancelTimer",
+            "request": {"name": "1:51 timer"}, "response": None, "status": "pending",
+        }),
+        ("turn_action", 1, "tool-call", {
+            "sequence": 0, "call_id": "call-1", "name": "HassCancelTimer",
+            "request": {"name": "1:51 timer"}, "response": {"cancelled": ["timer-151"]}, "status": "ok",
+        }),
+    ]
+
+
+def test_native_intent_chat_log_forwards_raw_tool_request_and_response():
+    async def run():
+        entity, client, _coord = _make_satellite()
+        entity._active_turn_id = 1
+        entity._active_channel = object()
+        entity._active_conversation_id = "conversation-1"
+
+        entity._on_chat_log_event("conversation-1", "content_added", {"content": {
+            "role": "assistant", "tool_calls": [
+                {"id": "call-1", "tool_name": "HassStartTimer", "tool_args": {"minutes": 1}},
+            ],
+        }})
+        entity._on_chat_log_event("conversation-1", "content_added", {"content": {
+            "role": "tool_result", "tool_call_id": "call-1", "tool_name": "HassStartTimer",
+            "tool_result": {"response_type": "action_done"},
+        }})
+        await asyncio.gather(*entity.hass.created_tasks)
+
+        calls = [call for call in client.calls if call[2] == "tool-call"]
+        assert [call[3]["status"] for call in calls] == ["pending", "ok"]
+        assert calls[-1][3]["request"] == {"minutes": 1}
+        assert calls[-1][3]["response"] == {"response_type": "action_done"}
+
+    asyncio.run(run())
+
+
+def test_intent_start_binds_chat_log_subscription_to_the_active_turn():
+    async def run():
+        entity, _client, _coord = _make_satellite()
+        entity._active_turn_id = 1
+        entity._active_channel = object()
+        entity.on_pipeline_event(PipelineEvent(
+            type=PipelineEventType.INTENT_START,
+            data={"conversation_id": "conversation-1"},
+        ))
+        assert entity._active_conversation_id == "conversation-1"
+        await asyncio.gather(*entity.hass.created_tasks)
+
+    asyncio.run(run())
 
 
 def test_tts_end_spawns_exactly_one_tts_task_even_if_seen_twice(monkeypatch):

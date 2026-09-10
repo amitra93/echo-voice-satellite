@@ -799,6 +799,7 @@ MIGRATIONS: list[str] = [
     """
     UPDATE system_config SET value = '27' WHERE key = 'schema_version';
     """,
+
     # ── v28 — durable wall-clock alarms ────────────────────────────────────
     # Alarms are controller-owned (HA has no alarm concept to defer to); see
     # docs/design/alarms-design.md. `next_fire_utc` is a cached derived value
@@ -828,6 +829,30 @@ MIGRATIONS: list[str] = [
     ALTER TABLE devices ADD COLUMN timezone TEXT;
 
     UPDATE system_config SET value = '28' WHERE key = 'schema_version';
+    """,
+
+    # ── v29 — per-turn Home Assistant tool traces ───────────────────────────
+    # The request/result pairs are raw diagnostic data, deliberately separate
+    # from turns so multiple calls remain ordered and a late result can update
+    # the call that started it without rewriting the whole turn row.
+    """
+    CREATE TABLE IF NOT EXISTS turn_tool_calls (
+        id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        turn_id       INTEGER NOT NULL,
+        sequence      INTEGER NOT NULL,
+        call_id       TEXT    NOT NULL,
+        name          TEXT    NOT NULL,
+        request_json  TEXT,
+        response_json TEXT,
+        status        TEXT    NOT NULL,
+        updated_at    REAL    NOT NULL,
+        UNIQUE (turn_id, call_id),
+        FOREIGN KEY (turn_id) REFERENCES turns(id) ON DELETE CASCADE
+    );
+    CREATE INDEX IF NOT EXISTS idx_turn_tool_calls_turn_sequence
+        ON turn_tool_calls(turn_id, sequence);
+
+    UPDATE system_config SET value = '29' WHERE key = 'schema_version';
     """,
 ]
 
@@ -2102,6 +2127,52 @@ def get_turn(turn_id: int) -> Optional[dict]:
     for key, col in _TURN_COLUMNS.items():
         rec[key] = row[col]
     return rec
+
+
+def upsert_turn_tool_call(
+    turn_id: int,
+    sequence: int,
+    call_id: str,
+    name: str,
+    request_json: Optional[str],
+    response_json: Optional[str],
+    status: str,
+) -> None:
+    """Insert a tool invocation or update it when HA returns its result."""
+    with _tx() as conn:
+        conn.execute(
+            """
+            INSERT INTO turn_tool_calls
+                (turn_id, sequence, call_id, name, request_json, response_json, status, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(turn_id, call_id) DO UPDATE SET
+                sequence = excluded.sequence,
+                name = excluded.name,
+                request_json = excluded.request_json,
+                response_json = excluded.response_json,
+                status = excluded.status,
+                updated_at = excluded.updated_at
+            """,
+            (turn_id, sequence, call_id, name, request_json, response_json, status, time.time()),
+        )
+
+
+def get_turn_tool_calls(device_id: str, turn_id: int) -> Optional[list[dict]]:
+    """Ordered raw tool traces, or None when this turn is not that device's."""
+    owner = _q1("SELECT 1 FROM turns WHERE id = ? AND device_id = ?", (turn_id, device_id))
+    if owner is None:
+        return None
+    rows = _q(
+        "SELECT sequence, call_id, name, request_json, response_json, status "
+        "FROM turn_tool_calls WHERE turn_id = ? ORDER BY sequence, id",
+        (turn_id,),
+    )
+    return [{
+        "sequence": row["sequence"], "call_id": row["call_id"], "name": row["name"],
+        "request": json.loads(row["request_json"]) if row["request_json"] is not None else None,
+        "response": json.loads(row["response_json"]) if row["response_json"] is not None else None,
+        "status": row["status"],
+    } for row in rows]
 
 
 def get_turns(

@@ -98,6 +98,16 @@ def test_api_turn_audio_media_and_config_error_branches(monkeypatch):
     assert run(em_api._get_turn_audio.__wrapped__(request(
         match_info={"id": "dev", "turn": "bad", "kind": "stt"}))).status == 400
 
+    monkeypatch.setattr(
+        em_api.db, "get_turn_tool_calls",
+        lambda device_id, turn_id: [] if (device_id, turn_id) == ("dev", 1) else None,
+    )
+    response = run(em_api._get_turn_tool_calls.__wrapped__(request(
+        match_info={"id": "dev", "turn": "1"})))
+    assert response.status == 200 and json.loads(response.text) == {"tool_calls": []}
+    assert run(em_api._get_turn_tool_calls.__wrapped__(request(
+        match_info={"id": "dev", "turn": "bad"}))).status == 400
+
     live = SimpleNamespace(
         sent=[],
         muted=False,
