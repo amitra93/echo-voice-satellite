@@ -18,9 +18,8 @@ class EchoVoiceTimersCard extends HTMLElement {
   }
 
   set hass(hass) {
-    const first = !this._hass;
     this._hass = hass;
-    if (first) this._subscribe();
+    this._ensureSubscription();
     this._render();
   }
 
@@ -35,6 +34,7 @@ class EchoVoiceTimersCard extends HTMLElement {
     // pushes a snapshot on every change via `subscribe`, and the frontend
     // computes the countdown itself in between.
     this._tick = window.setInterval(() => this._render(), 1000);
+    this._ensureSubscription();
   }
 
   disconnectedCallback() {
@@ -45,11 +45,11 @@ class EchoVoiceTimersCard extends HTMLElement {
     }
   }
 
-  async _subscribe() {
-    if (!this._hass?.connection || this._subscribing) return;
+  async _ensureSubscription() {
+    if (!this.isConnected || !this._hass?.connection || this._unsubscribe || this._subscribing) return;
     this._subscribing = true;
     try {
-      this._unsubscribe = await this._hass.connection.subscribeMessage(
+      const unsubscribe = await this._hass.connection.subscribeMessage(
         (snapshot) => {
           this._timersData = snapshot.timers || [];
           this._devices = snapshot.devices || [];
@@ -57,6 +57,10 @@ class EchoVoiceTimersCard extends HTMLElement {
         },
         { type: "echo_voice_satellite/timers/subscribe" },
       );
+      // Detachment can happen while Home Assistant establishes the
+      // subscription. Do not retain a listener for a card no longer in the DOM.
+      if (this.isConnected) this._unsubscribe = unsubscribe;
+      else unsubscribe();
     } catch (_error) {
       // Leave the card on its empty state rather than throwing out of a
       // property setter — a stale integration or a mid-reload HA is not

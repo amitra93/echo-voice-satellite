@@ -1334,6 +1334,41 @@ def test_voice_playback_helpers_wait_for_device_completion(monkeypatch):
     asyncio.run(run())
 
 
+def test_buffered_playback_cancellation_clears_speaking(monkeypatch):
+    """Alarm dismissal cancels buffered playback while it awaits drain stats.
+
+    The timer runner cancels its task after sending ``speaker_flush``. Its
+    buffered callback has already sent EOS and is waiting for the device's
+    playback_stats report, so cancellation must still retire the dashboard's
+    speaking state.
+    """
+    async def run():
+        device = new_device(["output_chain"])
+        started = asyncio.Event()
+        monkeypatch.setattr(
+            em_controller, "_push_device_state", lambda *_: asyncio.sleep(0)
+        )
+
+        async def sent_eos_and_wait_for_drain(_pcm):
+            await device._set_speaking(True)
+            started.set()
+
+        device.stream_speaker = sent_eos_and_wait_for_drain
+        playback = asyncio.create_task(
+            em_controller._run_post_turn_playback(device, b"pcm")
+        )
+        await started.wait()
+        await asyncio.sleep(0)
+        assert device.speaking is True
+
+        playback.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await playback
+        assert device.speaking is False
+
+    asyncio.run(run())
+
+
 def test_speaker_lock_serializes_buffered_and_streaming_playback(monkeypatch):
     async def run():
         device = new_device()

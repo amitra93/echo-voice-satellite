@@ -61,6 +61,7 @@ def test_alarm_runner_stop_cancels_playback_task(monkeypatch):
     session = em_timers.AlarmSession()
     session.apply(_event("pizza"))
     started = asyncio.Event()
+    controls = []
 
     async def playback(_device, _pcm, _cancel):
         started.set()
@@ -69,7 +70,8 @@ def test_alarm_runner_stop_cancels_playback_task(monkeypatch):
     monkeypatch.setattr(em_timer_alarm.em_player, "interrupt", _noop)
     monkeypatch.setattr(em_timer_alarm.em_player, "resume_interrupted", _noop)
     class FakeDevice:
-        async def send_control(self, _message):
+        async def send_control(self, message):
+            controls.append(message)
             return None
 
     runner = em_timer_alarm.TimerAlarmRunner(
@@ -82,6 +84,36 @@ def test_alarm_runner_stop_cancels_playback_task(monkeypatch):
         await started.wait()
         assert await runner.stop("device")
         assert not await runner.stop("device")
+
+    asyncio.run(run())
+    assert controls == [{"type": "speaker_flush"}]
+
+
+def test_alarm_runner_stop_cancels_even_when_flush_fails(monkeypatch):
+    session = em_timers.AlarmSession()
+    session.apply(_event("pizza"))
+    started = asyncio.Event()
+
+    async def playback(_device, _pcm, _cancel):
+        started.set()
+        await asyncio.sleep(100)
+
+    class GoneDevice:
+        async def send_control(self, _message):
+            raise ConnectionError("control closed")
+
+    monkeypatch.setattr(em_timer_alarm.em_player, "interrupt", _noop)
+    monkeypatch.setattr(em_timer_alarm.em_player, "resume_interrupted", _noop)
+    runner = em_timer_alarm.TimerAlarmRunner(
+        lambda _device_id: GoneDevice(), playback, max_ring_s=120,
+    )
+    runner._sound_cache = b"pcm"
+
+    async def run():
+        runner.start("device", session)
+        await started.wait()
+        assert await runner.stop("device")
+        assert not runner.is_running("device")
 
     asyncio.run(run())
 
@@ -107,11 +139,17 @@ def test_alarm_runner_discards_undeliverable_alarm_without_touching_music(monkey
 def test_alarm_runner_missing_sound_discards_alarm_without_playback(monkeypatch, tmp_path):
     session = em_timers.AlarmSession()
     session.apply(_event("pizza"))
+    session.apply(_event("pasta"))
     calls = []
+    states = []
+    snapshots = []
     monkeypatch.setattr(em_timer_alarm.em_player, "interrupt", lambda *_: calls.append("interrupt"))
     monkeypatch.setattr(em_timer_alarm.em_player, "resume_interrupted", lambda *_: calls.append("resume"))
     runner = em_timer_alarm.TimerAlarmRunner(
-        lambda _device_id: object(), _unused_playback, sound_file=str(tmp_path / "missing.flac"),
+        lambda _device_id: object(), _unused_playback,
+        on_state=lambda device_id, firing: asyncio.sleep(0, result=states.append((device_id, firing))),
+        on_changed=lambda _device_id: asyncio.sleep(0, result=snapshots.append(session.snapshot())),
+        sound_file=str(tmp_path / "missing.flac"),
     )
 
     async def run():
@@ -120,7 +158,10 @@ def test_alarm_runner_missing_sound_discards_alarm_without_playback(monkeypatch,
 
     asyncio.run(run())
     assert session.current is None
+    assert session.queue == []
     assert calls == []
+    assert states == []
+    assert snapshots == [{"state": "idle", "current": None, "queue": []}]
 
 
 async def _noop(_device_id):
@@ -137,8 +178,7 @@ def test_em_timer_alarm_never_imports_wall_clock_modules():
     tempted to read `time.time()`/`datetime.now()` from at all. Its only
     clock is `asyncio.get_running_loop().time()` (CLOCK_MONOTONIC), which a
     system wall-clock adjustment — DST or an NTP correction — never moves.
-    See docs/design/timers-design.md Phase 6's exit criteria and
-    docs/design/timers-implementation-update.md's P2.
+    See docs/timer-validation.md's automated coverage section.
     """
     source = inspect.getsource(em_timer_alarm)
     assert "import time" not in source
@@ -239,3 +279,37 @@ def test_undeliverable_alarm_notifies_instead_of_sticking_ringing(monkeypatch):
 
     assert session.current is None
     assert changed == ["device"]
+
+
+def test_each_queued_alarm_receives_its_own_ring_deadline(monkeypatch):
+    session = em_timers.AlarmSession()
+    session.apply(_event("pizza"))
+    session.apply(_event("pasta"))
+    played = []
+    currents = []
+    clock_values = iter((0.0, 0.5, 1.0, 1.0, 1.5, 2.0))
+
+    async def playback(_device, _pcm, _cancel):
+        played.append(session.current.timer_id)
+
+    monkeypatch.setattr(em_timer_alarm.em_player, "interrupt", _noop)
+    monkeypatch.setattr(em_timer_alarm.em_player, "resume_interrupted", _noop)
+    monkeypatch.setattr(em_timers, "BURST_GAP_S", 0)
+    runner = em_timer_alarm.TimerAlarmRunner(
+        lambda _device_id: "device", playback, max_ring_s=1.0,
+        on_current=lambda _device_id: asyncio.sleep(
+            0, result=currents.append(session.current.timer_id)
+        ),
+    )
+    runner._sound_cache = b"pcm"
+    runner._clock = lambda: next(clock_values)
+
+    async def run():
+        runner.start("device", session)
+        await asyncio.wait_for(runner._tasks["device"], timeout=1)
+
+    asyncio.run(run())
+
+    assert played == ["pizza", "pizza", "pasta", "pasta"]
+    assert currents == ["pizza", "pasta"]
+    assert session.current is None

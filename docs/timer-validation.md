@@ -66,6 +66,9 @@ each result with the controller and firmware version used.
   filter configured), pause/resume, +1m/-1m, cancel, and — while a timer is
   ringing — that it stays visible as "Ringing" and Dismiss actually stops
   the physical alarm.
+- Navigate away from and back to a dashboard containing the card. Verify it
+  receives the next timer update exactly once, and reload Home Assistant while
+  an alarm rings to confirm its ringing/queued rows and Dismiss target return.
 - Check a DST boundary in the selected timezone, letting a real timer expire
   across it. This is Home Assistant's own `TimerManager` expiry, which
   EchoMuse does not control; the alarm's own ring/timeout duration on the

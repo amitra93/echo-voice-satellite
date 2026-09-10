@@ -221,6 +221,8 @@ def test_stop_and_wake_captures_coexist_under_different_models(tmp_path):
 # ─── Capture upload acceptance — stop model ─────────────────────────────────
 
 def test_accept_capture_upload_for_stop_model(monkeypatch):
+    import em_oww_assets
+
     async def run():
         device = new_device(["wake_request_v1", "stopword"])
         ws = object()
@@ -230,7 +232,12 @@ def test_accept_capture_upload_for_stop_model(monkeypatch):
         device.oww_model = "hey_jarvis_v0.1"
         device.stop_model = "stop"
         device.oww_classifier_md5 = "w" * 32
-        device.stop_classifier_md5 = "s" * 32
+        # stop_status carries no classifier digest (unlike wake_status), so
+        # _accept_capture_upload resolves the controller's own distributed
+        # stop-model file the same way _wake_status_ready resolves the wake
+        # model's — there is no device-reported "stop_classifier_md5" to set.
+        monkeypatch.setattr(em_oww_assets, "classifier_source", lambda model: "/stop.onnx")
+        monkeypatch.setattr(em_oww_assets, "md5_file", lambda path: "s" * 32)
         sent = []
         saved = []
         discarded = []
@@ -309,7 +316,6 @@ def test_accept_capture_upload_rejects_unknown_model(monkeypatch):
         device.oww_model = "hey_jarvis_v0.1"
         device.stop_model = "stop"
         device.oww_classifier_md5 = "w" * 32
-        device.stop_classifier_md5 = "s" * 32
         old_devices = em_controller._devices
         em_controller._devices = {device.device_id: device}
         try:

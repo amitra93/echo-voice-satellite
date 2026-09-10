@@ -198,6 +198,50 @@ def test_async_setup_entry_feeds_timer_alarm_events_to_the_hub_and_ignores_other
     asyncio.run(run())
 
 
+def test_async_setup_entry_hydrates_alarm_presence_from_the_first_control_snapshot(monkeypatch):
+    _patch_collaborators(monkeypatch)
+    hass = _FakeHass()
+    entry = _FakeEntry()
+
+    async def connect_with_snapshot(self):
+        for callback in self._event_listeners:
+            await callback({
+                "type": "snapshot", "devices": [],
+                "timer_alarms": [{
+                    "device_id": "echomuse-1",
+                    "current": {"timer_id": "t1", "ha_device_id": "ha-device"},
+                    "queue": [{"timer_id": "t2", "ha_device_id": "ha-device"}],
+                }],
+            })
+
+    monkeypatch.setattr(_FakeCoordinator, "async_connect_control", connect_with_snapshot)
+    asyncio.run(module.async_setup_entry(hass, entry))
+
+    presence = hass.data[DOMAIN][entry.entry_id]["timer_card"].presence
+    assert presence.echomuse_device_for_timer("t1") == "echomuse-1"
+    assert presence.echomuse_device_for_timer("t2") == "echomuse-1"
+
+
+def test_legacy_control_snapshot_clears_old_alarm_presence(monkeypatch):
+    _patch_collaborators(monkeypatch)
+    hass = _FakeHass()
+    entry = _FakeEntry()
+    asyncio.run(module.async_setup_entry(hass, entry))
+    stored = hass.data[DOMAIN][entry.entry_id]
+    coordinator = stored["coordinator"]
+
+    async def run():
+        await coordinator.emit({
+            "type": "timer.alarm", "device_id": "echomuse-1",
+            "current": {"timer_id": "t1", "ha_device_id": "ha-device"}, "queue": [],
+        })
+        assert stored["timer_card"].presence.echomuse_device_for_timer("t1") == "echomuse-1"
+        await coordinator.emit({"type": "snapshot", "devices": []})
+        assert stored["timer_card"].presence.echomuse_device_for_timer("t1") is None
+
+    asyncio.run(run())
+
+
 def test_async_setup_entry_timer_card_hub_resolves_real_ha_accessors(monkeypatch):
     """The hub's accessors defer their homeassistant imports to call time
     (see timer_card.py's async_setup_timer_card docstring) — this proves
@@ -563,6 +607,13 @@ def test_async_unload_entry_cancels_scanners_shuts_down_and_closes_client(monkey
     for listener in coordinator._listeners:
         listener()
     assert len(registered) == 1
+
+    async def unload_platforms_before_client_close(entry, platforms):
+        assert client.closed is False
+        hass.config_entries.unloaded.append((entry, tuple(platforms)))
+        return True
+
+    hass.config_entries.async_unload_platforms = unload_platforms_before_client_close
 
     result = asyncio.run(module.async_unload_entry(hass, entry))
 

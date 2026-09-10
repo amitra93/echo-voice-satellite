@@ -159,7 +159,11 @@ def test_timer_event_is_forwarded_with_timer_metadata():
     })()
     event = type("Event", (), {"value": "updated"})()
 
-    asyncio.run(entity._async_forward_timer_event(event, timer))
+    asyncio.run(entity._async_forward_timer_event({
+        "event": event.value, "timer_id": timer.id, "ha_device_id": timer.device_id,
+        "name": timer.name, "total_seconds": timer.created_seconds,
+        "seconds_left": timer.seconds_left, "is_active": timer.is_active,
+    }))
 
     assert client.calls[-1] == (
         "timer_event", "A", {
@@ -179,7 +183,11 @@ def test_all_timer_lifecycle_events_are_forwarded(event_name):
     })()
     event = type("Event", (), {"value": event_name})()
 
-    asyncio.run(entity._async_forward_timer_event(event, timer))
+    asyncio.run(entity._async_forward_timer_event({
+        "event": event.value, "timer_id": timer.id, "ha_device_id": timer.device_id,
+        "name": timer.name, "total_seconds": timer.created_seconds,
+        "seconds_left": timer.seconds_left, "is_active": timer.is_active,
+    }))
 
     assert client.calls[-1][0:2] == ("timer_event", "A")
     assert client.calls[-1][2]["event"] == event_name
@@ -187,10 +195,9 @@ def test_all_timer_lifecycle_events_are_forwarded(event_name):
 
 def test_delayed_command_timer_events_are_never_forwarded_to_the_controller():
     """A conversation-command timer ('in 5 minutes turn off the lights') is
-    an HA-native automation, not an audible reminder — see
-    docs/design/timers-design.md's 'Keep delayed-command timers native to
-    Home Assistant' decision. TimerManager still invokes the handler for
-    it, so the filter has to live here, at the point closest to that call.
+    an HA-native automation, not an audible reminder. TimerManager still
+    invokes the handler for it, so the filter has to live here, at the point
+    closest to that call.
     """
     entity, client, _coord = _make_satellite()
     timer = type("Timer", (), {
@@ -218,7 +225,8 @@ def test_ordinary_timer_events_are_still_forwarded_via_timer_event():
 
         entity._timer_event(event, timer)
         assert len(entity.hass.created_tasks) == 1
-        await asyncio.gather(*entity.hass.created_tasks)
+        await asyncio.sleep(0)
+        await entity._async_stop_timer_forwarding()
 
         assert client.calls[-1][0:2] == ("timer_event", "A")
         assert client.calls[-1][2]["event"] == "finished"
@@ -236,11 +244,10 @@ def test_timer_event_notifies_the_registered_timer_card_hub():
 
         entity, _client, _coord = _make_satellite()
         notified = []
-        entity.hass.data[DOMAIN] = {
-            "entry-1": {"timer_card": types.SimpleNamespace(
-                notify_manager_change=lambda: notified.append(True),
-            )},
-        }
+        entity.hass.data[DOMAIN] = {"entry-1": {"timer_card": object()}}
+        entity._timer_card_hub = types.SimpleNamespace(
+            notify_manager_change=lambda: notified.append(True),
+        )
         timer = type("Timer", (), {
             "id": "01J", "device_id": "ha-device", "name": "pizza",
             "created_seconds": 600, "seconds_left": 0, "is_active": False,
@@ -248,7 +255,8 @@ def test_timer_event_notifies_the_registered_timer_card_hub():
         })()
 
         entity._timer_event(type("Event", (), {"value": "finished"})(), timer)
-        await asyncio.gather(*entity.hass.created_tasks)
+        await asyncio.sleep(0)
+        await entity._async_stop_timer_forwarding()
 
         assert notified == [True]
 
@@ -260,11 +268,10 @@ def test_delayed_command_timer_events_never_notify_the_timer_card_hub_either():
 
     entity, _client, _coord = _make_satellite()
     notified = []
-    entity.hass.data[DOMAIN] = {
-        "entry-1": {"timer_card": types.SimpleNamespace(
-            notify_manager_change=lambda: notified.append(True),
-        )},
-    }
+    entity.hass.data[DOMAIN] = {"entry-1": {"timer_card": object()}}
+    entity._timer_card_hub = types.SimpleNamespace(
+        notify_manager_change=lambda: notified.append(True),
+    )
     timer = type("Timer", (), {
         "id": "01J", "device_id": "ha-device", "name": None,
         "created_seconds": 300, "seconds_left": 0, "is_active": False,
@@ -285,11 +292,129 @@ def test_timer_event_forwarding_logs_controller_failure_without_raising(caplog):
     client.async_timer_event = _raise_controller_error
 
     with caplog.at_level("ERROR"):
-        asyncio.run(entity._async_forward_timer_event(
-            type("Event", (), {"value": "updated"})(), timer
-        ))
+        asyncio.run(entity._async_forward_timer_event({
+            "event": "updated", "timer_id": timer.id,
+            "ha_device_id": timer.device_id, "name": timer.name,
+            "total_seconds": timer.created_seconds,
+            "seconds_left": timer.seconds_left, "is_active": timer.is_active,
+        }))
 
     assert "Failed to forward timer 01J" in caplog.text
+
+
+def test_timer_lifecycle_forwarding_is_fifo_and_snapshots_mutable_timer_state():
+    async def run():
+        entity, client, _coord = _make_satellite()
+        first_started = asyncio.Event()
+        release_first = asyncio.Event()
+        delivered = []
+        first = True
+
+        async def delayed_post(device_id, payload):
+            nonlocal first
+            if first:
+                first = False
+                first_started.set()
+                await release_first.wait()
+            delivered.append((device_id, payload))
+            return {"accepted": True}
+
+        client.async_timer_event = delayed_post
+        timer = type("Timer", (), {
+            "id": "01J", "device_id": "ha-device", "name": "pizza",
+            "created_seconds": 60, "seconds_left": 60, "is_active": True,
+            "conversation_command": None,
+        })()
+
+        entity._timer_event(type("Event", (), {"value": "started"})(), timer)
+        await first_started.wait()
+        timer.seconds_left, timer.is_active = 42, True
+        entity._timer_event(type("Event", (), {"value": "updated"})(), timer)
+        timer.seconds_left, timer.is_active = 0, False
+        entity._timer_event(type("Event", (), {"value": "finished"})(), timer)
+
+        release_first.set()
+        for _ in range(10):
+            if len(delivered) == 3:
+                break
+            await asyncio.sleep(0)
+        await entity._async_stop_timer_forwarding()
+
+        assert [payload["event"] for _device_id, payload in delivered] == [
+            "started", "updated", "finished",
+        ]
+        assert [payload["seconds_left"] for _device_id, payload in delivered] == [60, 42, 0]
+        assert [payload["is_active"] for _device_id, payload in delivered] == [True, True, False]
+
+    asyncio.run(run())
+
+
+def test_timer_forwarding_stops_before_entity_unload_finishes(monkeypatch):
+    async def run():
+        entity, client, _coord = _make_satellite()
+        first_started = asyncio.Event()
+        delivered = []
+
+        async def blocked_post(_device_id, payload):
+            first_started.set()
+            await asyncio.Event().wait()
+            delivered.append(payload)
+
+        async def base_remove(_self):
+            return None
+
+        monkeypatch.setattr(
+            AssistSatelliteEntity, "async_will_remove_from_hass", base_remove,
+            raising=False,
+        )
+        client.async_timer_event = blocked_post
+        timer = type("Timer", (), {
+            "id": "01J", "device_id": "ha-device", "name": "pizza",
+            "created_seconds": 60, "seconds_left": 60, "is_active": True,
+            "conversation_command": None,
+        })()
+        entity._timer_event(type("Event", (), {"value": "started"})(), timer)
+        await first_started.wait()
+        entity._timer_event(type("Event", (), {"value": "updated"})(), timer)
+
+        await entity.async_will_remove_from_hass()
+        entity._timer_event(type("Event", (), {"value": "finished"})(), timer)
+        await asyncio.sleep(0)
+
+        assert entity._timer_forwarding_closed is True
+        assert entity._timer_worker is None
+        assert delivered == []
+
+    asyncio.run(run())
+
+
+def test_timer_event_notifies_only_its_own_controller_hub():
+    async def run():
+        entity, _client, _coord = _make_satellite()
+        first, second = [], []
+        entity._timer_card_hub = types.SimpleNamespace(
+            notify_manager_change=lambda: first.append(True),
+        )
+        entity.hass.data["echo_voice_satellite"] = {
+            "entry-1": {"timer_card": entity._timer_card_hub},
+            "entry-2": {"timer_card": types.SimpleNamespace(
+                notify_manager_change=lambda: second.append(True),
+            )},
+        }
+        timer = type("Timer", (), {
+            "id": "01J", "device_id": "ha-device", "name": "pizza",
+            "created_seconds": 60, "seconds_left": 0, "is_active": False,
+            "conversation_command": None,
+        })()
+
+        entity._timer_event(type("Event", (), {"value": "finished"})(), timer)
+        await asyncio.sleep(0)
+        await entity._async_stop_timer_forwarding()
+
+        assert first == [True]
+        assert second == []
+
+    asyncio.run(run())
 
 
 async def _raise_controller_error(*_args, **_kwargs):

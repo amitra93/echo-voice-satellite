@@ -47,20 +47,24 @@ _LOGGER = logging.getLogger(__name__)
 
 async def async_setup_entry(hass, entry, async_add_entities):
     coordinator = hass.data["echo_voice_satellite"][entry.entry_id]["coordinator"]
+    timer_card_hub = hass.data["echo_voice_satellite"][entry.entry_id]["timer_card"]
     entry.async_on_unload(add_dynamic_entities(
         coordinator, async_add_entities,
-        lambda record: [EchoAssistSatellite(coordinator, record["device_id"])],
+        lambda record: [
+            EchoAssistSatellite(coordinator, record["device_id"], timer_card_hub)
+        ],
     ))
 
 
 class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
     _attr_supported_features = AssistSatelliteEntityFeature.ANNOUNCE
 
-    def __init__(self, coordinator, device_id: str):
+    def __init__(self, coordinator, device_id: str, timer_card_hub=None):
         super().__init__(coordinator, device_id)
         self.client = coordinator.client
         self._active_turn_id: int | None = None
         self._active_channel = None
+        self._active_conversation_id: str | None = None
         # Identity changes even if an old turn id is somehow reused. Every
         # asynchronous callback retains this token and must prove ownership
         # before it can touch the controller rendezvous.
@@ -75,6 +79,10 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
         self._tool_calls: dict[str, dict[str, Any]] = {}
         self._tool_call_sequence = 0
         self._tool_trace_lock = asyncio.Lock()
+        self._timer_card_hub = timer_card_hub
+        self._timer_queue: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self._timer_worker: asyncio.Task | None = None
+        self._timer_forwarding_closed = False
         self._attr_unique_id = f"{device_id}_assist_satellite"
         self._attr_name = "Voice Assistant"
         self._event_remove = coordinator.async_add_event_listener(self._async_gateway_event)
@@ -82,6 +90,7 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
 
     async def async_will_remove_from_hass(self) -> None:
         self._event_remove()
+        await self._async_stop_timer_forwarding()
         turn_id = self._active_turn_id
         channel = self._active_channel
         tasks = [task for task in (self._pipeline_task, self._tts_task)
@@ -156,38 +165,60 @@ class EchoAssistSatellite(EchoCoordinatorEntity, AssistSatelliteEntity):
             # it would ring the EchoMuse alarm for something the user never
             # asked to be alerted about, and there is nothing to dismiss:
             # HA never sends this device an intent-visible follow-up.
-            # See docs/design/timers-design.md's "Keep delayed-command
-            # timers native to Home Assistant" decision.
+            # See docs/timer-validation.md's timer lifecycle contract.
             return
+        if self._timer_forwarding_closed:
+            return
+        # TimerInfo is mutable and TimerManager owns it. Copy every value
+        # synchronously before scheduling work, otherwise a later lifecycle
+        # event can rewrite an earlier HTTP payload while it waits its turn.
+        payload = {
+            "event": getattr(event, "value", event),
+            "timer_id": timer.id,
+            "ha_device_id": timer.device_id,
+            "name": timer.name,
+            "total_seconds": timer.created_seconds,
+            "seconds_left": timer.seconds_left,
+            "is_active": timer.is_active,
+        }
         # TimerManager has already mutated its own state by the time it
         # calls us (this handler IS the notification), so the timer card's
         # subscribers can be pushed a fresh snapshot immediately — no need
         # to wait for the controller round trip below.
-        from .timer_card import _hub_for
-        hub = _hub_for(self.hass)
-        if hub is not None:
-            hub.notify_manager_change()
-        self.hass.async_create_task(
-            self._async_forward_timer_event(event, timer),
-            name=f"echo-timer-event-{timer.id}",
-        )
-
-    async def _async_forward_timer_event(self, event, timer) -> None:
-        try:
-            await self.client.async_timer_event(
-                self.device_id,
-                {
-                    "event": getattr(event, "value", event),
-                    "timer_id": timer.id,
-                    "ha_device_id": timer.device_id,
-                    "name": timer.name,
-                    "total_seconds": timer.created_seconds,
-                    "seconds_left": timer.seconds_left,
-                    "is_active": timer.is_active,
-                },
+        if self._timer_card_hub is not None:
+            self._timer_card_hub.notify_manager_change()
+        self._timer_queue.put_nowait(payload)
+        if self._timer_worker is None or self._timer_worker.done():
+            self._timer_worker = self.hass.async_create_task(
+                self._async_forward_timer_events(),
+                name=f"echo-timer-events-{self.device_id}",
             )
+
+    async def _async_forward_timer_events(self) -> None:
+        while True:
+            payload = await self._timer_queue.get()
+            try:
+                await self._async_forward_timer_event(payload)
+            finally:
+                self._timer_queue.task_done()
+
+    async def _async_forward_timer_event(self, payload: dict[str, Any]) -> None:
+        try:
+            await self.client.async_timer_event(self.device_id, payload)
         except ControllerError:
-            _LOGGER.exception("Failed to forward timer %s for %s", timer.id, self.device_id)
+            _LOGGER.exception(
+                "Failed to forward timer %s for %s",
+                payload["timer_id"], self.device_id,
+            )
+
+    async def _async_stop_timer_forwarding(self) -> None:
+        """Cancel queued timer delivery before the shared client closes."""
+        self._timer_forwarding_closed = True
+        worker = self._timer_worker
+        self._timer_worker = None
+        if worker is not None:
+            worker.cancel()
+            await asyncio.gather(worker, return_exceptions=True)
 
     @property
     def available(self) -> bool:

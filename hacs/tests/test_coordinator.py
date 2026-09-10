@@ -126,6 +126,26 @@ def test_snapshot_event_replaces_devices_and_remembers_capabilities():
     assert updated  # async_set_updated_data was called
 
 
+def test_snapshot_event_reaches_event_listeners_for_alarm_recovery():
+    async def run():
+        coordinator, _updated = _make_coordinator()
+        received = []
+
+        async def collect(event):
+            received.append(event)
+
+        coordinator.async_add_event_listener(collect)
+        snapshot = {
+            "type": "snapshot", "devices": [],
+            "timer_alarms": [{"device_id": "A", "current": {"timer_id": "t1"}, "queue": []}],
+        }
+        await coordinator._async_event(snapshot)
+
+        assert received == [snapshot]
+
+    asyncio.run(run())
+
+
 @pytest.mark.parametrize("event, field, value", [
     ({"type": "ambient_light", "device_id": "A", "lux": 42}, "ambient_light_lux", 42),
     ({"type": "volume_state", "device_id": "A", "volume": 0.6}, "volume", 0.6),

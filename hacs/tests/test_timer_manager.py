@@ -62,6 +62,28 @@ class Manager:
         return "new-timer-id"
 
 
+def test_alarm_presence_hydrate_replaces_old_rows_and_accepts_legacy_snapshot():
+    presence = AlarmPresence()
+    presence.update({
+        "device_id": "old", "current": {"timer_id": "old-timer"}, "queue": [],
+    })
+
+    presence.hydrate([{
+        "device_id": "new", "current": {"timer_id": "ringing"},
+        "queue": [{"timer_id": "queued"}],
+    }])
+    assert presence.echomuse_device_for_timer("old-timer") is None
+    assert presence.echomuse_device_for_timer("ringing") == "new"
+    assert presence.echomuse_device_for_timer("queued") == "new"
+
+    # An empty current-controller snapshot retires stale presence; a legacy
+    # controller with no timer_alarms field follows the same safe outcome.
+    presence.hydrate([])
+    assert presence.echomuse_device_for_timer("ringing") is None
+    presence.hydrate(None)
+    assert presence.echomuse_device_for_timer("queued") is None
+
+
 def _name(device_id):
     return {"ha-device": "Kitchen Echo"}.get(device_id)
 

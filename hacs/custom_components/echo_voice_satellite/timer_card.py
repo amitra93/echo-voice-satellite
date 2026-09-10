@@ -69,6 +69,15 @@ class AlarmPresence:
             "queue": event.get("queue") or [],
         }
 
+    def hydrate(self, snapshots: object) -> None:
+        """Replace presentation state from an event-stream snapshot."""
+        self._by_device.clear()
+        if not isinstance(snapshots, list):
+            return
+        for snapshot in snapshots:
+            if isinstance(snapshot, dict):
+                self.update(snapshot)
+
     def rows(self, known_timer_ids: Iterable[str]) -> list[dict[str, Any]]:
         """Ringing/queued rows not already present in `TimerManager`.
 
@@ -267,6 +276,10 @@ class TimerCardHub:
     def notify_alarm_event(self, event: dict[str, Any]) -> None:
         """Called on every `timer.alarm` event from the controller."""
         self.presence.update(event)
+        self._push()
+
+    def hydrate_alarm_snapshot(self, snapshots: object) -> None:
+        self.presence.hydrate(snapshots)
         self._push()
 
     def _push(self) -> None:

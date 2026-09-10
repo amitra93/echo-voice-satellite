@@ -66,6 +66,7 @@ class EchoVoiceSatelliteCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             devices = event.get("devices", [])
             self._remember_capabilities(devices)
             self.async_set_updated_data({"devices": devices})
+            await self._emit_event(event)
             return
 
         device_id = event.get("device_id")

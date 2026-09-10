@@ -81,6 +81,7 @@ import em_tap_burst
 import em_turn_engine as turn_engine
 import em_ha_sidechannels as ha_sidechannels
 import em_oww_models
+import em_oww_assets
 import em_training_captures
 import em_capture_upload
 import em_player
@@ -273,8 +274,6 @@ class Device:
         self.listening = False
         self.thinking  = False
         self.timer_firing = False
-        self.timer_alarm_audio_ready = False
-        self.timer_alarm_listen_after = 0.0
         self.timer_stop_turn_id: int | None = None
 
         # Volume as HA float (0.0–1.0). Initialised from stored config in
@@ -1064,81 +1063,85 @@ async def _run_post_turn_playback_unlocked(
     device.playback_done.clear()
     done_task      = asyncio.create_task(device.playback_done.wait())
     stream_task    = asyncio.create_task(device.stream_speaker(speaker_pcm))
+    timeout_task: asyncio.Task | None = None
     t_stream_start = asyncio.get_event_loop().time()
     # Opens the delivery window measured against the device's
     # playback_stats report (see Device.playback_send_t0).
     device.playback_send_t0 = t_stream_start
 
-    done, _ = await asyncio.wait(
-        [stream_task, cancel_task],
-        return_when=asyncio.FIRST_COMPLETED,
-    )
+    try:
+        done, _ = await asyncio.wait(
+            [stream_task, cancel_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
 
-    if cancel_task in done:
-        log.info(f"[{device.device_id}] Cancelled during playback")
-        stream_task.cancel()
-    else:
-        if not cancel_signal.is_set():
-            # Wait for the DEVICE to say it finished, rather than estimating.
-            #
-            # The old code slept `audio_duration - elapsed` and declared
-            # completion. Two things made that wrong, and both bite hardest
-            # on exactly the links that need the most patience: `elapsed` is
-            # socket-write time (which completes near-instantly however slow
-            # the wire is) and was *subtracted*, and the estimate had no
-            # visibility of how long the device's own buffer took to drain.
-            # Measured 2026-07-24: the ring cleared 6.1s before the audio
-            # actually stopped on a Retreat turn, 3.2s early on Lounge.
-            #
-            # playback_stats is emitted once the device's audio channel has
-            # drained after EOS, so it is the real end of audio. The timeout
-            # is only a backstop for the report never arriving (device drop,
-            # pre-v2.9 firmware): generous, because ending the turn early is
-            # the failure we are fixing. cancel_event is still raced — a
-            # barge-in or a mute usually lands in this window, and an
-            # uncancellable wait here is what caused the 5.7s dead window
-            # fixed on 2026-07-10.
-            audio_duration = len(speaker_pcm) / (SPEAKER_RATE * 2) + SPEAKER_PRIME_SECONDS
-            elapsed        = asyncio.get_event_loop().time() - t_stream_start
-            device.playback_send_ms = int(elapsed * 1000)
-            timeout        = audio_duration * 2 + 10.0
-            log.info(
-                f"[{device.device_id}] Socket write took {elapsed:.1f}s "
-                f"(NOT delivery — see delivery_ms), awaiting device "
-                f"playback_stats (est {audio_duration:.1f}s, timeout {timeout:.1f}s)"
-            )
-            timeout_task = asyncio.create_task(asyncio.sleep(timeout))
-            await asyncio.wait(
-                [done_task, cancel_task, timeout_task],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            timeout_task.cancel()
-            if cancel_signal.is_set():
-                log.info(f"[{device.device_id}] Cancelled during playback drain")
-            elif done_task.done():
-                actual = asyncio.get_event_loop().time() - t_stream_start
+        if cancel_task in done:
+            log.info(f"[{device.device_id}] Cancelled during playback")
+            stream_task.cancel()
+        else:
+            if not cancel_signal.is_set():
+                # Wait for the DEVICE to say it finished, rather than estimating.
+                #
+                # The old code slept `audio_duration - elapsed` and declared
+                # completion. Two things made that wrong, and both bite hardest
+                # on exactly the links that need the most patience: `elapsed` is
+                # socket-write time (which completes near-instantly however slow
+                # the wire is) and was *subtracted*, and the estimate had no
+                # visibility of how long the device's own buffer took to drain.
+                # Measured 2026-07-24: the ring cleared 6.1s before the audio
+                # actually stopped on a Retreat turn, 3.2s early on Lounge.
+                #
+                # playback_stats is emitted once the device's audio channel has
+                # drained after EOS, so it is the real end of audio. The timeout
+                # is only a backstop for the report never arriving (device drop,
+                # pre-v2.9 firmware): generous, because ending the turn early is
+                # the failure we are fixing. cancel_event is still raced — a
+                # barge-in or a mute usually lands in this window, and an
+                # uncancellable wait here is what caused the 5.7s dead window
+                # fixed on 2026-07-10.
+                audio_duration = len(speaker_pcm) / (SPEAKER_RATE * 2) + SPEAKER_PRIME_SECONDS
+                elapsed        = asyncio.get_event_loop().time() - t_stream_start
+                device.playback_send_ms = int(elapsed * 1000)
+                timeout        = audio_duration * 2 + 10.0
                 log.info(
-                    f"[{device.device_id}] Playback complete "
-                    f"(device-confirmed after {actual:.1f}s, est {audio_duration:.1f}s)"
+                    f"[{device.device_id}] Socket write took {elapsed:.1f}s "
+                    f"(NOT delivery — see delivery_ms), awaiting device "
+                    f"playback_stats (est {audio_duration:.1f}s, timeout {timeout:.1f}s)"
                 )
-            else:
-                # Ring held the full backstop. Either the device never
-                # reported (worth knowing) or delivery was pathological.
-                log.warning(
-                    f"[{device.device_id}] Playback completion timed out after "
-                    f"{timeout:.1f}s with no playback_stats — clearing ring anyway"
+                timeout_task = asyncio.create_task(asyncio.sleep(timeout))
+                await asyncio.wait(
+                    [done_task, cancel_task, timeout_task],
+                    return_when=asyncio.FIRST_COMPLETED,
                 )
-
-    # The real end of audio, not the end of the socket write. The device
-    # reports playback_stats once its audio channel drains after EOS, and
-    # everything above waits for exactly that — so this is the one place that
-    # knows the speaker has actually stopped. Clearing it in the stream task's
-    # finally instead dropped the tile out of Speaking seconds early (the write
-    # completes near-instantly), which is the same mistake the ring made until
-    # 2026-07-24.
-    await device._set_speaking(False)
-    cancel_task.cancel()
-    done_task.cancel()
+                if cancel_signal.is_set():
+                    log.info(f"[{device.device_id}] Cancelled during playback drain")
+                elif done_task.done():
+                    actual = asyncio.get_event_loop().time() - t_stream_start
+                    log.info(
+                        f"[{device.device_id}] Playback complete "
+                        f"(device-confirmed after {actual:.1f}s, est {audio_duration:.1f}s)"
+                    )
+                else:
+                    # Ring held the full backstop. Either the device never
+                    # reported (worth knowing) or delivery was pathological.
+                    log.warning(
+                        f"[{device.device_id}] Playback completion timed out after "
+                        f"{timeout:.1f}s with no playback_stats — clearing ring anyway"
+                    )
+    finally:
+        if timeout_task is not None:
+            timeout_task.cancel()
+        for task in (cancel_task, done_task, stream_task):
+            task.cancel()
+        await asyncio.gather(
+            cancel_task, done_task, stream_task,
+            *(() if timeout_task is None else (timeout_task,)),
+            return_exceptions=True,
+        )
+        # Normal playback reaches this only after the device reports its buffer
+        # drained. Cancellation means speaker_flush has discarded that buffer,
+        # so it must also retire the dashboard state.
+        await device._set_speaking(False)
 
 
 async def _run_post_turn_playback(
@@ -1644,34 +1647,6 @@ async def _run_voice_locked(device: Device, trigger_label: str = "unknown", is_w
         _wake_arbiter.release(device.device_id)
         # Conversation over — un-pause a media session this turn preempted.
         await em_player.resume_interrupted(device.device_id)
-
-
-async def _run_timer_speech_turn(device: Device, first_frame: bytes) -> None:
-    """Use HA STT to confirm speech before dismissing a timer alarm."""
-    if device.voice_lock.locked():
-        return
-
-    async def on_transcript(text: str) -> None:
-        if await api.dismiss_timer_alarm(device.device_id):
-            log.debug(
-                "[%s] Timer alarm dismissed by STT transcript: %r",
-                device.device_id, text,
-            )
-
-    device.oww_paused.set()
-    device.oww_paused_since = asyncio.get_event_loop().time()
-    await device.beam_lock()
-    try:
-        await _run_voice_locked(
-            device,
-            trigger_label="timer-speech",
-            is_wakeword=False,
-            initial_audio=(first_frame,),
-            on_transcript=on_transcript,
-            stt_only=True,
-        )
-    finally:
-        await device.beam_unlock()
 
 
 # ─── Button handler ───────────────────────────────────────────────────────────
@@ -2904,7 +2879,20 @@ async def _accept_capture_upload(device: Device, ws, completed) -> bool:
         enabled = device.save_wake_captures
     elif stop_model and model_name == stop_model:
         expected_model = stop_model
-        expected_md5 = getattr(device, "stop_classifier_md5", None)
+        # Unlike wake_status, stop_status carries no classifier digest
+        # (device/internal/client/control.go's stopStatusMessage sends only
+        # {ready, model[, error]}), so there is no device-reported checksum
+        # to read here the way device.oww_classifier_md5 is populated from
+        # wake_status. The controller is the distributing party, so it
+        # independently resolves the same file _wake_status_ready checks
+        # the wake model's report against — classifier_source() already
+        # handles "stop" as a builtin name, not a path, exactly like it does
+        # for wake models.
+        try:
+            source = em_oww_assets.classifier_source(device.stop_model)
+            expected_md5 = em_oww_assets.md5_file(source) if source is not None else None
+        except OSError:
+            expected_md5 = None
         # Stop captures use the dedicated flag; allow wake flag as fallback if
         # stop flag is not yet configured on older persisted configs.
         enabled = getattr(device, "save_stop_captures", False)

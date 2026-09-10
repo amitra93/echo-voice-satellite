@@ -10,6 +10,7 @@ import pytest
 
 sys.modules.setdefault("websockets", types.ModuleType("websockets"))
 import em_api
+import em_stop
 
 
 def run(awaitable):
@@ -154,13 +155,32 @@ def test_timer_event_is_broadcast_once_and_duplicate_is_idempotent(monkeypatch):
     assert events == [
         {"type": "timer.event", "device_id": "controller-dev", **body},
         {
-            "type": "timer.alarm", "device_id": "controller-dev", "state": "ringing",
-            "current": {
-                "timer_id": "01J", "name": "pizza", "total_seconds": 600,
-                "seconds_left": 0, "is_active": False, "ha_device_id": "ha-dev",
-            }, "queue": [],
+            "type": "timer.alarm", "device_id": "controller-dev", "state": "idle",
+            "current": None, "queue": [],
         },
     ]
+
+
+def test_timer_alarm_snapshot_includes_only_ringing_or_queued_alarms():
+    em_api._timer_sessions.clear()
+    ringing = em_api.em_timers.AlarmSession()
+    ringing.apply({"event": "finished", "timer_id": "pizza", "name": "Pizza"})
+    ringing.apply({"event": "finished", "timer_id": "pasta", "name": "Pasta"})
+    running_only = em_api.em_timers.AlarmSession()
+    running_only.apply({"event": "started", "timer_id": "tea"})
+    em_api._timer_sessions.update({"ringing": ringing, "running": running_only})
+
+    assert em_api._timer_alarm_snapshot() == [{
+        "device_id": "ringing",
+        "current": {
+            "timer_id": "pizza", "name": "Pizza", "total_seconds": 0,
+            "seconds_left": 0, "is_active": False, "ha_device_id": None,
+        },
+        "queue": [{
+            "timer_id": "pasta", "name": "Pasta", "total_seconds": 0,
+            "seconds_left": 0, "is_active": False, "ha_device_id": None,
+        }],
+    }]
 
 
 def test_timer_event_state_changes_are_forwarded_once_per_lifecycle_state(monkeypatch):
@@ -214,12 +234,9 @@ def test_timer_event_disconnect_discards_alarm_queue_and_publishes_idle(monkeypa
         events.append(event)
 
     monkeypatch.setattr(em_api, "_push_event", push)
-    request = Request(
-        {"event": "finished", "timer_id": "01J"},
-        match_info={"id": "controller-dev"},
-    )
-    run(em_api._post_timer_event.__wrapped__(request))
-    events.clear()
+    session = em_api.em_timers.AlarmSession()
+    session.apply({"event": "finished", "timer_id": "01J"})
+    em_api._timer_sessions["controller-dev"] = session
 
     run(em_api.notify_device_disconnected("controller-dev"))
 
@@ -334,10 +351,9 @@ def test_dismiss_timer_alarm_endpoint_dismisses_the_ringing_alarm(monkeypatch):
         events.append(event)
 
     monkeypatch.setattr(em_api, "_push_event", push)
-    run(em_api._post_timer_event.__wrapped__(Request(
-        {"event": "finished", "timer_id": "01J", "name": "pizza"},
-        match_info={"id": "controller-dev"},
-    )))
+    session = em_api.em_timers.AlarmSession()
+    session.apply({"event": "finished", "timer_id": "01J", "name": "pizza"})
+    em_api._timer_sessions["controller-dev"] = session
     events.clear()
 
     response = run(em_api._post_dismiss_timer_alarm.__wrapped__(Request(
@@ -415,8 +431,6 @@ def test_timer_alarm_state_callback_owns_leds_and_dashboard_state(monkeypatch):
             self.led_anim_capable = animated
             self.led_scene = {"timer_anim": {"pattern": "pulse"}, "listening": ["green"]}
             self.timer_firing = False
-            self.timer_alarm_audio_ready = True
-            self.timer_alarm_listen_after = 9.0
 
         async def send_led_anim(self, spec):
             calls.append(("anim", spec))
@@ -427,10 +441,18 @@ def test_timer_alarm_state_callback_owns_leds_and_dashboard_state(monkeypatch):
     async def leds_off(device):
         calls.append(("off", device))
 
+    async def leds_idle(device):
+        # _timer_state(firing=False) now resolves through leds_idle rather
+        # than the bare leds_off, so a running timer's countdown ring can
+        # take over the moment the alarm is dismissed.
+        calls.append(("idle", device))
+
     async def push(device):
         calls.append(("push", device.timer_firing))
 
-    fake_controller = types.SimpleNamespace(leds_off=leds_off, _push_device_state=push)
+    fake_controller = types.SimpleNamespace(
+        leds_off=leds_off, leds_idle=leds_idle, _push_device_state=push
+    )
     monkeypatch.setitem(sys.modules, "em_controller", fake_controller)
     animated = Device(True)
     legacy = Device(False)
@@ -440,8 +462,6 @@ def test_timer_alarm_state_callback_owns_leds_and_dashboard_state(monkeypatch):
         callback = em_api._timer_alarm_runner._on_state
         run(callback("animated", True))
         assert animated.timer_firing is True
-        assert animated.timer_alarm_audio_ready is False
-        assert animated.timer_alarm_listen_after == 0.0
         assert calls == [("anim", {"pattern": "pulse"}), ("push", True)]
 
         calls.clear()
@@ -450,7 +470,84 @@ def test_timer_alarm_state_callback_owns_leds_and_dashboard_state(monkeypatch):
 
         calls.clear()
         run(callback("animated", False))
-        assert calls == [("off", animated), ("push", False)]
+        assert calls == [("idle", animated), ("push", False)]
+    finally:
+        em_api._devices = old_devices
+        em_api._timer_alarm_runner = old_runner
+
+
+def test_timer_alarm_stop_word_is_armed_only_when_ready(monkeypatch):
+    old_devices = em_api._devices
+    old_runner = em_api._timer_alarm_runner
+    control = []
+    updates = []
+
+    class Device:
+        led_anim_capable = False
+        led_scene = {"listening": ["green"]}
+
+        def __init__(self, ready):
+            self.stopword_capable = True
+            self.stop_model_ready = ready
+            self.stop_generation = 100
+            self.stop_state = em_stop.StopState()
+            self.stop_threshold = 0.75
+            self.timer_stop_turn_id = None
+            self.timer_firing = False
+
+        async def send_control(self, message):
+            control.append(message)
+
+        async def set_leds(self, *_args, **_kwargs):
+            return None
+
+    async def idle(_device):
+        return None
+
+    async def push(_device):
+        return None
+
+    monkeypatch.setitem(
+        sys.modules, "em_controller",
+        types.SimpleNamespace(leds_idle=idle, _push_device_state=push),
+    )
+    turn_ids = iter((17, 18))
+    monkeypatch.setattr(em_api.db, "create_turn", lambda *_args: next(turn_ids))
+    monkeypatch.setattr(
+        em_api.db, "update_turn", lambda _turn_id, values: updates.append(values),
+    )
+    unavailable = Device(False)
+    ready = Device(True)
+    em_api._devices = {"unavailable": unavailable, "ready": ready}
+    try:
+        em_api.init(em_api._devices, {}, {})
+        callback = em_api._timer_alarm_runner._on_state
+        current = em_api._timer_alarm_runner._on_current
+
+        run(callback("unavailable", True))
+        run(current("unavailable"))
+        assert unavailable.timer_stop_turn_id is None
+        assert control == []
+
+        run(callback("ready", True))
+        run(current("ready"))
+        assert ready.timer_stop_turn_id == 17
+        assert control[0]["type"] == "stop_arm"
+        assert control[0]["phase"] == "timer"
+
+        # The next queued alarm replaces the old bounded arm rather than
+        # inheriting its nearly-expired 135-second stop-word window.
+        run(current("ready"))
+        assert ready.timer_stop_turn_id == 18
+        assert control[1] == {"type": "stop_disarm", "generation": 101}
+        assert control[2]["type"] == "stop_arm"
+        assert control[2]["generation"] == 102
+        assert updates == [{"outcome": "timeout"}]
+
+        run(callback("ready", False))
+        assert ready.timer_stop_turn_id is None
+        assert control[3] == {"type": "stop_disarm", "generation": 102}
+        assert updates == [{"outcome": "timeout"}, {"outcome": "ok"}]
     finally:
         em_api._devices = old_devices
         em_api._timer_alarm_runner = old_runner

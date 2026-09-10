@@ -16,13 +16,6 @@ LIFECYCLE_EVENTS = frozenset({"started", "updated", "cancelled", "finished"})
 ALARM_SOUND_FILE = "/app/sounds/timer_finished.flac"
 MAX_RING_S = 120.0
 BURST_GAP_S = 0.75
-ALARM_LISTEN_SETTLE_S = 0.40
-ALARM_SPEECH_RMS_MIN = 0.015
-
-
-def alarm_should_capture(rms: float, noise_floor: float) -> bool:
-    """Recognize a likely spoken dismissal over the alarm bed."""
-    return rms >= max(ALARM_SPEECH_RMS_MIN, noise_floor * 2.5)
 
 
 @dataclass(frozen=True)

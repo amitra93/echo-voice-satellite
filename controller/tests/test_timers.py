@@ -103,15 +103,3 @@ def test_late_finished_event_cannot_resurrect_a_cancelled_timer():
     assert transition.duplicate
     assert session.current is None
     assert session.queue == []
-
-
-def test_alarm_speech_threshold_has_absolute_and_noise_relative_floor():
-    assert not em_timers.alarm_should_capture(0.014, 0.001)
-    assert em_timers.alarm_should_capture(0.015, 0.001)
-    assert not em_timers.alarm_should_capture(0.024, 0.01)
-    assert em_timers.alarm_should_capture(0.025, 0.01)
-
-
-def test_alarm_waits_for_chime_tail_before_listening():
-    assert em_timers.ALARM_LISTEN_SETTLE_S > 0
-    assert em_timers.ALARM_LISTEN_SETTLE_S < em_timers.BURST_GAP_S

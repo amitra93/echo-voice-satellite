@@ -51,7 +51,10 @@ async def _events_ws(request):
     _require_key(request)
     ws = web.WebSocketResponse()
     await ws.prepare(request)
-    await ws.send_str(json.dumps({"type": "snapshot", "devices": [{"device_id": "ABC123"}]}))
+    await ws.send_str(json.dumps({
+        "type": "snapshot", "devices": [{"device_id": "ABC123"}],
+        "timer_alarms": [{"device_id": "ABC123", "current": {"timer_id": "t1"}, "queue": []}],
+    }))
     await ws.send_str(json.dumps({"type": "button.event", "device_id": "ABC123", "gesture": "long"}))
     async for _ in ws:
         pass
@@ -239,6 +242,7 @@ def test_events_connect_delivers_snapshot_then_dispatches_events():
 
     received = asyncio.run(_run(body))
     assert received[0]["type"] == "snapshot"
+    assert received[0]["timer_alarms"][0]["current"]["timer_id"] == "t1"
     assert received[1] == {"type": "button.event", "device_id": "ABC123", "gesture": "long"}
 
 

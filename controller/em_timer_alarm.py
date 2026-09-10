@@ -7,6 +7,7 @@ physical alarm task and is deliberately dependency-injected for testing.
 from __future__ import annotations
 
 import asyncio
+import logging
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -14,8 +15,12 @@ import em_player
 import em_timers
 
 
+log = logging.getLogger(__name__)
+
+
 PlaybackCallback = Callable[[object, bytes, asyncio.Event], Awaitable[None]]
 StateCallback = Callable[[str, bool], Awaitable[None]]
+CurrentCallback = Callable[[str], Awaitable[None]]
 # Fired after the runner itself mutates the session (unanswered-ring
 # timeout, undeliverable alarm) — the same moments the event-driven paths
 # push a fresh timer.alarm snapshot, and for the same reason: without it
@@ -32,6 +37,7 @@ class TimerAlarmRunner:
         playback: PlaybackCallback,
         *,
         on_state: StateCallback | None = None,
+        on_current: CurrentCallback | None = None,
         on_changed: ChangedCallback | None = None,
         sound_file: str = em_timers.ALARM_SOUND_FILE,
         max_ring_s: float = em_timers.MAX_RING_S,
@@ -39,6 +45,7 @@ class TimerAlarmRunner:
         self._get_device = get_device
         self._playback = playback
         self._on_state = on_state
+        self._on_current = on_current
         self._on_changed = on_changed
         self._sound_file = Path(sound_file)
         self._max_ring_s = max_ring_s
@@ -52,8 +59,6 @@ class TimerAlarmRunner:
             return False
         cancel = asyncio.Event()
         self._cancel[device_id] = cancel
-        if self._on_state is not None:
-            asyncio.create_task(self._on_state(device_id, True))
         task = asyncio.create_task(
             self._run(device_id, session, cancel),
             name=f"timer-alarm-{device_id}",
@@ -73,7 +78,12 @@ class TimerAlarmRunner:
         self._cancel[device_id].set()
         device = self._get_device(device_id)
         if device is not None:
-            await device.send_control({"type": "speaker_flush"})
+            try:
+                await device.send_control({"type": "speaker_flush"})
+            except Exception as e:
+                # A closed control socket cannot flush, but it must not leave
+                # the alarm task running after its device is gone.
+                log.info("[%s] Timer alarm flush skipped: %s", device_id, e)
         task.cancel()
         await asyncio.gather(task, return_exceptions=True)
         self._tasks.pop(device_id, None)
@@ -87,12 +97,15 @@ class TimerAlarmRunner:
         if self._on_changed is not None:
             await self._on_changed(device_id)
 
+    def _clock(self) -> float:
+        return asyncio.get_running_loop().time()
+
     async def _run(
         self, device_id: str, session: em_timers.AlarmSession, cancel: asyncio.Event
     ) -> None:
         device = self._get_device(device_id)
         if device is None:
-            session.delivery_failed()
+            session.disconnect()
             await self._notify_changed(device_id)
             return
         try:
@@ -102,32 +115,49 @@ class TimerAlarmRunner:
             # instead of returning empty bytes, and an uncaught raise here
             # would leave the session ringing with no task left to clear
             # it — the same silent-stuck shape as the paths below.
-            session.delivery_failed()
+            session.disconnect()
             await self._notify_changed(device_id)
             return
         if not pcm:
-            session.delivery_failed()
+            session.disconnect()
             await self._notify_changed(device_id)
             return
 
-        await em_player.interrupt(device_id)
-        deadline = asyncio.get_running_loop().time() + self._max_ring_s
+        firing = False
+        interrupted = False
+        current_timer_id: str | None = None
+        deadline = 0.0
         try:
+            if self._on_state is not None:
+                firing = True
+                await self._on_state(device_id, True)
+            await em_player.interrupt(device_id)
+            interrupted = True
             while session.current is not None and not cancel.is_set():
                 timer = session.current
+                if timer.timer_id != current_timer_id:
+                    current_timer_id = timer.timer_id
+                    if self._on_current is not None:
+                        await self._on_current(device_id)
+                    deadline = self._clock() + self._max_ring_s
                 await self._playback(device, pcm, cancel)
                 if cancel.is_set():
                     break
-                if asyncio.get_running_loop().time() >= deadline:
+                if self._clock() >= deadline:
                     session.timeout_current()
                     await self._notify_changed(device_id)
                     continue
                 await asyncio.sleep(em_timers.BURST_GAP_S)
         finally:
-            await em_player.resume_interrupted(device_id)
-            if self._on_state is not None:
-                await self._on_state(device_id, False)
-            self._cancel.pop(device_id, None)
+            try:
+                if interrupted:
+                    await em_player.resume_interrupted(device_id)
+            finally:
+                try:
+                    if firing and self._on_state is not None:
+                        await self._on_state(device_id, False)
+                finally:
+                    self._cancel.pop(device_id, None)
 
     async def _load_sound(self) -> bytes:
         if self._sound_cache is not None:

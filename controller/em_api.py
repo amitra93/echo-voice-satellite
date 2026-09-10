@@ -293,6 +293,21 @@ def get_timer_session(device_id: str) -> em_timers.AlarmSession | None:
     return _timer_sessions.get(device_id)
 
 
+def _timer_alarm_snapshot() -> list[dict]:
+    """Alarm presentation state for a newly connected event-stream client."""
+    snapshots = []
+    for device_id, session in _timer_sessions.items():
+        if session.current is None and not session.queue:
+            continue
+        snapshot = session.snapshot()
+        snapshots.append({
+            "device_id": device_id,
+            "current": snapshot["current"],
+            "queue": snapshot["queue"],
+        })
+    return snapshots
+
+
 def init(devices_ref: dict, shell_pending_ref: dict, shell_dashboard_ref: dict) -> None:
     """
     Bind live shared state from em_controller.
@@ -307,10 +322,41 @@ def init(devices_ref: dict, shell_pending_ref: dict, shell_dashboard_ref: dict) 
     async def _play(device, pcm, cancel):
         import em_controller
         await em_controller._run_post_turn_playback(device, pcm, cancel)
-        device.timer_alarm_audio_ready = True
-        device.timer_alarm_listen_after = (
-            asyncio.get_running_loop().time() + em_timers.ALARM_LISTEN_SETTLE_S
+
+    async def _disarm_timer_stop(device, outcome: str) -> None:
+        if getattr(device, "timer_stop_turn_id", None) is None:
+            return
+        turn_id, device.timer_stop_turn_id = device.timer_stop_turn_id, None
+        arm = device.stop_state.arm_state
+        if arm is not None and arm.turn_id == turn_id:
+            device.stop_state.disarm(arm.generation)
+            await device.send_control({"type": "stop_disarm", "generation": arm.generation})
+        await asyncio.get_running_loop().run_in_executor(
+            None, db.update_turn, turn_id, {"outcome": outcome},
         )
+
+    async def _timer_current(device_id: str) -> None:
+        device = _devices.get(device_id)
+        if (device is None or not getattr(device, "stopword_capable", False)
+                or not getattr(device, "stop_model_ready", False)):
+            return
+        # Each queued alarm receives its own bounded stop-word arm. Replacing
+        # the old arm also finalizes its synthetic timer-alert turn.
+        await _disarm_timer_stop(device, "timeout")
+        turn_id = await asyncio.get_running_loop().run_in_executor(
+            None, db.create_turn, device_id, "timer-alert"
+        )
+        device.stop_generation += 1
+        generation = device.stop_generation
+        if device.stop_state.arm(
+            turn_id, generation, "timer", asyncio.get_running_loop().time() + 135.0
+        ).action == "armed":
+            device.timer_stop_turn_id = turn_id
+            await device.send_control({
+                "type": "stop_arm", "turnId": str(turn_id),
+                "generation": generation, "phase": "timer", "expiryMs": 135_000,
+                "threshold": device.stop_threshold,
+            })
 
     async def _timer_state(device_id: str, firing: bool) -> None:
         import em_controller
@@ -318,41 +364,14 @@ def init(devices_ref: dict, shell_pending_ref: dict, shell_dashboard_ref: dict) 
         if device is None:
             return
         device.timer_firing = firing
-        device.timer_alarm_audio_ready = False
-        device.timer_alarm_listen_after = 0.0
         if firing:
-            # Timer audio has no Assist pipeline, but is still a real local
-            # voice-plane turn for stop's generation and persistence contract.
-            if (getattr(device, "stopword_capable", False)
-                    and getattr(device, "stop_model_ready", False)):
-                turn_id = await asyncio.get_running_loop().run_in_executor(
-                    None, db.create_turn, device_id, "timer-alert"
-                )
-                device.stop_generation += 1
-                generation = device.stop_generation
-                if device.stop_state.arm(turn_id, generation, "timer",
-                                         asyncio.get_running_loop().time() + 135.0).action == "armed":
-                    device.timer_stop_turn_id = turn_id
-                    await device.send_control({
-                        "type": "stop_arm", "turnId": str(turn_id),
-                        "generation": generation, "phase": "timer", "expiryMs": 135_000,
-                        "threshold": device.stop_threshold,
-                    })
             if device.led_anim_capable:
                 await device.send_led_anim(device.led_scene["timer_anim"])
             else:
                 await device.set_leds(device.led_scene["listening"], listening=True)
         else:
-            if getattr(device, "timer_stop_turn_id", None) is not None:
-                turn_id, device.timer_stop_turn_id = device.timer_stop_turn_id, None
-                arm = device.stop_state.arm_state
-                if arm is not None and arm.turn_id == turn_id:
-                    device.stop_state.disarm(arm.generation)
-                    await device.send_control({"type": "stop_disarm", "generation": arm.generation})
-                await asyncio.get_running_loop().run_in_executor(
-                    None, db.update_turn, turn_id, {"outcome": "ok"},
-                )
-            await em_controller.leds_off(device)
+            await _disarm_timer_stop(device, "ok")
+            await em_controller.leds_idle(device)
         await em_controller._push_device_state(device)
 
     async def _push_timer_alarm(device_id: str) -> None:
@@ -370,7 +389,8 @@ def init(devices_ref: dict, shell_pending_ref: dict, shell_dashboard_ref: dict) 
         })
 
     _timer_alarm_runner = em_timer_alarm.TimerAlarmRunner(
-        _devices.get, _play, on_state=_timer_state, on_changed=_push_timer_alarm
+        _devices.get, _play, on_state=_timer_state, on_current=_timer_current,
+        on_changed=_push_timer_alarm,
     )
 
     global _alarm_scheduler
@@ -1418,26 +1438,16 @@ async def _post_timer_event(request: web.Request) -> web.Response:
     forwarded = {"type": "timer.event", "device_id": device_id, **body}
     await _push_event(forwarded)
     device = _devices.get(device_id)
-    if event == "finished" and device is not None and device.muted:
-        # A muted device must not leak an expiry through the alarm worker. HA
-        # remains the timer authority; this only discards the local alert.
-        session.dismiss_all()
-        await _push_event({
-            "type": "timer.alarm",
-            "device_id": device_id,
-            **session.snapshot(),
-        })
-        log.info("[%s] Timer expiry discarded while muted", device_id)
+    if event == "finished":
+        # A finished timer and a fired alarm are the same delivery; both go
+        # through _deliver_finished so offline/muted discard and ring start
+        # stay identical. (fire_alarm() is the alarm side's caller.)
+        outcome = await _deliver_finished(device_id, session, transition)
+        log.info("[%s] Timer %s finished -> %s", device_id, timer_id, outcome)
         return _ok({"accepted": True, "duplicate": False, "timer_id": timer_id})
     if transition.alarm_changed:
-        await _push_event({
-            "type": "timer.alarm",
-            "device_id": device_id,
-            **session.snapshot(),
-        })
-        if session.current is not None and event == "finished" and _timer_alarm_runner:
-            if device is not None:
-                _timer_alarm_runner.start(device_id, session)
+        # A cancel can remove a queued finished timer from the ring queue.
+        await _push_alarm_snapshot(device_id, session)
     if event in {"started", "updated", "cancelled"} and device is not None and (
         not device.listening and not device.thinking and not device.speaking
     ):
@@ -4040,6 +4050,7 @@ async def _ws_events(request: web.Request) -> web.WebSocketResponse:
         await ws.send_str(json.dumps({
             "type":    "snapshot",
             "devices": [_merge_device(r) for r in rows],
+            "timer_alarms": _timer_alarm_snapshot(),
         }))
 
         async for msg in ws:

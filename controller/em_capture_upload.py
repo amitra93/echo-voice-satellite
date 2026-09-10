@@ -52,14 +52,20 @@ def validate_metadata(metadata: dict) -> dict:
         raise CaptureProtocolError("invalid model")
     if not isinstance(checksum, str) or not _MD5_RE.fullmatch(checksum):
         raise CaptureProtocolError("invalid classifier checksum")
-    if kind not in {"act", "miss"}:
+    # Wake captures are "act"/"miss"; the stop-word capture manager
+    # (device/internal/client/data.go's ConfigureStopCaptures) uses the same
+    # wire protocol with its own kinds, "stop_act"/"stop_miss", so this
+    # parser accepts both pairs — em_training_captures.py's KINDS tuple has
+    # included the stop pair since the feature was built; this was the one
+    # link in the chain that was never updated to match.
+    if kind not in {"act", "miss", "stop_act", "stop_miss"}:
         raise CaptureProtocolError("invalid kind")
     score = _number(metadata.get("score"), "score")
     threshold = _number(metadata.get("threshold"), "threshold")
     floor = _number(metadata.get("nearMissFloor"), "near-miss floor")
-    if kind == "act" and score < threshold:
+    if kind in {"act", "stop_act"} and score < threshold:
         raise CaptureProtocolError("activation below threshold")
-    if kind == "miss" and not floor < score < threshold:
+    if kind in {"miss", "stop_miss"} and not floor < score < threshold:
         raise CaptureProtocolError("near miss outside thresholds")
     if metadata.get("sampleRate") != 16000 or metadata.get("sampleWidth") != 2:
         raise CaptureProtocolError("invalid audio format")

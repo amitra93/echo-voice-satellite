@@ -50,7 +50,7 @@ underneath on its own plane and is ducked rather than displaced.
 |---|---|---|---|---|
 | 1 | Voice turn (wake word or button) | voice | `em_player.interrupt()` — **unconditional**, even with nothing playing | `resume_interrupted()` at turn end |
 | 2 | HA announcement | voice | same `interrupt()` path | announcement playback completes |
-| 3 | Timer alarm ring | voice | `em_timer_alarm.TimerAlarmRunner.start()`, bursts serialized through `device.speaker_lock` (an `asyncio.Lock`, not a counter) | dismissal (action-button tap, an STT-gated `stop` turn, or a wake word — none of which create an Assist response) or `MAX_RING_S` = 120s | **[today]** |
+| 3 | Timer alarm ring | voice | `em_timer_alarm.TimerAlarmRunner.start()`, bursts serialized through `device.speaker_lock` (an `asyncio.Lock`, not a counter) | action-button or card dismissal, a local `stop` match on a stop-word-ready device, or `MAX_RING_S` = 120s | **[today]** |
 | 4 | Media / music | music | `em_player.play()` | `stop()` / `pause()` / device gone |
 
 **Ownership is taken unconditionally, and that is deliberate** — not an
@@ -139,20 +139,18 @@ the whole reason the second plane exists.
 
 ### 5.3 Timer alarm **[today]**
 
-Full design and phase-by-phase implementation status:
-`docs/design/timers-design.md`, `docs/design/timers-implementation-update.md`.
+Implementation decisions and validation: `docs/design/timers-implementation-audit.md`
+and `docs/timer-validation.md`.
 
 | # | Precondition | Action | Status |
 |---|---|---|---|
 | T1 | HA sends a `finished` timer event | `em_timer_alarm.TimerAlarmRunner` starts (only if no alarm is already running for the device): interrupts music, loops chime bursts on `0x02`/`0x03`, and pulses the ring amber (`timer_anim`) if `led_anim_capable` | [today] |
 | T2 | a turn or announcement is already playing | held off structurally, not by a checked flag — the alarm's own playback callback acquires the **same** `device.speaker_lock` every other voice-plane writer does, so it simply waits its turn on the lock | [today] |
-| T3 | speech (with or without a wake word) heard over the ring | the mic stays live for the whole ring with no wake word required; RMS crossing a threshold (only checked during the gap between bursts, after `ALARM_LISTEN_SETTLE_S` past the last chime) starts an **STT-only** HA pipeline run (`stt_only=True`, ends at `PipelineStage.STT`) — no intent, no TTS, so a false trigger produces no spoken response | [today] |
-| T4 | dismissal — action-button tap (immediate, local), or the STT-only turn from T3 returning a non-empty transcript | ring stops, `speaker_flush`, `resume_interrupted()`, FIFO queue advances to the next finished timer if one is queued | [today] |
+| T3 | `stop` detected during the ring | A device with both `stopword` capability and a ready model dismisses locally. No Assist pipeline runs; devices without that capability retain action-button, card, and timeout dismissal only. | [today] |
+| T4 | dismissal — action-button tap, card action, or local stop-word match | ring stops, `speaker_flush`, `resume_interrupted()`, FIFO queue advances to the next finished timer if one is queued | [today] |
 | T5 | nobody answers | stops at `MAX_RING_S` = 120s and advances the queue the same as T4 | [today] |
 
-**There is no `speaker_busy` counter.** The prior design here used one, and it
-was replaced before shipping for the reason `docs/design/timers-design.md`'s
-"Speaker Ownership" section gives: a counter detects activity, it is not
+**There is no `speaker_busy` counter.** A counter detects activity, it is not
 mutual exclusion — a response can begin after checking the counter and before
 it starts writing PCM, which permits two writers on `0x02` at once. The
 per-device `device.speaker_lock` (`asyncio.Lock`) that replaced it is held for
@@ -163,14 +161,10 @@ own `asyncio.Event` per device (`em_timer_alarm.py`), never
 `Device.cancel_event`, because that event belongs to voice turns and
 dismissing an alarm must never cancel or flush an unrelated response.
 
-**No confirmation TTS is ever produced.** T3's mechanism is deliberately
-narrower than "duck the alert so a normal wake-triggered command gets
-through" — that would still let a false trigger (the chime's own tail, a TV,
-a nearby conversation) run a full Assist turn and speak an unsolicited
-response. Gating dismissal on a recognized non-empty transcript from an
-STT-only pipeline run, instead, means a false trigger produces silence at
-worst — the ring just keeps going — and HA never says "I've stopped all your
-timers" for a `stop` that was never actually said.
+**No confirmation TTS is ever produced.** The local stop-word match only
+dismisses the alarm; it never starts an Assist turn. This avoids treating the
+chime tail, television, or nearby conversation as a general voice command and
+keeps an unsupported device from advertising a speech path it cannot execute.
 
 ---
 
@@ -205,6 +199,5 @@ timers" for a `stop` that was never actually said.
    later alarm, for the life of the process. [today]
 6. **Frame types are direction-scoped.** `0x04`/`0x05` are not free to reuse.
 7. **A timer alarm's dismissal path must never itself produce a spoken
-   response.** Its speech detector runs an STT-only pipeline stage
-   specifically so a false trigger stays silent instead of running a normal
-   Assist turn against whatever noise was actually heard.
+    response.** A ready local stop-word detector may dismiss; it must not turn
+    the match into a normal Assist request.

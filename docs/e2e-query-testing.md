@@ -188,11 +188,11 @@ checklist, not in the manifest:
 - **HA-initiated announcements.** These start from Home Assistant
   (`assist_satellite.announce`), not from the device — there's no
   device-side trigger for this harness to drive.
-- **Timer alarm ringing, FIFO queueing, and dismissal.** `_run_timer_speech_turn`
-  (the live-mic "stop" dismissal) and the alarm queue itself are exercised
-  by `docs/timer-validation.md`'s hardware acceptance checklist, not here —
-  this harness can create/cancel/pause timers (see the `timers` category)
-  but can't make one finish and ring on cue.
+- **Timer alarm ringing, FIFO queueing, and dismissal.** The local stop-word,
+  action-button, and card-dismissal paths and the alarm queue are exercised by
+  `docs/timer-validation.md`'s hardware acceptance checklist, not here — this
+  harness can create/cancel/pause timers (see the `timers` category) but can't
+  make one finish and ring on cue.
 - **Muted timer expiry**, disconnect/reconnect mid-alarm, and action-button
   interplay (single/double/triple-tap, hold, mute interaction) — also
   `timer-validation.md` / manual hardware territory.

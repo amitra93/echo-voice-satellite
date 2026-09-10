@@ -7,13 +7,11 @@ shipped. The alarm remained controller-owned local PCM, as this note already
 anticipated as the fallback in its last paragraph, but dismissal did not need
 a correlated turn ID at all: the controller stops the ring itself
 (`em_timer_alarm.TimerAlarmRunner.stop()`, a dedicated per-device
-`asyncio.Event`, never `Device.cancel_event`) and a *separate*, short-lived
-STT-only HA pipeline run decides whether a `stop` was actually said, gated on
-a recognized non-empty transcript rather than on any turn-cancellation
-protocol. See `docs/design/timers-design.md` ("Speaker Ownership",
-"Dismissal") and `docs/design/timers-implementation-update.md` (Phase 4) for
-what was actually built, and `docs/audio-states.md` §5.3 for the shipped
-behaviour table. Left below for the reasoning it recorded at the time —
+`asyncio.Event`, never `Device.cancel_event`) and the device's local stop-word
+detector dismisses it only when that capability and model are ready. HACS has
+no timer-alert pipeline or cancellation protocol. See
+`../../docs/timer-validation.md` and `../../docs/audio-states.md` §5.3 for the shipped
+behaviour. Left below for the reasoning it recorded at the time —
 correlated ownership over an uncorrelated identifier was and remains the
 right call for anything that *does* reuse the turn-cancellation path.
 

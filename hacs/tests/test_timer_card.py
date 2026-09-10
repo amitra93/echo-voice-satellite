@@ -44,6 +44,23 @@ def test_timer_card_subscribes_instead_of_polling():
     assert "setInterval(() => this._render()" in source
 
 
+def test_timer_card_resubscribes_once_after_dom_reattachment():
+    source = _source()
+    hass_setter = source[source.index("set hass(hass)"):source.index("getCardSize()")]
+    connected = source[source.index("connectedCallback()"):source.index("disconnectedCallback()")]
+    disconnected = source[source.index("disconnectedCallback()"):source.index("_call(type, body)")]
+    subscribe = disconnected
+
+    # A card instance survives dashboard navigation. Its old subscription is
+    # removed on detach, so both a later hass assignment and reconnection must
+    # use one idempotent helper rather than a first-assignment-only branch.
+    assert "this._ensureSubscription()" in hass_setter
+    assert "this._ensureSubscription()" in connected
+    assert "this._unsubscribe = null" in disconnected
+    assert "this._unsubscribe || this._subscribing" in subscribe
+    assert "this.isConnected" in subscribe
+
+
 def test_timer_card_has_no_second_persistence_store_and_reads_no_timer_entities():
     source = _source()
     assert "localStorage" not in source

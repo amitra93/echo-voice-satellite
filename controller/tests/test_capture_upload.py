@@ -53,6 +53,28 @@ def test_valid_upload_round_trip():
     assert len(completed.pcm) == 2 * upload.FRAME_BYTES
 
 
+@pytest.mark.parametrize("kind,score", [("stop_act", 0.8), ("stop_miss", 0.2)])
+def test_stop_capture_kinds_are_accepted_alongside_wake_kinds(kind, score):
+    # device/internal/client/data.go's ConfigureStopCaptures uses the same
+    # wire protocol as wake captures, with its own kind pair. This parser
+    # must accept both, and apply the same score/threshold gating per kind
+    # (stop_act like act, stop_miss like miss).
+    completed = complete(meta=metadata(
+        captureId=f"{kind}:1", kind=kind, model="stop", score=score,
+    ))
+    assert completed.metadata["kind"] == kind
+
+
+def test_stop_act_below_threshold_is_still_rejected():
+    with pytest.raises(upload.CaptureProtocolError, match="activation below threshold"):
+        complete(meta=metadata(kind="stop_act", score=0.2, threshold=0.5))
+
+
+def test_stop_miss_outside_thresholds_is_still_rejected():
+    with pytest.raises(upload.CaptureProtocolError, match="near miss outside thresholds"):
+        complete(meta=metadata(kind="stop_miss", score=0.9, threshold=0.5, nearMissFloor=0.1))
+
+
 @pytest.mark.parametrize("field", ["score", "threshold", "nearMissFloor"])
 def test_numeric_provenance_fields_reject_strings_and_booleans(field):
     for value in ["0.8", True]:

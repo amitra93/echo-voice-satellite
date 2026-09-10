@@ -190,9 +190,15 @@ async def async_setup_entry(hass, entry) -> bool:
                 _LOGGER.debug("Dropped malformed BLE advert from %s", event.get("device_id"))
 
     async def _on_timer_alarm(event: dict) -> None:
-        if event.get("type") == "timer.alarm":
+        if event.get("type") == "snapshot":
+            timer_card_hub.hydrate_alarm_snapshot(event.get("timer_alarms"))
+        elif event.get("type") == "timer.alarm":
             timer_card_hub.notify_alarm_event(event)
 
+    # The controller's first /api/events message is the recovery snapshot.
+    # Register before opening that stream so an alarm cannot arrive between
+    # snapshot receipt and this listener becoming reachable.
+    coordinator.async_add_event_listener(_on_timer_alarm)
     try:
         await coordinator.async_config_entry_first_refresh()
         await coordinator.async_connect_control()
@@ -203,7 +209,6 @@ async def async_setup_entry(hass, entry) -> bool:
     _sync_ble_scanners()
     coordinator.async_add_listener(_sync_ble_scanners)
     coordinator.async_add_event_listener(_on_event)
-    coordinator.async_add_event_listener(_on_timer_alarm)
 
     hass.data.setdefault(DOMAIN, {})[entry.entry_id] = {
         "client": client, "coordinator": coordinator, "ble_scanners": ble_scanners,
@@ -214,9 +219,13 @@ async def async_setup_entry(hass, entry) -> bool:
 
 
 async def async_unload_entry(hass, entry) -> bool:
-    data = hass.data[DOMAIN].pop(entry.entry_id)
+    data = hass.data[DOMAIN][entry.entry_id]
+    unloaded = await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    if not unloaded:
+        return False
+    hass.data[DOMAIN].pop(entry.entry_id)
     for _scanner, cancel in data["ble_scanners"].values():
         cancel()
     await data["coordinator"].async_shutdown()
     await data["client"].async_close()
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    return True
