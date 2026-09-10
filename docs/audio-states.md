@@ -5,9 +5,8 @@ want it at once.
 
 This exists for the same reason `led-ring-states.md` does. Four things can now
 put audio on a device — a voice response, music, an HA announcement, and a
-timer alarm (see `docs/design/timers-design.md` and
-`docs/design/timers-implementation-update.md` for the timer alarm's own
-design/status) — and each was added on its own, correct in isolation. The
+timer alarm (see `docs/timer-validation.md` for its test contract) — and each
+was added on its own, correct in isolation. The
 interactions between them are where the open bugs live: #261 (the duck lifting
 mid-response), #262 (music deferred until a turn ends), #243 (whether the
 output chain belongs device-side at all).

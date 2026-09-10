@@ -7,8 +7,7 @@ second half locally stubs `homeassistant.components.websocket_api` — the
 same per-test sys.modules stubbing pattern test_assist_satellite.py uses
 for `homeassistant.components.intent` — to prove the registration wiring
 itself calls the hub correctly against a faithful fake of the real API
-shape (introspected against a live Home Assistant install; see
-docs/design/timers-implementation-update.md).
+shape (introspected against a live Home Assistant install).
 """
 
 import asyncio
@@ -207,8 +206,7 @@ def fake_websocket_api(monkeypatch):
     """Mirrors the real homeassistant.components.websocket_api surface this
     module depends on (websocket_command/async_response/callback as
     decorators carrying `_ws_command`, async_register_command storing by
-    that command name) — verified against a live Home Assistant install;
-    see timer_card.py's docstring and docs/design/timers-implementation-update.md."""
+    that command name) — verified against a live Home Assistant install."""
     ws_mod = types.ModuleType("homeassistant.components.websocket_api")
     registered: dict[str, object] = {}
 

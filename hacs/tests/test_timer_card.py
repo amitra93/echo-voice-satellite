@@ -3,9 +3,8 @@
 The card has no build step and this repo has no JS test runner, so —
 matching the established pattern for this asset — these tests read the
 shipped source rather than executing it. `node --check` (run in CI
-alongside these) already proves it parses; these pin the behavioural
-properties docs/design/timers-design.md's Data Contract and Frontend card
-test sections require.
+alongside these) already proves it parses; these pin the card's behavioural
+and lifecycle contract.
 """
 
 from pathlib import Path

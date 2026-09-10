@@ -144,7 +144,7 @@ prints the same information).
 | `G-muted` | Muted device refuses `test_turn` → `409 device_muted`. The runner mutes/restores the device itself. |
 | `G-busy` | A second `test_turn` while one is running → `409 test_turn_busy`. |
 
-### timers — LLM-backed pipeline (see `docs/design/timers-design.md`)
+### timers — LLM-backed pipeline (see `docs/timer-validation.md`)
 
 | id | what it tests |
 |---|---|

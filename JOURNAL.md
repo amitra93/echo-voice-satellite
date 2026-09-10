@@ -1471,12 +1471,12 @@ are **append-only and in ascending date order** — new work goes at the end.
   current-facing documentation now lists only supported controls.
 
 - 2026-09-03 (**native timers, all six phases, and three bugs found by
-  actually using them**): `docs/design/timers-design.md` shipped end to end —
+  actually using them**): the native-timer implementation shipped end to end —
   Home Assistant's own `TimerManager`/Assist intents remain the only timer
   record that exists, the controller owns nothing but the physical alarm
   (queue, playback, LEDs, local dismissal), and the HACS integration bridges
-  the two. See `docs/design/timers-implementation-update.md` for the
-  phase-by-phase build status this entry summarizes.
+  the two. `docs/design/timers-implementation-audit.md` records the retained
+  implementation decisions and validation status.
 
   **The alert design changed twice after the first version worked.** It
   originally spoke the timer's name over the chime and dismissed on a plain

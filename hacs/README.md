@@ -55,11 +55,30 @@ every EchoMuse timer across the fleet — active, paused, and (unlike Home
 Assistant's own timer entities) still visible and dismissable while
 ringing. Backed by `timer_card.py`'s
 `echo_voice_satellite/timers/*` WebSocket commands, not a second `timer.*`
-entity per device. See
-[`docs/design/timers-design.md`](../docs/design/timers-design.md#home-assistant-timer-dashboard)
-for the data contract and
-[`docs/design/timers-implementation-update.md`](../docs/design/timers-implementation-update.md)
-for what's built.
+   entity per device. Its snapshot contract and hardware acceptance coverage
+   are in [`docs/timer-validation.md`](../docs/timer-validation.md).
+
+## Alarms (voice + card)
+
+Wall-clock alarms ("7am every weekday") are a separate feature from countdown
+timers — they share only the ring. Because Home Assistant has no alarm concept,
+alarms are owned by the EchoMuse controller (durable in its SQLite, survive a
+controller restart, timezone- and DST-correct); this integration provides the
+two interfaces:
+
+- **Assist LLM tools**: `EchomuseSetOneOffAlarm`,
+  `EchomuseSetPeriodicAlarm`, `EchomuseCancelAlarm`, and
+  `EchomuseListAlarms`. They are available only to a tool-capable Assist agent
+  using HA's Assist API for a turn from an EchoMuse satellite. There are no
+  custom alarm intents or sentence files to install (see
+  [`docs/alarm-validation.md`](../docs/alarm-validation.md)).
+- **Card** `custom:echo-voice-alarms-card` (`www/echo-voice-alarms-card.js`),
+  backed by `alarm_card.py`'s `echo_voice_satellite/alarms/*` WebSocket
+  commands, to create and cancel alarms per device. Alarms are immutable after
+  creation; create a replacement instead of editing one.
+
+The default timezone for a new alarm is the device's timezone, seeded from
+`hass.config.time_zone` on setup. Design: `docs/design/alarms-design.md`.
 
 ## Speech-to-text via Gemini 3.5 Transcribe (Live)
 

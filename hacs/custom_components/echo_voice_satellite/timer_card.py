@@ -1,10 +1,9 @@
 """Backend for the `echo-voice-timers-card` Lovelace card.
 
 Home Assistant's `TimerManager` is authoritative for every active and
-paused timer (docs/design/timers-design.md "Data Contract") — this module
-is the one deliberate boundary that reaches into its internals for
-ID-addressed UI actions, kept in its own module with its own tests per that
-same design note.
+paused timer. This module is the one deliberate boundary that reaches into its
+internals for ID-addressed UI actions, kept in its own module with its own
+tests.
 
 It layers two things `TimerManager` cannot provide on its own:
 
